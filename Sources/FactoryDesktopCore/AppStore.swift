@@ -1,0 +1,565 @@
+import Combine
+import Foundation
+
+@MainActor
+public final class AppStore: ObservableObject {
+    @Published public private(set) var projects: [Project] = []
+    @Published public private(set) var tasks: [FactoryTask] = []
+    @Published public private(set) var runs: [RunRecord] = []
+    @Published public private(set) var artifacts: [Artifact] = []
+    @Published public var selectedProjectID: String?
+    @Published public var selectedTaskID: String?
+    @Published public var selectedModel: String = ModelPolicy.plannerDefault
+    @Published public var gitSnapshot: GitSnapshot = GitSnapshot()
+    @Published public var selectedRunOutput: String = ""
+    @Published public var statusMessage: String = ""
+    @Published public var errorMessage: String?
+    @Published public var isWorking: Bool = false
+
+    public let paths: FactoryPaths
+
+    private var database: SQLiteDatabase?
+    private var repository: FactoryRepository?
+    private var commandRunner: CommandRunner
+    private var gitService: GitService?
+    private var ollamaClient: OllamaClient
+    private var handoffService: HandoffService
+
+    public var selectedProject: Project? {
+        guard let selectedProjectID else { return projects.first }
+        return projects.first { $0.id == selectedProjectID }
+    }
+
+    public var selectedTask: FactoryTask? {
+        guard let selectedTaskID else {
+            return selectedProject.map { project in
+                tasks.first { $0.projectId == project.id }
+            } ?? nil
+        }
+        return tasks.first { $0.id == selectedTaskID }
+    }
+
+    public var tasksForSelectedProject: [FactoryTask] {
+        guard let project = selectedProject else { return [] }
+        return tasks.filter { $0.projectId == project.id }
+    }
+
+    public var runsForSelectedTask: [RunRecord] {
+        guard let task = selectedTask else { return [] }
+        return runs.filter { $0.taskId == task.id }
+    }
+
+    public init(paths: FactoryPaths = FactoryPaths()) {
+        self.paths = paths
+        self.commandRunner = CommandRunner()
+        self.ollamaClient = OllamaClient()
+        self.handoffService = HandoffService(paths: paths)
+
+        do {
+            try paths.ensureBaseDirectories()
+            let database = try SQLiteDatabase(url: paths.database)
+            try MigrationRunner(database: database, paths: paths).migrate()
+            self.database = database
+            self.repository = FactoryRepository(database: database)
+            self.gitService = GitService(commandRunner: commandRunner, paths: paths)
+            try reload()
+            statusMessage = "Ready. SQLite: \(paths.database.path)"
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func reload() throws {
+        guard let repository else { return }
+        projects = try repository.projects()
+        tasks = try repository.tasks()
+        if selectedProjectID == nil {
+            selectedProjectID = projects.first?.id
+        }
+        if let selectedProjectID, selectedTaskID == nil {
+            selectedTaskID = tasks.first { $0.projectId == selectedProjectID }?.id
+        }
+        try reloadRunsAndArtifacts()
+    }
+
+    public func reloadRunsAndArtifacts() throws {
+        guard let repository else { return }
+        if let selectedTask {
+            runs = try repository.runs(taskId: selectedTask.id)
+            artifacts = try repository.artifacts(taskId: selectedTask.id)
+        } else {
+            runs = []
+            artifacts = []
+        }
+    }
+
+    public func selectProject(_ projectID: String?) {
+        selectedProjectID = projectID
+        selectedTaskID = tasks.first { $0.projectId == projectID }?.id
+        Task { await refreshGitStatus() }
+        do {
+            try reloadRunsAndArtifacts()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func selectTask(_ taskID: String?) {
+        selectedTaskID = taskID
+        selectedRunOutput = ""
+        Task { await refreshGitStatus() }
+        do {
+            try reloadRunsAndArtifacts()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func registerProject(name: String, type: ProjectType, path: String, defaultBranch: String, testCommandsText: String) {
+        perform {
+            guard let repository = self.repository else { return }
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw FactoryError.invalidProjectPath(path)
+            }
+
+            let project = Project(
+                name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? url.lastPathComponent : name,
+                type: type,
+                path: url.path,
+                defaultBranch: defaultBranch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "main" : defaultBranch,
+                testCommands: Self.lines(from: testCommandsText),
+                metadata: [:],
+                updatedAt: Date()
+            )
+            try repository.upsert(project: project)
+            try self.reload()
+            self.selectedProjectID = self.projects.first { $0.path == url.path }?.id
+            self.statusMessage = "Registered \(project.name)."
+        }
+    }
+
+    public func registerSelfProject() {
+        let root = SelfRepoLocator.sourceRoot
+        registerProject(
+            name: "factory-desktop",
+            type: .codeRepo,
+            path: root.path,
+            defaultBranch: "main",
+            testCommandsText: "swift test"
+        )
+    }
+
+    public func createTask(title: String, type: TaskType, goal: String = "") {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject else {
+                throw FactoryError.missingSelection
+            }
+            let task = FactoryTask(
+                projectId: project.id,
+                title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled task" : title,
+                type: type,
+                status: .inbox,
+                goal: goal
+            )
+            try repository.upsert(task: task)
+            try self.reload()
+            self.selectedProjectID = project.id
+            self.selectedTaskID = task.id
+            self.statusMessage = "Created task \(task.title)."
+        }
+    }
+
+    public func saveTask(_ task: FactoryTask) {
+        perform {
+            guard let repository = self.repository else { return }
+            var updated = task
+            updated.updatedAt = Date()
+            try repository.upsert(task: updated)
+            try self.reload()
+            self.selectedTaskID = updated.id
+            self.statusMessage = "Saved task."
+        }
+    }
+
+    public func deleteSelectedTask() {
+        perform {
+            guard let repository = self.repository, let task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            try repository.deleteTask(id: task.id)
+            try self.reload()
+            self.statusMessage = "Deleted task."
+        }
+    }
+
+    public func refreshGitStatus() async {
+        guard let project = selectedProject else { return }
+        guard project.type == .codeRepo else {
+            gitSnapshot = GitSnapshot(statusText: "Non-code project. Worktrees are skipped; use the artifact folder.", worktreePath: project.path)
+            return
+        }
+        guard let gitService else { return }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            gitSnapshot = try await gitService.snapshot(project: project, task: selectedTask)
+            statusMessage = "Git status refreshed."
+        } catch {
+            gitSnapshot = GitSnapshot(statusText: error.localizedDescription, worktreePath: project.path)
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func createWorktree(flavor: WorktreeFlavor) async {
+        guard let project = selectedProject, var task = selectedTask, let repository, let gitService else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let result = try await gitService.createWorktree(project: project, task: task, flavor: flavor)
+            switch flavor {
+            case .local:
+                task.localBranch = result.branch
+                task.localWorktreePath = result.path
+            case .codex:
+                task.codexBranch = result.branch
+                task.codexWorktreePath = result.path
+            }
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
+            try reload()
+            selectedTaskID = task.id
+            statusMessage = "Created \(flavor.rawValue) worktree at \(result.path)."
+            await refreshGitStatus()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func planLocally() async {
+        guard let project = selectedProject, var task = selectedTask, let repository else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+
+        let runID = UUID().uuidString
+        let directory = paths.runDirectory(project: project, task: task)
+        let promptURL = directory.appendingPathComponent("\(runID.shortID)-planner-prompt.md")
+        let outputURL = directory.appendingPathComponent("\(runID.shortID)-planner-output.md")
+        let prompt = plannerPrompt(project: project, task: task)
+        var run = RunRecord(
+            id: runID,
+            taskId: task.id,
+            executor: "local_ollama",
+            model: selectedModel,
+            status: .running,
+            promptPath: promptURL.path,
+            outputPath: outputURL.path,
+            summary: "Planning with \(selectedModel)"
+        )
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try prompt.write(to: promptURL, atomically: true, encoding: .utf8)
+            task.status = .planning
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
+            try repository.upsert(run: run)
+            try reload()
+            selectedTaskID = task.id
+
+            let output = try await ollamaClient.generate(
+                model: selectedModel,
+                prompt: prompt,
+                contextTokens: ModelPolicy.effectiveContext(for: selectedModel)
+            )
+            try output.write(to: outputURL, atomically: true, encoding: .utf8)
+            run.status = .succeeded
+            run.summary = "Planner output saved."
+            run.endedAt = Date()
+            task.status = .needsReview
+            task.updatedAt = Date()
+            try repository.upsert(run: run)
+            try repository.upsert(task: task)
+            try reload()
+            selectedTaskID = task.id
+            selectedRunOutput = output
+            statusMessage = "Local plan completed."
+        } catch {
+            let output = "Planner failed: \(error.localizedDescription)"
+            try? output.write(to: outputURL, atomically: true, encoding: .utf8)
+            run.status = .failed
+            run.summary = output
+            run.endedAt = Date()
+            try? repository.upsert(run: run)
+            try? reload()
+            selectedTaskID = task.id
+            selectedRunOutput = output
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func generateCodexHandoff() {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject, let task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            let url = try self.handoffService.codexHandoff(project: project, task: task, gitSnapshot: self.gitSnapshot)
+            let artifact = Artifact(taskId: task.id, type: "codex_handoff", path: url.path, description: "Codex handoff markdown")
+            try repository.insert(artifact: artifact)
+            try self.reloadRunsAndArtifacts()
+            self.statusMessage = "Wrote Codex handoff to \(url.path)."
+        }
+    }
+
+    public func sendToCodex() async {
+        if selectedTask?.codexWorktreePath == nil {
+            await createWorktree(flavor: .codex)
+        }
+        await refreshGitStatus()
+        generateCodexHandoff()
+
+        guard let path = selectedTask?.codexWorktreePath, let gitService else {
+            errorMessage = "Create a Codex worktree first."
+            return
+        }
+        do {
+            _ = try await gitService.openTerminal(path: path)
+            statusMessage = "Opened Terminal in Codex worktree. Run `codex` and use the generated handoff."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func openVSCodeForSelectedTask(preferCodex: Bool = false) async {
+        guard let project = selectedProject, let gitService else { return }
+        let path: String
+        if project.type == .codeRepo {
+            if preferCodex, let codex = selectedTask?.codexWorktreePath {
+                path = codex
+            } else if let local = selectedTask?.localWorktreePath {
+                path = local
+            } else if let codex = selectedTask?.codexWorktreePath {
+                path = codex
+            } else {
+                errorMessage = "Create a task worktree before opening a code project."
+                return
+            }
+        } else {
+            path = paths.runDirectory(project: project, task: selectedTask ?? FactoryTask(projectId: project.id, title: "Project notes")).path
+            try? FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        }
+
+        do {
+            _ = try await gitService.openVSCode(path: path)
+            statusMessage = "Opened VS Code at \(path)."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func runFirstTestCommand() async {
+        guard let project = selectedProject, let task = selectedTask, let repository, let gitService else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        guard let command = project.testCommands.first else {
+            errorMessage = "No test command configured for \(project.name)."
+            return
+        }
+        let worktreePath = task.localWorktreePath ?? task.codexWorktreePath
+        guard let worktreePath else {
+            errorMessage = "Create a task worktree before running tests."
+            return
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        let runID = UUID().uuidString
+        let directory = paths.runDirectory(project: project, task: task)
+        let outputURL = directory.appendingPathComponent("\(runID.shortID)-test-output.txt")
+        var run = RunRecord(
+            id: runID,
+            taskId: task.id,
+            executor: "command",
+            model: nil,
+            status: .running,
+            promptPath: nil,
+            outputPath: outputURL.path,
+            summary: command
+        )
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try repository.upsert(run: run)
+            let result = try await gitService.runTestCommand(command, in: worktreePath)
+            try result.output.write(to: outputURL, atomically: true, encoding: .utf8)
+            run.status = .succeeded
+            run.summary = "Passed: \(command)"
+            run.endedAt = Date()
+            try repository.upsert(run: run)
+            try reload()
+            selectedRunOutput = result.output
+            statusMessage = "Test command passed."
+        } catch {
+            let output = error.localizedDescription
+            try? output.write(to: outputURL, atomically: true, encoding: .utf8)
+            run.status = .failed
+            run.summary = "Failed: \(command)"
+            run.endedAt = Date()
+            try? repository.upsert(run: run)
+            try? reload()
+            selectedRunOutput = output
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func generateReviewNote() {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject, let task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            let url = try self.handoffService.reviewNote(
+                project: project,
+                task: task,
+                gitSnapshot: self.gitSnapshot,
+                latestRun: self.runsForSelectedTask.first
+            )
+            let artifact = Artifact(taskId: task.id, type: "review_note", path: url.path, description: "Review note")
+            try repository.insert(artifact: artifact)
+            try self.reloadRunsAndArtifacts()
+            self.statusMessage = "Wrote review note to \(url.path)."
+        }
+    }
+
+    public func commitSelectedWorktree(message: String) async {
+        guard let project = selectedProject, let task = selectedTask, let gitService else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        guard let path = task.localWorktreePath ?? task.codexWorktreePath else {
+            errorMessage = "Create a task worktree before committing."
+            return
+        }
+        let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedMessage.isEmpty else {
+            errorMessage = "Enter a commit message first."
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let result = try await gitService.commitAll(path: path, defaultBranch: project.defaultBranch, message: trimmedMessage)
+            selectedRunOutput = result.output
+            statusMessage = "Commit completed."
+            await refreshGitStatus()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func loadRunOutput(_ run: RunRecord) {
+        guard let outputPath = run.outputPath else {
+            selectedRunOutput = ""
+            return
+        }
+        selectedRunOutput = (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? ""
+    }
+
+    public func backupDatabaseNow() {
+        perform {
+            let timestamp = DateFormatter.backup.string(from: Date())
+            let destination = self.paths.snapshots.appendingPathComponent("factory-manual-backup-\(timestamp).db")
+            try FileManager.default.copyItem(at: self.paths.database, to: destination)
+            self.statusMessage = "Backed up database to \(destination.path)."
+        }
+    }
+
+    private func perform(_ body: () throws -> Void) {
+        do {
+            try body()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func plannerPrompt(project: Project, task: FactoryTask) -> String {
+        let acceptance = task.acceptanceCriteria.isEmpty
+            ? "- Define acceptance checks in your plan."
+            : task.acceptanceCriteria.map { "- \($0)" }.joined(separator: "\n")
+        let tests = project.testCommands.isEmpty
+            ? "- No test commands configured."
+            : project.testCommands.map { "- \($0)" }.joined(separator: "\n")
+        let gitStatus = gitSnapshot.statusText.isEmpty ? "Not refreshed yet." : gitSnapshot.statusText
+
+        return """
+        You are Factory Desktop's local planning model.
+        Generate a concise, implementation-ready plan. Do not edit files. Do not propose destructive commands.
+
+        Model policy:
+        - Use 64k context by default.
+        - Do not use qwen3.5:9b above 128k.
+        - Do not use granite4.1:3b above 64k.
+        - Do not use 256k globally.
+
+        Project:
+        - Name: \(project.name)
+        - Type: \(project.type.rawValue)
+        - Path: \(project.path)
+        - Default branch: \(project.defaultBranch)
+
+        Task:
+        - ID: \(task.id)
+        - Title: \(task.title)
+        - Type: \(task.type.rawValue)
+        - Status: \(task.status.rawValue)
+        - Priority: \(task.priority.rawValue)
+
+        Goal:
+        \(task.goal.isEmpty ? task.title : task.goal)
+
+        Context:
+        \(task.context.isEmpty ? "No extra context provided." : task.context)
+
+        Acceptance criteria:
+        \(acceptance)
+
+        Test commands:
+        \(tests)
+
+        Current git status:
+        ```text
+        \(gitStatus)
+        ```
+
+        Output format:
+        1. Understanding
+        2. Proposed plan
+        3. Files or artifacts likely involved
+        4. Verification checklist
+        5. Risks and questions
+        """
+    }
+
+    private static func lines(from text: String) -> [String] {
+        text
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+}
+
+private extension DateFormatter {
+    static let backup: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter
+    }()
+}
