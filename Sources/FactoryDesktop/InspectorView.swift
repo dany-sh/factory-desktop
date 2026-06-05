@@ -71,67 +71,62 @@ struct InspectorView: View {
 
     private var actionCard: some View {
         InspectorCard(title: "Actions") {
-            Button {
-                Task { await store.refreshGitStatus() }
-            } label: {
-                Label("Refresh Git Status", systemImage: "arrow.clockwise")
-                    .frame(maxWidth: .infinity)
-            }
+            VStack(alignment: .leading, spacing: 8) {
+                Button {
+                    Task { await store.refreshGitStatus() }
+                } label: {
+                    Label("Refresh Git Status", systemImage: "arrow.clockwise")
+                }
 
-            Button {
-                Task { await store.createWorktree(flavor: .local) }
-            } label: {
-                Label("Create Local Worktree", systemImage: "point.3.connected.trianglepath.dotted")
-                    .frame(maxWidth: .infinity)
-            }
-            .disabled(store.selectedProject?.type != .codeRepo || store.selectedTask == nil || store.isWorking)
+                Button {
+                    Task { await store.createWorktree(flavor: .local) }
+                } label: {
+                    Label("Create Local Worktree", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+                .disabled(store.selectedProject?.type != .codeRepo || store.selectedTask == nil || store.isWorking)
 
-            Button {
-                Task { await store.createWorktree(flavor: .codex) }
-            } label: {
-                Label("Create Codex Worktree", systemImage: "terminal")
-                    .frame(maxWidth: .infinity)
-            }
-            .disabled(store.selectedProject?.type != .codeRepo || store.selectedTask == nil || store.isWorking)
+                Button {
+                    Task { await store.createWorktree(flavor: .codex) }
+                } label: {
+                    Label("Create Codex Worktree", systemImage: "terminal")
+                }
+                .disabled(store.selectedProject?.type != .codeRepo || store.selectedTask == nil || store.isWorking)
 
-            Button {
-                Task { await store.openVSCodeForSelectedTask() }
-            } label: {
-                Label("Open VS Code", systemImage: "curlybraces.square")
-                    .frame(maxWidth: .infinity)
-            }
+                Button {
+                    Task { await store.openVSCodeForSelectedTask() }
+                } label: {
+                    Label("Open VS Code", systemImage: "curlybraces.square")
+                }
 
-            Button {
-                Task { await store.planLocally() }
-            } label: {
-                Label("Plan Locally", systemImage: "brain")
-                    .frame(maxWidth: .infinity)
-            }
-            .disabled(store.selectedTask == nil || store.isWorking)
+                Button {
+                    Task { await store.planLocally() }
+                } label: {
+                    Label("Plan Locally", systemImage: "brain")
+                }
+                .disabled(store.selectedTask == nil || store.isWorking)
 
-            Button {
-                Task { await store.sendToCodex() }
-            } label: {
-                Label("Send to Codex", systemImage: "paperplane")
-                    .frame(maxWidth: .infinity)
-            }
-            .disabled(store.selectedTask == nil || store.isWorking)
+                Button {
+                    Task { await store.sendToCodex() }
+                } label: {
+                    Label("Send to Codex", systemImage: "paperplane")
+                }
+                .disabled(store.selectedTask == nil || store.isWorking)
 
-            Button {
-                Task { await store.runFirstTestCommand() }
-            } label: {
-                Label("Run First Test Command", systemImage: "checkmark.seal")
-                    .frame(maxWidth: .infinity)
-            }
-            .disabled(store.selectedTask == nil || store.isWorking)
+                Button {
+                    Task { await store.runFirstTestCommand() }
+                } label: {
+                    Label("Run First Test Command", systemImage: "checkmark.seal")
+                }
+                .disabled(store.selectedTask == nil || store.isWorking)
 
-            Button {
-                store.generateReviewNote()
-            } label: {
-                Label("Generate Review Note", systemImage: "doc.badge.clock")
-                    .frame(maxWidth: .infinity)
+                Button {
+                    store.generateReviewNote()
+                } label: {
+                    Label("Generate Review Note", systemImage: "doc.badge.clock")
+                }
+                .disabled(store.selectedTask == nil)
             }
-            .disabled(store.selectedTask == nil)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Divider()
             TextField("Commit message", text: $commitMessage)
@@ -139,7 +134,6 @@ struct InspectorView: View {
                 showingCommitConfirmation = true
             } label: {
                 Label("Commit Selected Worktree", systemImage: "checkmark.circle")
-                    .frame(maxWidth: .infinity)
             }
             .disabled(commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.selectedTask == nil || store.isWorking)
         }

@@ -3,25 +3,20 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
+    @EnvironmentObject private var router: AppRouter
     @State private var showingProjectSheet = false
     @State private var showingTaskSheet = false
-    @State private var showingSettings = false
 
     var body: some View {
-        NavigationSplitView {
-            SidebarView(
-                showingProjectSheet: $showingProjectSheet,
-                showingTaskSheet: $showingTaskSheet,
-                showingSettings: $showingSettings
-            )
-            .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
-        } content: {
-            TaskDetailView()
-                .navigationSplitViewColumnWidth(min: 460, ideal: 680)
-        } detail: {
-            InspectorView()
-                .navigationSplitViewColumnWidth(min: 320, ideal: 380, max: 460)
+        Group {
+            switch router.screen {
+            case .main:
+                mainView
+            case .settings:
+                SettingsView()
+            }
         }
+        .frame(minWidth: 1040, minHeight: 680)
         .sheet(isPresented: $showingProjectSheet) {
             RegisterProjectView()
                 .environmentObject(store)
@@ -29,12 +24,6 @@ struct ContentView: View {
         .sheet(isPresented: $showingTaskSheet) {
             NewTaskView()
                 .environmentObject(store)
-        }
-        .sheet(isPresented: $showingSettings) {
-            SettingsView()
-                .environmentObject(store)
-                .padding()
-                .frame(width: 560, height: 520)
         }
         .alert(
             "Factory Desktop",
@@ -51,6 +40,22 @@ struct ContentView: View {
         }
         .task {
             await store.refreshGitStatus()
+        }
+    }
+
+    private var mainView: some View {
+        NavigationSplitView {
+            SidebarView(
+                showingProjectSheet: $showingProjectSheet,
+                showingTaskSheet: $showingTaskSheet
+            )
+            .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
+        } content: {
+            TaskDetailView()
+                .navigationSplitViewColumnWidth(min: 460, ideal: 680)
+        } detail: {
+            InspectorView()
+                .navigationSplitViewColumnWidth(min: 300, ideal: 360, max: 440)
         }
     }
 }

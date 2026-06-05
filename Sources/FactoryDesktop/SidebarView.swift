@@ -3,9 +3,9 @@ import SwiftUI
 
 struct SidebarView: View {
     @EnvironmentObject private var store: AppStore
+    @EnvironmentObject private var router: AppRouter
     @Binding var showingProjectSheet: Bool
     @Binding var showingTaskSheet: Bool
-    @Binding var showingSettings: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -85,7 +85,7 @@ struct SidebarView: View {
                 .disabled(store.selectedProject == nil)
 
                 Button {
-                    showingSettings = true
+                    router.openSettings(.general)
                 } label: {
                     Label("Settings", systemImage: "gearshape")
                         .frame(maxWidth: .infinity)
