@@ -215,7 +215,7 @@ public final class FactoryRepository {
             projectId: row.required("project_id"),
             title: row.required("title"),
             type: TaskType(rawValue: row.optional("type") ?? "") ?? .coding,
-            status: TaskStatus(rawValue: row.optional("status") ?? "") ?? .inbox,
+            status: TaskStatus.storedValue(row.optional("status")),
             priority: TaskPriority(rawValue: row.optional("priority") ?? "") ?? .normal,
             goal: row.optional("goal") ?? "",
             context: row.optional("context") ?? "",

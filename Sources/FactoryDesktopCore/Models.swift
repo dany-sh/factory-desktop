@@ -27,9 +27,14 @@ public enum ProjectType: String, CaseIterable, Codable, Identifiable {
 public enum TaskStatus: String, CaseIterable, Codable, Identifiable {
     case inbox
     case planning
-    case approved
-    case running
+    case planReady = "plan_ready"
+    case planReview = "plan_review"
+    case planApproved = "plan_approved"
+    case building
+    case built
+    case testing
     case needsReview = "needs_review"
+    case readyToCommit = "ready_to_commit"
     case done
     case blocked
 
@@ -39,12 +44,43 @@ public enum TaskStatus: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .inbox: "Inbox"
         case .planning: "Planning"
-        case .approved: "Approved"
-        case .running: "Running"
+        case .planReady: "Plan ready"
+        case .planReview: "Plan review"
+        case .planApproved: "Plan approved"
+        case .building: "Building"
+        case .built: "Built"
+        case .testing: "Testing"
         case .needsReview: "Needs review"
+        case .readyToCommit: "Ready to commit"
         case .done: "Done"
         case .blocked: "Blocked"
         }
+    }
+
+    public static func storedValue(_ value: String?) -> TaskStatus {
+        switch value {
+        case "approved": .planApproved
+        case "running": .building
+        default: TaskStatus(rawValue: value ?? "") ?? .inbox
+        }
+    }
+}
+
+public enum ArtifactType: String, CaseIterable, Codable, Identifiable {
+    case plan
+    case localPlanReview = "local_plan_review"
+    case codexPlanReviewHandoff = "codex_plan_review_handoff"
+    case approvedPlan = "approved_plan"
+    case implementationLog = "implementation_log"
+    case testOutput = "test_output"
+    case localDiffReview = "local_diff_review"
+    case codexDiffReviewHandoff = "codex_diff_review_handoff"
+    case finalReview = "final_review"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        rawValue.replacingOccurrences(of: "_", with: " ").capitalized
     }
 }
 
@@ -232,6 +268,26 @@ public struct Artifact: Identifiable, Equatable, Codable {
         self.path = path
         self.description = description
         self.createdAt = createdAt
+    }
+
+    public init(
+        id: String = UUID().uuidString,
+        taskId: String,
+        runId: String? = nil,
+        type: ArtifactType,
+        path: String,
+        description: String = "",
+        createdAt: Date = Date()
+    ) {
+        self.init(
+            id: id,
+            taskId: taskId,
+            runId: runId,
+            type: type.rawValue,
+            path: path,
+            description: description,
+            createdAt: createdAt
+        )
     }
 }
 

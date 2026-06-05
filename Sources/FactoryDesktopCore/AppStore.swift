@@ -283,10 +283,17 @@ public final class AppStore: ObservableObject {
             run.status = .succeeded
             run.summary = "Planner output saved."
             run.endedAt = Date()
-            task.status = .needsReview
+            task.status = .planReady
             task.updatedAt = Date()
             try repository.upsert(run: run)
             try repository.upsert(task: task)
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                runId: run.id,
+                type: .plan,
+                path: outputURL.path,
+                description: "Local planner output"
+            ))
             try reload()
             selectedTaskID = task.id
             selectedRunOutput = output
@@ -305,13 +312,158 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    public func reviewPlanLocally() {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject, var task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            let directory = self.paths.runDirectory(project: project, task: task)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let plan = self.latestArtifact(type: .plan)
+            let planText = plan.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? "(No local plan artifact found.)"
+            let url = directory.appendingPathComponent("local-plan-review.md")
+            let markdown = """
+            # Local Plan Review: \(task.title)
+
+            ## Review Summary
+            - Goal is \(task.goal.isEmpty ? "defined by the task title." : "defined in the task detail.")
+            - Acceptance criteria count: \(task.acceptanceCriteria.count)
+            - Plan artifact: \(plan?.path ?? "missing")
+
+            ## Local Checks
+            - [ ] Plan is scoped to the requested task.
+            - [ ] Plan names likely files or artifacts.
+            - [ ] Verification steps cover configured tests or a clear fallback.
+            - [ ] Risks and open questions are explicit.
+            - [ ] No destructive commands or autonomous file edits are requested.
+
+            ## Plan Under Review
+            ```markdown
+            \(planText)
+            ```
+            """
+            try markdown.write(to: url, atomically: true, encoding: .utf8)
+            task.status = .planReview
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                type: .localPlanReview,
+                path: url.path,
+                description: "Local plan review checklist"
+            ))
+            try self.reload()
+            self.selectedTaskID = task.id
+            self.statusMessage = "Wrote local plan review to \(url.path)."
+        }
+    }
+
+    public func askCodexToReviewPlan() {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject, var task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            let url = try self.handoffService.codexPlanReviewHandoff(
+                project: project,
+                task: task,
+                latestPlan: self.latestArtifact(type: .plan)
+            )
+            task.status = .planReview
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                type: .codexPlanReviewHandoff,
+                path: url.path,
+                description: "Read-only Codex plan review prompt"
+            ))
+            try self.reload()
+            self.selectedTaskID = task.id
+            self.statusMessage = "Wrote Codex plan review handoff to \(url.path)."
+        }
+    }
+
+    public func approvePlan() {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject, var task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            let directory = self.paths.runDirectory(project: project, task: task)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let plan = self.latestArtifact(type: .plan)
+            let planText = plan.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? "(No local plan artifact found.)"
+            let url = directory.appendingPathComponent("approved-plan.md")
+            let markdown = """
+            # Approved Plan: \(task.title)
+
+            Approved at: \(DateCoding.string(from: Date()))
+            Source plan: \(plan?.path ?? "missing")
+
+            ## Acceptance Criteria
+            \(task.acceptanceCriteria.isEmpty ? "- No explicit acceptance criteria." : task.acceptanceCriteria.map { "- \($0)" }.joined(separator: "\n"))
+
+            ## Plan
+            ```markdown
+            \(planText)
+            ```
+            """
+            try markdown.write(to: url, atomically: true, encoding: .utf8)
+            task.status = .planApproved
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                type: .approvedPlan,
+                path: url.path,
+                description: "Approved plan snapshot"
+            ))
+            try self.reload()
+            self.selectedTaskID = task.id
+            self.statusMessage = "Approved plan and wrote \(url.path)."
+        }
+    }
+
+    public func buildLocallyPlaceholder() {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject, var task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            let directory = self.paths.runDirectory(project: project, task: task)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("implementation-log.md")
+            let markdown = """
+            # Implementation Log: \(task.title)
+
+            Factory Desktop does not autonomously edit code yet.
+
+            ## Manual Build Handoff
+            - Worktree: \(task.localWorktreePath ?? task.codexWorktreePath ?? project.path)
+            - Approved plan: \(self.latestArtifact(type: .approvedPlan)?.path ?? "missing")
+            - Next step: make the implementation changes manually in the task worktree, then run tests and review the diff.
+            """
+            try markdown.write(to: url, atomically: true, encoding: .utf8)
+            task.status = .building
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                type: .implementationLog,
+                path: url.path,
+                description: "Manual implementation placeholder"
+            ))
+            try self.reload()
+            self.selectedTaskID = task.id
+            self.statusMessage = "Wrote implementation placeholder to \(url.path)."
+        }
+    }
+
     public func generateCodexHandoff() {
         perform {
             guard let repository = self.repository, let project = self.selectedProject, let task = self.selectedTask else {
                 throw FactoryError.missingSelection
             }
             let url = try self.handoffService.codexHandoff(project: project, task: task, gitSnapshot: self.gitSnapshot)
-            let artifact = Artifact(taskId: task.id, type: "codex_handoff", path: url.path, description: "Codex handoff markdown")
+            let artifact = Artifact(taskId: task.id, type: .implementationLog, path: url.path, description: "Codex implementation handoff")
             try repository.insert(artifact: artifact)
             try self.reloadRunsAndArtifacts()
             self.statusMessage = "Wrote Codex handoff to \(url.path)."
@@ -365,7 +517,7 @@ public final class AppStore: ObservableObject {
     }
 
     public func runFirstTestCommand() async {
-        guard let project = selectedProject, let task = selectedTask, let repository, let gitService else {
+        guard let project = selectedProject, var task = selectedTask, let repository, let gitService else {
             errorMessage = FactoryError.missingSelection.localizedDescription
             return
         }
@@ -398,14 +550,28 @@ public final class AppStore: ObservableObject {
 
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            task.status = .testing
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
             try repository.upsert(run: run)
             let result = try await gitService.runTestCommand(command, in: worktreePath)
             try result.output.write(to: outputURL, atomically: true, encoding: .utf8)
             run.status = .succeeded
             run.summary = "Passed: \(command)"
             run.endedAt = Date()
+            task.status = .needsReview
+            task.updatedAt = Date()
             try repository.upsert(run: run)
+            try repository.upsert(task: task)
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                runId: run.id,
+                type: .testOutput,
+                path: outputURL.path,
+                description: "Test output: \(command)"
+            ))
             try reload()
+            selectedTaskID = task.id
             selectedRunOutput = result.output
             statusMessage = "Test command passed."
         } catch {
@@ -414,16 +580,121 @@ public final class AppStore: ObservableObject {
             run.status = .failed
             run.summary = "Failed: \(command)"
             run.endedAt = Date()
+            task.status = .blocked
+            task.updatedAt = Date()
             try? repository.upsert(run: run)
+            try? repository.upsert(task: task)
+            try? repository.insert(artifact: Artifact(
+                taskId: task.id,
+                runId: run.id,
+                type: .testOutput,
+                path: outputURL.path,
+                description: "Failed test output: \(command)"
+            ))
             try? reload()
+            selectedTaskID = task.id
             selectedRunOutput = output
             errorMessage = error.localizedDescription
         }
     }
 
+    public func reviewDiffLocally() async {
+        guard let project = selectedProject, var task = selectedTask, let repository, let gitService else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let snapshot = try await gitService.snapshot(project: project, task: task)
+            guard !snapshot.changedFiles.isEmpty else {
+                errorMessage = "No changed files detected to review."
+                gitSnapshot = snapshot
+                return
+            }
+            let diff = try await gitService.diff(in: snapshot.worktreePath)
+            let directory = paths.runDirectory(project: project, task: task)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("local-diff-review.md")
+            let markdown = """
+            # Local Diff Review: \(task.title)
+
+            ## Status
+            - Worktree: \(snapshot.worktreePath)
+            - Branch: \(snapshot.currentBranch ?? "unknown")
+            - Changed file count: \(snapshot.changedFiles.count)
+
+            ## Review Checklist
+            - [ ] Diff matches the approved plan.
+            - [ ] Acceptance criteria are covered.
+            - [ ] Tests have been run or a test gap is documented.
+            - [ ] No unrelated files are included.
+            - [ ] Commit message can be written from the final review note.
+
+            ## Changed Files
+            \(snapshot.changedFiles.map { "- \($0)" }.joined(separator: "\n"))
+
+            ## Diff Stat
+            ```text
+            \(snapshot.diffStat.isEmpty ? "(empty)" : snapshot.diffStat)
+            ```
+
+            ## Diff
+            ```diff
+            \(diff.output.isEmpty ? "(empty)" : diff.output)
+            ```
+            """
+            try markdown.write(to: url, atomically: true, encoding: .utf8)
+            task.status = .readyToCommit
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                type: .localDiffReview,
+                path: url.path,
+                description: "Local diff review"
+            ))
+            gitSnapshot = snapshot
+            try reload()
+            selectedTaskID = task.id
+            statusMessage = "Wrote local diff review to \(url.path)."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func askCodexToReviewDiff() {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject, var task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            guard !self.gitSnapshot.changedFiles.isEmpty else {
+                throw FactoryError.commandFailed("Refresh git status and ensure changed files exist before generating a diff review handoff.")
+            }
+            let url = try self.handoffService.codexDiffReviewHandoff(
+                project: project,
+                task: task,
+                gitSnapshot: self.gitSnapshot,
+                latestRun: self.runsForSelectedTask.first
+            )
+            task.status = .needsReview
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                type: .codexDiffReviewHandoff,
+                path: url.path,
+                description: "Read-only Codex diff review prompt"
+            ))
+            try self.reload()
+            self.selectedTaskID = task.id
+            self.statusMessage = "Wrote Codex diff review handoff to \(url.path)."
+        }
+    }
+
     public func generateReviewNote() {
         perform {
-            guard let repository = self.repository, let project = self.selectedProject, let task = self.selectedTask else {
+            guard let repository = self.repository, let project = self.selectedProject, var task = self.selectedTask else {
                 throw FactoryError.missingSelection
             }
             let url = try self.handoffService.reviewNote(
@@ -432,9 +703,13 @@ public final class AppStore: ObservableObject {
                 gitSnapshot: self.gitSnapshot,
                 latestRun: self.runsForSelectedTask.first
             )
-            let artifact = Artifact(taskId: task.id, type: "review_note", path: url.path, description: "Review note")
+            task.status = .readyToCommit
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
+            let artifact = Artifact(taskId: task.id, type: .finalReview, path: url.path, description: "Final review note")
             try repository.insert(artifact: artifact)
-            try self.reloadRunsAndArtifacts()
+            try self.reload()
+            self.selectedTaskID = task.id
             self.statusMessage = "Wrote review note to \(url.path)."
         }
     }
@@ -488,6 +763,10 @@ public final class AppStore: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func latestArtifact(type: ArtifactType) -> Artifact? {
+        artifacts.first { $0.type == type.rawValue }
     }
 
     private func plannerPrompt(project: Project, task: FactoryTask) -> String {

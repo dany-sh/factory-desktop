@@ -70,63 +70,17 @@ struct InspectorView: View {
     }
 
     private var actionCard: some View {
-        InspectorCard(title: "Actions") {
+        InspectorCard(title: "Next Actions") {
             VStack(alignment: .leading, spacing: 8) {
-                Button {
-                    Task { await store.refreshGitStatus() }
-                } label: {
-                    Label("Refresh Git Status", systemImage: "arrow.clockwise")
-                }
-
-                Button {
-                    Task { await store.createWorktree(flavor: .local) }
-                } label: {
-                    Label("Create Local Worktree", systemImage: "point.3.connected.trianglepath.dotted")
-                }
-                .disabled(store.selectedProject?.type != .codeRepo || store.selectedTask == nil || store.isWorking)
-
-                Button {
-                    Task { await store.createWorktree(flavor: .codex) }
-                } label: {
-                    Label("Create Codex Worktree", systemImage: "terminal")
-                }
-                .disabled(store.selectedProject?.type != .codeRepo || store.selectedTask == nil || store.isWorking)
-
-                Button {
-                    Task { await store.openVSCodeForSelectedTask() }
-                } label: {
-                    Label("Open VS Code", systemImage: "curlybraces.square")
-                }
-
-                Button {
-                    Task { await store.planLocally() }
-                } label: {
-                    Label("Plan Locally", systemImage: "brain")
-                }
-                .disabled(store.selectedTask == nil || store.isWorking)
-
-                Button {
-                    Task { await store.sendToCodex() }
-                } label: {
-                    Label("Send to Codex", systemImage: "paperplane")
-                }
-                .disabled(store.selectedTask == nil || store.isWorking)
-
-                Button {
-                    Task { await store.runFirstTestCommand() }
-                } label: {
-                    Label("Run First Test Command", systemImage: "checkmark.seal")
-                }
-                .disabled(store.selectedTask == nil || store.isWorking)
-
-                Button {
-                    store.generateReviewNote()
-                } label: {
-                    Label("Generate Review Note", systemImage: "doc.badge.clock")
-                }
-                .disabled(store.selectedTask == nil)
+                nextActionButtons
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            Divider()
+            Text("Setup")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            setupButtons
 
             Divider()
             TextField("Commit message", text: $commitMessage)
@@ -135,9 +89,144 @@ struct InspectorView: View {
             } label: {
                 Label("Commit Selected Worktree", systemImage: "checkmark.circle")
             }
-            .disabled(commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.selectedTask == nil || store.isWorking)
+            .disabled(commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.selectedTask?.status != .readyToCommit || store.isWorking)
         }
         .buttonStyle(.bordered)
+    }
+
+    @ViewBuilder
+    private var nextActionButtons: some View {
+        if let task = store.selectedTask {
+            switch task.status {
+            case .inbox, .planning:
+                primaryButton("Plan Locally", systemImage: "brain") {
+                    Task { await store.planLocally() }
+                }
+            case .planReady:
+                primaryButton("Review Plan Locally", systemImage: "checklist") {
+                    store.reviewPlanLocally()
+                }
+                secondaryButton("Ask Codex to Review Plan", systemImage: "doc.text.magnifyingglass") {
+                    store.askCodexToReviewPlan()
+                }
+                secondaryButton("Approve Plan", systemImage: "hand.thumbsup") {
+                    store.approvePlan()
+                }
+            case .planReview:
+                primaryButton("Approve Plan", systemImage: "hand.thumbsup") {
+                    store.approvePlan()
+                }
+                secondaryButton("Ask Codex to Review Plan", systemImage: "doc.text.magnifyingglass") {
+                    store.askCodexToReviewPlan()
+                }
+            case .planApproved:
+                primaryButton("Build Locally", systemImage: "hammer") {
+                    store.buildLocallyPlaceholder()
+                }
+                secondaryButton("Run Tests", systemImage: "checkmark.seal") {
+                    Task { await store.runFirstTestCommand() }
+                }
+            case .building, .built, .testing:
+                primaryButton("Run Tests", systemImage: "checkmark.seal") {
+                    Task { await store.runFirstTestCommand() }
+                }
+                if !store.gitSnapshot.changedFiles.isEmpty {
+                    secondaryButton("Review Diff Locally", systemImage: "doc.text.magnifyingglass") {
+                        Task { await store.reviewDiffLocally() }
+                    }
+                }
+            case .needsReview:
+                primaryButton("Review Diff Locally", systemImage: "doc.text.magnifyingglass") {
+                    Task { await store.reviewDiffLocally() }
+                }
+                secondaryButton("Ask Codex to Review Diff", systemImage: "paperplane") {
+                    store.askCodexToReviewDiff()
+                }
+                secondaryButton("Generate Review Note", systemImage: "doc.badge.clock") {
+                    store.generateReviewNote()
+                }
+            case .readyToCommit:
+                primaryButton("Generate Review Note", systemImage: "doc.badge.clock") {
+                    store.generateReviewNote()
+                }
+                secondaryButton("Ask Codex to Review Diff", systemImage: "paperplane") {
+                    store.askCodexToReviewDiff()
+                }
+            case .done:
+                Text("Task is done.")
+                    .foregroundStyle(.secondary)
+            case .blocked:
+                primaryButton("Run Tests", systemImage: "checkmark.seal") {
+                    Task { await store.runFirstTestCommand() }
+                }
+                secondaryButton("Generate Review Note", systemImage: "doc.badge.clock") {
+                    store.generateReviewNote()
+                }
+            }
+        } else {
+            Text("Select a task to see next actions.")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var setupButtons: some View {
+        Button {
+            Task { await store.refreshGitStatus() }
+        } label: {
+            Label("Refresh Git Status", systemImage: "arrow.clockwise")
+        }
+
+        if store.selectedProject?.type == .codeRepo, let task = store.selectedTask {
+            if task.localWorktreePath == nil {
+                Button {
+                    Task { await store.createWorktree(flavor: .local) }
+                } label: {
+                    Label("Create Local Worktree", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+                .disabled(store.isWorking)
+            }
+
+            if task.codexWorktreePath == nil {
+                Button {
+                    Task { await store.createWorktree(flavor: .codex) }
+                } label: {
+                    Label("Create Codex Worktree", systemImage: "terminal")
+                }
+                .disabled(store.isWorking)
+            }
+        }
+
+        Button {
+            Task { await store.openVSCodeForSelectedTask() }
+        } label: {
+            Label("Open VS Code", systemImage: "curlybraces.square")
+        }
+        .disabled(store.selectedTask == nil)
+
+        Button {
+            Task { await store.sendToCodex() }
+        } label: {
+            Label("Send to Codex", systemImage: "terminal")
+        }
+        .disabled(store.selectedTask == nil || store.isWorking)
+    }
+
+    private func primaryButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(store.selectedTask == nil || store.isWorking)
+    }
+
+    private func secondaryButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .disabled(store.selectedTask == nil || store.isWorking)
     }
 
     private var gitCard: some View {
@@ -183,7 +272,7 @@ struct InspectorView: View {
             } else {
                 ForEach(store.artifacts) { artifact in
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(artifact.type)
+                        Text(ArtifactType(rawValue: artifact.type)?.displayName ?? artifact.type)
                             .font(.subheadline.weight(.semibold))
                         Text(artifact.path)
                             .font(.system(.caption, design: .monospaced))

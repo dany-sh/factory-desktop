@@ -90,6 +90,12 @@ public final class GitService {
         return result
     }
 
+    public func diff(in path: String) async throws -> CommandResult {
+        try await commandRunner.run(
+            CommandRequest(executable: "git", arguments: ["diff"], workingDirectory: URL(fileURLWithPath: path))
+        )
+    }
+
     public func commitAll(path: String, defaultBranch: String, message: String) async throws -> CommandResult {
         let directory = URL(fileURLWithPath: path)
         let status = try await commandRunner.run(

@@ -27,7 +27,7 @@ public struct FactoryPaths: Equatable {
     public func runDirectory(project: Project, task: FactoryTask) -> URL {
         runs
             .appendingPathComponent(Slug.make(project.name), isDirectory: true)
-            .appendingPathComponent(task.id.shortID, isDirectory: true)
+            .appendingPathComponent(task.id, isDirectory: true)
     }
 
     public func artifactDirectory(project: Project, task: FactoryTask) -> URL {

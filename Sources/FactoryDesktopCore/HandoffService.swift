@@ -7,6 +7,49 @@ public final class HandoffService {
         self.paths = paths
     }
 
+    public func codexPlanReviewHandoff(project: Project, task: FactoryTask, latestPlan: Artifact?) throws -> URL {
+        let runDirectory = paths.runDirectory(project: project, task: task)
+        try FileManager.default.createDirectory(at: runDirectory, withIntermediateDirectories: true)
+
+        let targetPath = runDirectory.appendingPathComponent("codex-plan-review-handoff.md")
+        let planPath = latestPlan?.path ?? "(no saved plan artifact found)"
+        let acceptance = task.acceptanceCriteria.isEmpty
+            ? "- Confirm the plan satisfies the task goal."
+            : task.acceptanceCriteria.map { "- \($0)" }.joined(separator: "\n")
+
+        let markdown = """
+        # Codex Plan Review Handoff: \(task.title)
+
+        You are reviewing only. Do not edit files, run formatters, commit, merge, push, or change the worktree.
+
+        ## Project
+        - Name: \(project.name)
+        - Type: \(project.type.rawValue)
+        - Source path: \(project.path)
+        - Default branch: \(project.defaultBranch)
+
+        ## Task
+        - ID: \(task.id)
+        - Status: \(task.status.rawValue)
+        - Plan artifact: \(planPath)
+
+        ## Goal
+        \(task.goal.isEmpty ? task.title : task.goal)
+
+        ## Context
+        \(task.context.isEmpty ? "No extra context provided." : task.context)
+
+        ## Acceptance Criteria
+        \(acceptance)
+
+        ## Review Request
+        Critique the plan for correctness, missing steps, risk, test coverage, sequencing, and unnecessary scope. Return findings first, then a concise recommendation: approve, revise, or block.
+        """
+
+        try markdown.write(to: targetPath, atomically: true, encoding: .utf8)
+        return targetPath
+    }
+
     public func codexHandoff(project: Project, task: FactoryTask, gitSnapshot: GitSnapshot?) throws -> URL {
         let runDirectory = paths.runDirectory(project: project, task: task)
         try FileManager.default.createDirectory(at: runDirectory, withIntermediateDirectories: true)
@@ -72,6 +115,57 @@ public final class HandoffService {
         \(targetPath.path)
         """.write(to: startNote, atomically: true, encoding: .utf8)
 
+        return targetPath
+    }
+
+    public func codexDiffReviewHandoff(project: Project, task: FactoryTask, gitSnapshot: GitSnapshot, latestRun: RunRecord?) throws -> URL {
+        let runDirectory = paths.runDirectory(project: project, task: task)
+        try FileManager.default.createDirectory(at: runDirectory, withIntermediateDirectories: true)
+
+        let targetPath = runDirectory.appendingPathComponent("codex-diff-review-handoff.md")
+        let latestRunText: String
+        if let latestRun {
+            latestRunText = "- Last run: \(latestRun.executor) \(latestRun.model ?? "") \(latestRun.status.rawValue)"
+        } else {
+            latestRunText = "- Last run: none"
+        }
+
+        let markdown = """
+        # Codex Diff Review Handoff: \(task.title)
+
+        You are reviewing only. Do not edit files, run formatters, commit, merge, push, or change the worktree.
+
+        ## Project
+        - Name: \(project.name)
+        - Source path: \(project.path)
+        - Worktree path: \(gitSnapshot.worktreePath)
+        - Branch: \(gitSnapshot.currentBranch ?? "unknown")
+        - Default branch: \(project.defaultBranch)
+
+        ## Task
+        - ID: \(task.id)
+        - Status: \(task.status.rawValue)
+        \(latestRunText)
+
+        ## Goal
+        \(task.goal.isEmpty ? task.title : task.goal)
+
+        ## Acceptance Criteria
+        \(task.acceptanceCriteria.isEmpty ? "- No explicit acceptance criteria." : task.acceptanceCriteria.map { "- \($0)" }.joined(separator: "\n"))
+
+        ## Changed Files
+        \(gitSnapshot.changedFiles.isEmpty ? "- No changed files detected." : gitSnapshot.changedFiles.map { "- \($0)" }.joined(separator: "\n"))
+
+        ## Diff Stat
+        ```text
+        \(gitSnapshot.diffStat.isEmpty ? "(empty)" : gitSnapshot.diffStat)
+        ```
+
+        ## Review Request
+        Critique the diff for bugs, regressions, missing tests, unsafe assumptions, and acceptance gaps. Return findings first, ordered by severity, then residual risk and a concise ready/not-ready recommendation.
+        """
+
+        try markdown.write(to: targetPath, atomically: true, encoding: .utf8)
         return targetPath
     }
 

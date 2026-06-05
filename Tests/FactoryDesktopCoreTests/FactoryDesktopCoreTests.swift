@@ -15,6 +15,50 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(ModelPolicy.effectiveContext(for: "qwen2.5-coder:7b", requested: 128_000), 128_000)
     }
 
+    func testWorkflowStagesMatchStagedReviewVocabulary() {
+        XCTAssertEqual(TaskStatus.allCases.map(\.rawValue), [
+            "inbox",
+            "planning",
+            "plan_ready",
+            "plan_review",
+            "plan_approved",
+            "building",
+            "built",
+            "testing",
+            "needs_review",
+            "ready_to_commit",
+            "done",
+            "blocked"
+        ])
+        XCTAssertEqual(TaskStatus.storedValue("approved"), .planApproved)
+        XCTAssertEqual(TaskStatus.storedValue("running"), .building)
+    }
+
+    func testArtifactTypesMatchStagedReviewVocabulary() {
+        XCTAssertEqual(ArtifactType.allCases.map(\.rawValue), [
+            "plan",
+            "local_plan_review",
+            "codex_plan_review_handoff",
+            "approved_plan",
+            "implementation_log",
+            "test_output",
+            "local_diff_review",
+            "codex_diff_review_handoff",
+            "final_review"
+        ])
+    }
+
+    func testRunDirectoryUsesFullTaskID() {
+        let paths = FactoryPaths(root: URL(fileURLWithPath: "/tmp/factory-test-root"))
+        let project = Project(id: "project-1", name: "Demo Project", type: .codeRepo, path: "/tmp/demo")
+        let task = FactoryTask(id: "12345678-90AB-CDEF-1234-567890ABCDEF", projectId: project.id, title: "Task")
+
+        XCTAssertEqual(
+            paths.runDirectory(project: project, task: task).path,
+            "/tmp/factory-test-root/runs/demo-project/12345678-90AB-CDEF-1234-567890ABCDEF"
+        )
+    }
+
     func testCommandRunnerBlocksDestructiveCommands() {
         let runner = CommandRunner()
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["status", "--short"])))
