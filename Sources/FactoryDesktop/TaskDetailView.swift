@@ -5,24 +5,55 @@ struct TaskDetailView: View {
     @EnvironmentObject private var store: AppStore
     @State private var draft = TaskDraft()
     @State private var acceptanceText = ""
+    @State private var loadedTaskID: String?
+    @FocusState private var focusedField: TaskEditorField?
 
     var body: some View {
         Group {
             if let task = store.selectedTask {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        header(task: task)
-                        taskForm(task: task)
-                        workflowBar
-                        runLog
+                VStack(alignment: .leading, spacing: 18) {
+                    header(task: task)
+                    taskForm(task: task)
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 18) {
+                            workflowBar
+                            runLog
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(24)
+                    .scrollDismissesKeyboard(.never)
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .safeAreaInset(edge: .bottom) {
+                    HStack {
+                        Button("Save Task") {
+                            save(task)
+                        }
+                        .keyboardShortcut("s", modifiers: [.command])
+
+                        if draft.hasChanges(comparedTo: task, acceptanceText: acceptanceText) {
+                            Text("Unsaved changes")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.orange)
+                        }
+
+                        Spacer()
+
+                        Button("Delete", role: .destructive) {
+                            store.deleteSelectedTask()
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                    .background(.bar)
                 }
                 .onAppear {
-                    load(task)
+                    loadIfNeeded(task)
                 }
                 .onChange(of: task.id) { _, _ in
-                    load(task)
+                    loadIfNeeded(task)
                 }
             } else {
                 ContentUnavailableView(
@@ -30,6 +61,12 @@ struct TaskDetailView: View {
                     systemImage: "tray",
                     description: Text("Create a task to start intake, planning, handoff, and review.")
                 )
+                .onAppear {
+                    loadedTaskID = nil
+                    draft = TaskDraft()
+                    acceptanceText = ""
+                    focusedField = nil
+                }
             }
         }
     }
@@ -57,6 +94,7 @@ struct TaskDetailView: View {
         VStack(alignment: .leading, spacing: 14) {
             TextField("Title", text: $draft.title)
                 .font(.title3)
+                .focused($focusedField, equals: .title)
 
             HStack {
                 Picker("Status", selection: $draft.status) {
@@ -76,24 +114,34 @@ struct TaskDetailView: View {
                 }
             }
 
-            LabeledTextEditor(title: "Goal", text: $draft.goal, minHeight: 90)
-            LabeledTextEditor(title: "Context", text: $draft.context, minHeight: 110)
-            LabeledTextEditor(title: "Acceptance criteria (one per line)", text: $acceptanceText, minHeight: 90)
-
-            HStack {
-                Button("Save Task") {
-                    store.saveTask(draft.task(updating: task, acceptanceText: acceptanceText))
-                }
-                .keyboardShortcut("s", modifiers: [.command])
-
-                Button("Delete", role: .destructive) {
-                    store.deleteSelectedTask()
-                }
-                Spacer()
-            }
+            LabeledTextEditor(
+                title: "Goal",
+                text: $draft.goal,
+                minHeight: 90,
+                focusedField: $focusedField,
+                field: .goal
+            )
+            LabeledTextEditor(
+                title: "Context",
+                text: $draft.context,
+                minHeight: 110,
+                focusedField: $focusedField,
+                field: .context
+            )
+            LabeledTextEditor(
+                title: "Acceptance criteria (one per line)",
+                text: $acceptanceText,
+                minHeight: 90,
+                focusedField: $focusedField,
+                field: .acceptanceCriteria
+            )
         }
         .padding()
         .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func save(_ task: FactoryTask) {
+        store.saveTask(draft.task(updating: task, acceptanceText: acceptanceText))
     }
 
     private var workflowBar: some View {
@@ -184,16 +232,32 @@ struct TaskDetailView: View {
         }
     }
 
+    private func loadIfNeeded(_ task: FactoryTask) {
+        guard loadedTaskID != task.id else { return }
+        load(task)
+    }
+
     private func load(_ task: FactoryTask) {
         draft = TaskDraft(task: task)
         acceptanceText = task.acceptanceCriteria.joined(separator: "\n")
+        loadedTaskID = task.id
+        focusedField = nil
     }
+}
+
+private enum TaskEditorField: Hashable {
+    case title
+    case goal
+    case context
+    case acceptanceCriteria
 }
 
 private struct LabeledTextEditor: View {
     var title: String
     @Binding var text: String
     var minHeight: CGFloat
+    var focusedField: FocusState<TaskEditorField?>.Binding
+    var field: TaskEditorField
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -202,7 +266,8 @@ private struct LabeledTextEditor: View {
                 .foregroundStyle(.secondary)
             TextEditor(text: $text)
                 .font(.body)
-                .frame(minHeight: minHeight)
+                .focused(focusedField, equals: field)
+                .frame(height: minHeight)
                 .padding(6)
                 .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
         }
@@ -249,10 +314,24 @@ private struct TaskDraft {
         updated.priority = priority
         updated.goal = goal
         updated.context = context
-        updated.acceptanceCriteria = acceptanceText
+        updated.acceptanceCriteria = Self.acceptanceCriteria(from: acceptanceText)
+        return updated
+    }
+
+    func hasChanges(comparedTo task: FactoryTask, acceptanceText: String) -> Bool {
+        title != task.title ||
+            type != task.type ||
+            status != task.status ||
+            priority != task.priority ||
+            goal != task.goal ||
+            context != task.context ||
+            Self.acceptanceCriteria(from: acceptanceText) != task.acceptanceCriteria
+    }
+
+    private static func acceptanceCriteria(from acceptanceText: String) -> [String] {
+        acceptanceText
             .split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        return updated
     }
 }
