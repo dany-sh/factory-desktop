@@ -162,6 +162,12 @@ public final class CommandRunner {
         switch first {
         case "status", "log", "add":
             return true
+        case "rev-parse":
+            return isAllowedGitRevParse(arguments)
+        case "rev-list":
+            return isAllowedGitRevList(arguments)
+        case "merge-base":
+            return isAllowedGitMergeBase(arguments)
         case "commit":
             return manuallyApproved
         case "branch":
@@ -180,5 +186,34 @@ public final class CommandRunner {
         default:
             return false
         }
+    }
+
+    private func isAllowedGitRevParse(_ arguments: [String]) -> Bool {
+        guard arguments.first == "rev-parse", arguments.count >= 2 else { return false }
+        let allowedOptions = Set(["--short", "--verify", "--abbrev-ref", "--show-toplevel", "--git-dir", "--is-inside-work-tree"])
+        return arguments.dropFirst().allSatisfy { argument in
+            allowedOptions.contains(argument) || isSafeGitRevision(argument)
+        }
+    }
+
+    private func isAllowedGitRevList(_ arguments: [String]) -> Bool {
+        guard arguments.first == "rev-list", arguments.count >= 2 else { return false }
+        let allowedOptions = Set(["--left-right", "--count"])
+        return arguments.dropFirst().allSatisfy { argument in
+            allowedOptions.contains(argument) || isSafeGitRevision(argument)
+        }
+    }
+
+    private func isAllowedGitMergeBase(_ arguments: [String]) -> Bool {
+        guard arguments.first == "merge-base", arguments.count == 4 else { return false }
+        guard arguments[1] == "--is-ancestor" else { return false }
+        return isSafeGitRevision(arguments[2]) && isSafeGitRevision(arguments[3])
+    }
+
+    private func isSafeGitRevision(_ argument: String) -> Bool {
+        guard !argument.isEmpty else { return false }
+        guard !argument.hasPrefix("-") else { return false }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.~^:")
+        return argument.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 }

@@ -18,6 +18,7 @@ struct TaskDetailView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 18) {
                             workflowBar
+                            preflightPanel
                             planPanel
                             runLog
                         }
@@ -158,6 +159,13 @@ struct TaskDetailView: View {
                 .frame(maxWidth: 340)
 
                 Button {
+                    Task { await store.runPreflightCheck() }
+                } label: {
+                    Label("Preflight Check", systemImage: "checklist.checked")
+                }
+                .disabled(store.isWorking)
+
+                Button {
                     Task { await store.planLocally() }
                 } label: {
                     Label("Plan Locally", systemImage: "brain")
@@ -174,6 +182,40 @@ struct TaskDetailView: View {
             Text("Factory v0.1 plans and records. It does not autonomously edit files.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
+    private var preflightPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Preflight")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    Task { await store.runPreflightCheck() }
+                } label: {
+                    Label("Run", systemImage: "checklist.checked")
+                }
+                .disabled(store.isWorking)
+            }
+
+            if let report = store.latestPreflightReport {
+                HStack(spacing: 16) {
+                    InfoChip(label: "Recommendation", value: report.overallRecommendation.displayName)
+                    InfoChip(label: "Dirty", value: "\(report.dirtyTargetCount)")
+                    InfoChip(label: "Missing", value: "\(report.missingPathCount)")
+                    InfoChip(label: "Unpushed", value: "\(report.unpushedCount)")
+                }
+            } else {
+                Text("Run Preflight Check to inspect the project repo and Factory worktrees.")
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding()
         .background(.background, in: RoundedRectangle(cornerRadius: 16))
@@ -340,6 +382,26 @@ private struct StatusPill: View {
             .padding(.vertical, 5)
             .background(Color.accentColor.opacity(0.14), in: Capsule())
             .foregroundStyle(Color.accentColor)
+    }
+}
+
+private struct InfoChip: View {
+    var label: String
+    var value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+        }
+        .frame(minWidth: 74, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

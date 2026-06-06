@@ -11,6 +11,7 @@ public final class AppStore: ObservableObject {
     @Published public var selectedTaskID: String?
     @Published public var selectedModel: String = ModelPolicy.plannerDefault
     @Published public var gitSnapshot: GitSnapshot = GitSnapshot()
+    @Published public var latestPreflightReport: PreflightReport?
     @Published public private(set) var buildInfo: BuildInfo
     @Published public var selectedRunOutput: String = ""
     @Published public var statusMessage: String = ""
@@ -111,6 +112,7 @@ public final class AppStore: ObservableObject {
     public func selectProject(_ projectID: String?) {
         selectedProjectID = projectID
         selectedTaskID = tasks.first { $0.projectId == projectID }?.id
+        latestPreflightReport = nil
         Task { await refreshGitStatus() }
         do {
             try reloadRunsAndArtifacts()
@@ -122,6 +124,7 @@ public final class AppStore: ObservableObject {
     public func selectTask(_ taskID: String?) {
         selectedTaskID = taskID
         selectedRunOutput = ""
+        latestPreflightReport = nil
         Task { await refreshGitStatus() }
         do {
             try reloadRunsAndArtifacts()
@@ -250,6 +253,38 @@ public final class AppStore: ObservableObject {
             selectedTaskID = task.id
             statusMessage = "Created \(flavor.rawValue) worktree at \(result.path)."
             await refreshGitStatus()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func runPreflightCheck() async {
+        guard let project = selectedProject, let task = selectedTask, let repository, let gitService else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        let projectTasks = tasks.filter { $0.projectId == project.id }
+        let directory = paths.runDirectory(project: project, task: task)
+        let url = directory.appendingPathComponent("preflight.md")
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let report = await gitService.preflightReport(project: project, tasks: projectTasks)
+            try report.markdown.write(to: url, atomically: true, encoding: .utf8)
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                type: .preflight,
+                path: url.path,
+                description: "Read-only preflight check"
+            ))
+            latestPreflightReport = report
+            selectedRunOutput = report.markdown
+            try reloadRunsAndArtifacts()
+            statusMessage = "Wrote preflight check to \(url.path)."
         } catch {
             errorMessage = error.localizedDescription
         }

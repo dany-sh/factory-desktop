@@ -48,7 +48,8 @@ final class FactoryDesktopCoreTests: XCTestCase {
             "test_output",
             "local_diff_review",
             "codex_diff_review_handoff",
-            "final_review"
+            "final_review",
+            "preflight"
         ])
     }
 
@@ -66,6 +67,10 @@ final class FactoryDesktopCoreTests: XCTestCase {
     func testCommandRunnerBlocksDestructiveCommands() {
         let runner = CommandRunner()
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["status", "--short"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["rev-parse", "--short", "HEAD"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["rev-parse", "--verify", "origin/trunk"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["rev-list", "--left-right", "--count", "trunk...origin/trunk"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["merge-base", "--is-ancestor", "abc123", "def456"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "npm", arguments: ["run", "lint"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "read-only", "-o", "/tmp/review.md", "-"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["commit", "-m", "safe"], manuallyApproved: true)))
@@ -73,10 +78,84 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["reset", "--hard"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["commit", "-m", "needs approval"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["worktree", "remove", "/tmp/nope"])))
+        XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["merge-base", "abc123", "def456"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["checkout", "--", "."])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "rm", arguments: ["-rf", "/tmp/nope"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "workspace-write", "-"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "read-only", "--add-dir", "/tmp/other", "-"])))
+    }
+
+    func testPreflightPorcelainParserReadsCleanBranch() {
+        let summary = PreflightStatusSummary.parsePorcelainV1BranchStatus("## trunk...origin/trunk\n")
+
+        XCTAssertEqual(summary.branch, "trunk")
+        XCTAssertEqual(summary.stagedCount, 0)
+        XCTAssertEqual(summary.unstagedCount, 0)
+        XCTAssertEqual(summary.untrackedCount, 0)
+        XCTAssertTrue(summary.isClean)
+    }
+
+    func testPreflightPorcelainParserCountsMixedStates() {
+        let output = """
+        ## feature/demo...origin/feature/demo [ahead 2, behind 1]
+        M  staged.swift
+         M unstaged.swift
+        AM mixed.swift
+        ?? new.swift
+        """
+
+        let summary = PreflightStatusSummary.parsePorcelainV1BranchStatus(output)
+
+        XCTAssertEqual(summary.branch, "feature/demo")
+        XCTAssertEqual(summary.ahead, 2)
+        XCTAssertEqual(summary.behind, 1)
+        XCTAssertEqual(summary.stagedCount, 2)
+        XCTAssertEqual(summary.unstagedCount, 2)
+        XCTAssertEqual(summary.untrackedCount, 1)
+        XCTAssertFalse(summary.isClean)
+    }
+
+    func testPreflightAheadBehindParserReadsRevListCounts() {
+        let counts = PreflightStatusSummary.parseAheadBehindCounts("3\t7\n")
+
+        XCTAssertEqual(counts?.ahead, 3)
+        XCTAssertEqual(counts?.behind, 7)
+        XCTAssertNil(PreflightStatusSummary.parseAheadBehindCounts("not counts"))
+    }
+
+    func testPreflightMissingPathReportRecommendsFixMissingPath() {
+        let risks: [PreflightRisk] = [.missingPath]
+        let report = PreflightTargetReport(
+            type: .localWorktree,
+            path: "/tmp/missing",
+            pathExists: false,
+            risks: risks,
+            recommendation: PreflightRecommendationMapper.recommendation(for: risks, targetType: .localWorktree, isMerged: nil)
+        )
+
+        XCTAssertFalse(report.pathExists)
+        XCTAssertEqual(report.risks, [.missingPath])
+        XCTAssertEqual(report.recommendation, .fixMissingPath)
+    }
+
+    func testPreflightMergedBranchRecommendsArchiveWhenClean() {
+        let recommendation = PreflightRecommendationMapper.recommendation(
+            for: [],
+            targetType: .factoryWorktree,
+            isMerged: true
+        )
+
+        XCTAssertEqual(recommendation, .archive)
+    }
+
+    func testPreflightBranchNotMergedRecommendsMerge() {
+        let recommendation = PreflightRecommendationMapper.recommendation(
+            for: [.branchNotMerged],
+            targetType: .codexWorktree,
+            isMerged: false
+        )
+
+        XCTAssertEqual(recommendation, .merge)
     }
 
     func testPlanReviewDecisionParserReadsDecisionLine() {

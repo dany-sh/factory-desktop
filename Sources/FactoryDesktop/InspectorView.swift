@@ -12,6 +12,7 @@ struct InspectorView: View {
                 projectCard
                 worktreeCard
                 actionCard
+                preflightCard
                 gitCard
                 artifactsCard
             }
@@ -72,6 +73,16 @@ struct InspectorView: View {
     private var actionCard: some View {
         InspectorCard(title: "Next Actions") {
             VStack(alignment: .leading, spacing: 8) {
+                Button {
+                    Task { await store.runPreflightCheck() }
+                } label: {
+                    Label("Preflight Check", systemImage: "checklist.checked")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.selectedTask == nil || store.isWorking)
+
+                Divider()
                 nextActionButtons
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -243,6 +254,30 @@ struct InspectorView: View {
         return !store.isWorking && (status == .planApproved || status == .escalationRecommended)
     }
 
+    private var preflightCard: some View {
+        InspectorCard(title: "Preflight") {
+            if let report = store.latestPreflightReport {
+                InfoRow(label: "Recommendation", value: report.overallRecommendation.displayName)
+                HStack(spacing: 12) {
+                    PreflightMetric(label: "Dirty", value: report.dirtyTargetCount)
+                    PreflightMetric(label: "Missing", value: report.missingPathCount)
+                    PreflightMetric(label: "Unpushed", value: report.unpushedCount)
+                }
+
+                Divider()
+                ForEach(report.targets) { target in
+                    PreflightTargetRow(target: target)
+                    if target.id != report.targets.last?.id {
+                        Divider()
+                    }
+                }
+            } else {
+                Text("Run Preflight Check to inspect the canonical repo and Factory-managed worktrees.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private func primaryButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: systemImage)
@@ -356,5 +391,62 @@ private struct InfoRow: View {
                 .font(label.lowercased().contains("path") ? .system(.caption, design: .monospaced) : .caption)
                 .textSelection(.enabled)
         }
+    }
+}
+
+private struct PreflightMetric: View {
+    var label: String
+    var value: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text("\(value)")
+                .font(.headline)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct PreflightTargetRow: View {
+    var target: PreflightTargetReport
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(target.type.displayName)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(target.recommendation.displayName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(target.risks.isEmpty ? .green : .orange)
+            }
+            Text(target.path)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            Text("Branch \(target.branch ?? "unknown") · HEAD \(target.headSHA ?? "unknown")")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            Text("Exists \(target.pathExists ? "yes" : "no") · Clean \(target.isClean ? "yes" : "no") · staged/unstaged/untracked \(target.stagedCount)/\(target.unstagedCount)/\(target.untrackedCount)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Merged \(target.isMergedToDefault.map { $0 ? "yes" : "no" } ?? "unknown") · ahead/behind \(target.aheadOfRemote.map(String.init) ?? "unknown")/\(target.behindRemote.map(String.init) ?? "unknown")")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if !target.risks.isEmpty {
+                Text(target.risks.map(\.displayName).joined(separator: ", "))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }

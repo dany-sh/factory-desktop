@@ -35,6 +35,20 @@ public final class GitService {
         )
     }
 
+    public func preflightReport(project: Project, tasks: [FactoryTask]) async -> PreflightReport {
+        let targets = discoverPreflightTargets(project: project, tasks: tasks)
+        var reports: [PreflightTargetReport] = []
+        for target in targets {
+            reports.append(await inspectPreflightTarget(target, project: project))
+        }
+        return PreflightReport(
+            projectName: project.name,
+            projectPath: project.path,
+            defaultBranch: project.defaultBranch,
+            targets: reports
+        )
+    }
+
     public func createWorktree(project: Project, task: FactoryTask, flavor: WorktreeFlavor) async throws -> WorktreeResult {
         guard project.type == .codeRepo else {
             try createArtifactFolders(project: project, task: task)
@@ -159,9 +173,241 @@ public final class GitService {
             .map(String.init)
             .filter { !$0.isEmpty }
     }
+
+    private func discoverPreflightTargets(project: Project, tasks: [FactoryTask]) -> [PreflightTarget] {
+        var targets: [PreflightTarget] = []
+        var seen: Set<String> = []
+
+        func append(type: PreflightTargetType, path: String) {
+            let url = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+            let key = url.path
+            guard !seen.contains(key) else { return }
+            seen.insert(key)
+            targets.append(PreflightTarget(type: type, path: URL(fileURLWithPath: path).standardizedFileURL.path))
+        }
+
+        append(type: .canonicalRepo, path: project.path)
+
+        for task in tasks.sorted(by: { $0.id < $1.id }) {
+            if let localPath = task.localWorktreePath {
+                append(type: .localWorktree, path: localPath)
+            }
+            if let codexPath = task.codexWorktreePath {
+                append(type: .codexWorktree, path: codexPath)
+            }
+        }
+
+        let factoryWorktreeRoot = paths.worktrees.appendingPathComponent(Slug.make(project.name), isDirectory: true)
+        let children = (try? FileManager.default.contentsOfDirectory(
+            at: factoryWorktreeRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        for child in children.sorted(by: { $0.path < $1.path }) {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: child.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                continue
+            }
+            append(type: .factoryWorktree, path: child.path)
+        }
+
+        return targets
+    }
+
+    private func inspectPreflightTarget(_ target: PreflightTarget, project: Project) async -> PreflightTargetReport {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: target.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            let risks: [PreflightRisk] = [.missingPath]
+            return PreflightTargetReport(
+                type: target.type,
+                path: target.path,
+                pathExists: false,
+                risks: risks,
+                recommendation: PreflightRecommendationMapper.recommendation(for: risks, targetType: target.type, isMerged: nil)
+            )
+        }
+
+        let directory = URL(fileURLWithPath: target.path)
+        do {
+            let statusResult = try await commandRunner.run(CommandRequest(
+                executable: "git",
+                arguments: ["status", "--porcelain=v1", "--branch"],
+                workingDirectory: directory
+            ))
+            guard statusResult.succeeded else {
+                return unknownTarget(target, pathExists: true, output: statusResult.output)
+            }
+
+            let summary = PreflightStatusSummary.parsePorcelainV1BranchStatus(statusResult.output)
+            let branchResult = try await commandRunner.run(CommandRequest(
+                executable: "git",
+                arguments: ["branch", "--show-current"],
+                workingDirectory: directory
+            ))
+            let branch = normalized(branchResult.output) ?? summary.branch
+
+            let headResult = try await commandRunner.run(CommandRequest(
+                executable: "git",
+                arguments: ["rev-parse", "--short", "HEAD"],
+                workingDirectory: directory
+            ))
+            let headSHA = headResult.succeeded ? normalized(headResult.output) : nil
+            let fullHeadResult = try await commandRunner.run(CommandRequest(
+                executable: "git",
+                arguments: ["rev-parse", "--verify", "HEAD"],
+                workingDirectory: directory
+            ))
+            let fullHeadSHA = fullHeadResult.succeeded ? normalized(fullHeadResult.output) : headSHA
+
+            var remoteTrackingExists = false
+            var aheadOfRemote: Int?
+            var behindRemote: Int?
+            if target.type == .canonicalRepo {
+                let remoteRef = "origin/\(project.defaultBranch)"
+                let remoteResult = try await commandRunner.run(CommandRequest(
+                    executable: "git",
+                    arguments: ["rev-parse", "--verify", remoteRef],
+                    workingDirectory: directory
+                ))
+                remoteTrackingExists = remoteResult.succeeded
+                if remoteTrackingExists {
+                    let countsResult = try await commandRunner.run(CommandRequest(
+                        executable: "git",
+                        arguments: ["rev-list", "--left-right", "--count", "\(project.defaultBranch)...\(remoteRef)"],
+                        workingDirectory: directory
+                    ))
+                    if countsResult.succeeded, let counts = PreflightStatusSummary.parseAheadBehindCounts(countsResult.output) {
+                        aheadOfRemote = counts.ahead
+                        behindRemote = counts.behind
+                    }
+                }
+            }
+
+            let merged = await mergedToDefault(target: target, branch: branch, headSHA: fullHeadSHA, project: project, directory: directory)
+            var risks = risksForTarget(
+                target: target,
+                project: project,
+                branch: branch,
+                summary: summary,
+                remoteTrackingExists: remoteTrackingExists,
+                aheadOfRemote: aheadOfRemote,
+                merged: merged
+            )
+            if headSHA == nil || branch == nil {
+                risks.append(.unknownGitState)
+            }
+            risks = Array(Set(risks)).sorted { $0.rawValue < $1.rawValue }
+            let recommendation = PreflightRecommendationMapper.recommendation(for: risks, targetType: target.type, isMerged: merged)
+
+            return PreflightTargetReport(
+                type: target.type,
+                path: target.path,
+                pathExists: true,
+                branch: branch,
+                headSHA: headSHA,
+                isClean: summary.isClean,
+                stagedCount: summary.stagedCount,
+                unstagedCount: summary.unstagedCount,
+                untrackedCount: summary.untrackedCount,
+                aheadOfRemote: aheadOfRemote ?? summary.ahead,
+                behindRemote: behindRemote ?? summary.behind,
+                remoteTrackingExists: remoteTrackingExists,
+                isMergedToDefault: merged,
+                risks: risks,
+                recommendation: recommendation,
+                statusOutput: statusResult.output
+            )
+        } catch {
+            return unknownTarget(target, pathExists: true, output: error.localizedDescription)
+        }
+    }
+
+    private func mergedToDefault(
+        target: PreflightTarget,
+        branch: String?,
+        headSHA: String?,
+        project: Project,
+        directory: URL
+    ) async -> Bool? {
+        guard target.type != .canonicalRepo else { return nil }
+        guard let branch, branch != project.defaultBranch, let headSHA else { return nil }
+        do {
+            let defaultResult = try await commandRunner.run(CommandRequest(
+                executable: "git",
+                arguments: ["rev-parse", "--verify", project.defaultBranch],
+                workingDirectory: directory
+            ))
+            guard defaultResult.succeeded, let defaultSHA = normalized(defaultResult.output) else { return nil }
+            let mergeBaseResult = try await commandRunner.run(CommandRequest(
+                executable: "git",
+                arguments: ["merge-base", "--is-ancestor", headSHA, defaultSHA],
+                workingDirectory: directory
+            ))
+            return mergeBaseResult.succeeded
+        } catch {
+            return nil
+        }
+    }
+
+    private func risksForTarget(
+        target: PreflightTarget,
+        project: Project,
+        branch: String?,
+        summary: PreflightStatusSummary,
+        remoteTrackingExists: Bool,
+        aheadOfRemote: Int?,
+        merged: Bool?
+    ) -> [PreflightRisk] {
+        var risks: [PreflightRisk] = []
+        if !summary.isClean {
+            risks.append(.dirtyWorktree)
+        }
+        if summary.stagedCount > 0 || summary.unstagedCount > 0 || summary.untrackedCount > 0 {
+            risks.append(.uncommittedChanges)
+        }
+        if target.type == .canonicalRepo {
+            if branch != nil, branch != project.defaultBranch {
+                risks.append(.unexpectedBranchLocation)
+            }
+            if remoteTrackingExists, (aheadOfRemote ?? 0) > 0 {
+                risks.append(.unpushedDefaultBranchCommits)
+            }
+        } else {
+            if branch == project.defaultBranch {
+                risks.append(.unexpectedBranchLocation)
+            }
+            if merged == false {
+                risks.append(.branchNotMerged)
+            }
+        }
+        return risks
+    }
+
+    private func unknownTarget(_ target: PreflightTarget, pathExists: Bool, output: String) -> PreflightTargetReport {
+        let risks: [PreflightRisk] = [.unknownGitState]
+        return PreflightTargetReport(
+            type: target.type,
+            path: target.path,
+            pathExists: pathExists,
+            risks: risks,
+            recommendation: PreflightRecommendationMapper.recommendation(for: risks, targetType: target.type, isMerged: nil),
+            statusOutput: output,
+            error: output
+        )
+    }
+
+    private func normalized(_ output: String) -> String? {
+        let value = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
 }
 
 public struct WorktreeResult: Equatable {
     public let branch: String
     public let path: String
+}
+
+private struct PreflightTarget: Equatable {
+    var type: PreflightTargetType
+    var path: String
 }

@@ -82,6 +82,7 @@ public enum ArtifactType: String, CaseIterable, Codable, Identifiable {
     case localDiffReview = "local_diff_review"
     case codexDiffReviewHandoff = "codex_diff_review_handoff"
     case finalReview = "final_review"
+    case preflight = "preflight"
 
     public var id: String { rawValue }
 
