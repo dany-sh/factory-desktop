@@ -30,6 +30,8 @@ public enum TaskStatus: String, CaseIterable, Codable, Identifiable {
     case planReady = "plan_ready"
     case planReview = "plan_review"
     case planApproved = "plan_approved"
+    case planRejected = "plan_rejected"
+    case escalationRecommended = "escalation_recommended"
     case building
     case built
     case testing
@@ -47,6 +49,8 @@ public enum TaskStatus: String, CaseIterable, Codable, Identifiable {
         case .planReady: "Plan ready"
         case .planReview: "Plan review"
         case .planApproved: "Plan approved"
+        case .planRejected: "Plan rejected"
+        case .escalationRecommended: "Escalation recommended"
         case .building: "Building"
         case .built: "Built"
         case .testing: "Testing"
@@ -67,9 +71,11 @@ public enum TaskStatus: String, CaseIterable, Codable, Identifiable {
 }
 
 public enum ArtifactType: String, CaseIterable, Codable, Identifiable {
+    case plannerPrompt = "planner_prompt"
     case plan
     case localPlanReview = "local_plan_review"
     case codexPlanReviewHandoff = "codex_plan_review_handoff"
+    case codexPlanReview = "codex_plan_review"
     case approvedPlan = "approved_plan"
     case implementationLog = "implementation_log"
     case testOutput = "test_output"
@@ -116,6 +122,16 @@ public enum RunStatus: String, CaseIterable, Codable, Identifiable {
     case running
     case succeeded
     case failed
+
+    public var id: String { rawValue }
+}
+
+public enum PlanReviewDecision: String, CaseIterable, Codable, Identifiable {
+    case approve
+    case revise
+    case reject
+    case escalateToCodexBuild = "escalate_to_codex_build"
+    case unknown
 
     public var id: String { rawValue }
 }

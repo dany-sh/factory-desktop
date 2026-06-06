@@ -22,6 +22,8 @@ final class FactoryDesktopCoreTests: XCTestCase {
             "plan_ready",
             "plan_review",
             "plan_approved",
+            "plan_rejected",
+            "escalation_recommended",
             "building",
             "built",
             "testing",
@@ -36,9 +38,11 @@ final class FactoryDesktopCoreTests: XCTestCase {
 
     func testArtifactTypesMatchStagedReviewVocabulary() {
         XCTAssertEqual(ArtifactType.allCases.map(\.rawValue), [
+            "planner_prompt",
             "plan",
             "local_plan_review",
             "codex_plan_review_handoff",
+            "codex_plan_review",
             "approved_plan",
             "implementation_log",
             "test_output",
@@ -63,6 +67,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
         let runner = CommandRunner()
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["status", "--short"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "npm", arguments: ["run", "lint"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "read-only", "-o", "/tmp/review.md", "-"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["commit", "-m", "safe"], manuallyApproved: true)))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "sudo", arguments: ["true"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["reset", "--hard"])))
@@ -70,6 +75,16 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["worktree", "remove", "/tmp/nope"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["checkout", "--", "."])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "rm", arguments: ["-rf", "/tmp/nope"])))
+        XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "workspace-write", "-"])))
+        XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "read-only", "--add-dir", "/tmp/other", "-"])))
+    }
+
+    func testPlanReviewDecisionParserReadsDecisionLine() {
+        XCTAssertEqual(AppStore.parsePlanReviewDecision(from: "Decision: approve\nNo issues."), .approve)
+        XCTAssertEqual(AppStore.parsePlanReviewDecision(from: "Decision: revise\nMissing tests."), .revise)
+        XCTAssertEqual(AppStore.parsePlanReviewDecision(from: "Decision: reject\nUnsafe."), .reject)
+        XCTAssertEqual(AppStore.parsePlanReviewDecision(from: "Decision: escalate_to_codex_build\nUse Codex."), .escalateToCodexBuild)
+        XCTAssertEqual(AppStore.parsePlanReviewDecision(from: "Looks fine but no machine-readable decision."), .unknown)
     }
 
     func testBuildInfoRepoStateParsing() {

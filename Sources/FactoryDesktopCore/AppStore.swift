@@ -50,6 +50,19 @@ public final class AppStore: ObservableObject {
         return runs.filter { $0.taskId == task.id }
     }
 
+    public var latestPlanArtifact: Artifact? {
+        latestArtifact(type: .plan)
+    }
+
+    public var latestPlanText: String {
+        latestPlanArtifact.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? ""
+    }
+
+    public var latestPlanReviewText: String {
+        let review = latestArtifact(type: .codexPlanReview) ?? latestArtifact(type: .localPlanReview)
+        return review.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? ""
+    }
+
     public init(paths: FactoryPaths = FactoryPaths()) {
         self.paths = paths
         self.buildInfo = BuildInfoService.current(launchTimestamp: Date())
@@ -254,6 +267,7 @@ public final class AppStore: ObservableObject {
         let directory = paths.runDirectory(project: project, task: task)
         let promptURL = directory.appendingPathComponent("\(runID.shortID)-planner-prompt.md")
         let outputURL = directory.appendingPathComponent("\(runID.shortID)-planner-output.md")
+        let planURL = directory.appendingPathComponent("plan.md")
         let prompt = plannerPrompt(project: project, task: task)
         var run = RunRecord(
             id: runID,
@@ -282,6 +296,7 @@ public final class AppStore: ObservableObject {
                 contextTokens: ModelPolicy.effectiveContext(for: selectedModel)
             )
             try output.write(to: outputURL, atomically: true, encoding: .utf8)
+            try output.write(to: planURL, atomically: true, encoding: .utf8)
             run.status = .succeeded
             run.summary = "Planner output saved."
             run.endedAt = Date()
@@ -292,8 +307,15 @@ public final class AppStore: ObservableObject {
             try repository.insert(artifact: Artifact(
                 taskId: task.id,
                 runId: run.id,
+                type: .plannerPrompt,
+                path: promptURL.path,
+                description: "Local planner prompt"
+            ))
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                runId: run.id,
                 type: .plan,
-                path: outputURL.path,
+                path: planURL.path,
                 description: "Local planner output"
             ))
             try reload()
@@ -314,74 +336,154 @@ public final class AppStore: ObservableObject {
         }
     }
 
-    public func reviewPlanLocally() {
-        perform {
-            guard let repository = self.repository, let project = self.selectedProject, var task = self.selectedTask else {
-                throw FactoryError.missingSelection
-            }
-            let directory = self.paths.runDirectory(project: project, task: task)
+    public func reviewPlanLocally() async {
+        guard let repository, let project = selectedProject, var task = selectedTask else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+
+        let directory = paths.runDirectory(project: project, task: task)
+        let plan = latestArtifact(type: .plan)
+        let planText = plan.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? "(No local plan artifact found.)"
+        let url = directory.appendingPathComponent("local-plan-review.md")
+
+        do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let plan = self.latestArtifact(type: .plan)
-            let planText = plan.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? "(No local plan artifact found.)"
-            let url = directory.appendingPathComponent("local-plan-review.md")
-            let markdown = """
-            # Local Plan Review: \(task.title)
-
-            ## Review Summary
-            - Goal is \(task.goal.isEmpty ? "defined by the task title." : "defined in the task detail.")
-            - Acceptance criteria count: \(task.acceptanceCriteria.count)
-            - Plan artifact: \(plan?.path ?? "missing")
-
-            ## Local Checks
-            - [ ] Plan is scoped to the requested task.
-            - [ ] Plan names likely files or artifacts.
-            - [ ] Verification steps cover configured tests or a clear fallback.
-            - [ ] Risks and open questions are explicit.
-            - [ ] No destructive commands or autonomous file edits are requested.
-
-            ## Plan Under Review
-            ```markdown
-            \(planText)
-            ```
-            """
-            try markdown.write(to: url, atomically: true, encoding: .utf8)
-            task.status = .planReview
+            let prompt = planReviewPrompt(
+                project: project,
+                task: task,
+                planPath: plan?.path ?? "missing",
+                planText: planText,
+                reviewer: "local reviewer"
+            )
+            let review = try await ollamaClient.generate(
+                model: selectedModel,
+                prompt: prompt,
+                contextTokens: ModelPolicy.effectiveContext(for: selectedModel)
+            )
+            try review.write(to: url, atomically: true, encoding: .utf8)
+            task.status = Self.status(for: Self.parsePlanReviewDecision(from: review))
+            if task.status == .planApproved {
+                try writeApprovedPlanSnapshot(project: project, task: task)
+            }
             task.updatedAt = Date()
             try repository.upsert(task: task)
             try repository.insert(artifact: Artifact(
                 taskId: task.id,
                 type: .localPlanReview,
                 path: url.path,
-                description: "Local plan review checklist"
+                description: "Local model plan review"
             ))
-            try self.reload()
-            self.selectedTaskID = task.id
-            self.statusMessage = "Wrote local plan review to \(url.path)."
+            try reload()
+            selectedTaskID = task.id
+            selectedRunOutput = review
+            statusMessage = "Wrote local plan review to \(url.path)."
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
-    public func askCodexToReviewPlan() {
-        perform {
-            guard let repository = self.repository, let project = self.selectedProject, var task = self.selectedTask else {
-                throw FactoryError.missingSelection
-            }
-            let url = try self.handoffService.codexPlanReviewHandoff(
-                project: project,
-                task: task,
-                latestPlan: self.latestArtifact(type: .plan)
-            )
+    public func askCodexToReviewPlan() async {
+        guard let repository, let project = selectedProject, var task = selectedTask else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+
+        let worktree = task.localWorktreePath ?? task.codexWorktreePath ?? project.path
+        let runID = UUID().uuidString
+        let directory = paths.runDirectory(project: project, task: task)
+        let promptURL = directory.appendingPathComponent("codex-plan-review-prompt.md")
+        let reviewURL = directory.appendingPathComponent("codex-plan-review.md")
+        let logURL = directory.appendingPathComponent("\(runID.shortID)-codex-plan-review.log")
+        let plan = latestArtifact(type: .plan)
+        let planText = plan.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? "(No local plan artifact found.)"
+        let prompt = planReviewPrompt(
+            project: project,
+            task: task,
+            planPath: plan?.path ?? "missing",
+            planText: planText,
+            reviewer: "Codex"
+        )
+        var run = RunRecord(
+            id: runID,
+            taskId: task.id,
+            executor: "codex_exec",
+            model: nil,
+            status: .running,
+            promptPath: promptURL.path,
+            outputPath: logURL.path,
+            summary: "Codex plan review running"
+        )
+
+        isWorking = true
+        defer { isWorking = false }
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try prompt.write(to: promptURL, atomically: true, encoding: .utf8)
             task.status = .planReview
             task.updatedAt = Date()
             try repository.upsert(task: task)
+            try repository.upsert(run: run)
+            try reload()
+            selectedTaskID = task.id
+            statusMessage = "Codex plan review running..."
+
+            let result = try await commandRunner.run(CommandRequest(
+                executable: "codex",
+                arguments: ["exec", "-C", worktree, "-s", "read-only", "-o", reviewURL.path, "-"],
+                standardInput: prompt
+            ))
+            try result.output.write(to: logURL, atomically: true, encoding: .utf8)
+            let reviewText = (try? String(contentsOfFile: reviewURL.path, encoding: .utf8)) ?? result.output
+            if !FileManager.default.fileExists(atPath: reviewURL.path) {
+                try reviewText.write(to: reviewURL, atomically: true, encoding: .utf8)
+            }
+
+            run.status = result.succeeded ? .succeeded : .failed
+            run.summary = result.succeeded ? "Codex plan review completed" : "Codex plan review failed"
+            run.endedAt = Date()
+            task.status = result.succeeded ? Self.status(for: Self.parsePlanReviewDecision(from: reviewText)) : .planReview
+            if task.status == .planApproved {
+                try writeApprovedPlanSnapshot(project: project, task: task)
+            }
+            task.updatedAt = Date()
+            try repository.upsert(run: run)
+            try repository.upsert(task: task)
             try repository.insert(artifact: Artifact(
                 taskId: task.id,
+                runId: run.id,
+                type: .codexPlanReview,
+                path: reviewURL.path,
+                description: "Read-only Codex plan review"
+            ))
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                runId: run.id,
                 type: .codexPlanReviewHandoff,
-                path: url.path,
+                path: promptURL.path,
                 description: "Read-only Codex plan review prompt"
             ))
-            try self.reload()
-            self.selectedTaskID = task.id
-            self.statusMessage = "Wrote Codex plan review handoff to \(url.path)."
+            try reload()
+            selectedTaskID = task.id
+            selectedRunOutput = reviewText
+            statusMessage = result.succeeded ? "Codex plan review saved to \(reviewURL.path)." : "Codex plan review failed. See \(logURL.path)."
+            if !result.succeeded {
+                errorMessage = result.output
+            }
+        } catch {
+            let output = error.localizedDescription
+            try? output.write(to: logURL, atomically: true, encoding: .utf8)
+            run.status = .failed
+            run.summary = "Codex plan review failed"
+            run.endedAt = Date()
+            try? repository.upsert(run: run)
+            try? reload()
+            selectedTaskID = task.id
+            selectedRunOutput = output
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -430,6 +532,9 @@ public final class AppStore: ObservableObject {
             guard let repository = self.repository, let project = self.selectedProject, var task = self.selectedTask else {
                 throw FactoryError.missingSelection
             }
+            guard task.status == .planApproved else {
+                throw FactoryError.commandFailed("Approve the plan before building locally.")
+            }
             let directory = self.paths.runDirectory(project: project, task: task)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let url = directory.appendingPathComponent("implementation-log.md")
@@ -473,6 +578,10 @@ public final class AppStore: ObservableObject {
     }
 
     public func sendToCodex() async {
+        guard let status = selectedTask?.status, status == .planApproved || status == .escalationRecommended else {
+            errorMessage = "Approve the plan or accept an escalation recommendation before sending to Codex Build."
+            return
+        }
         if selectedTask?.codexWorktreePath == nil {
             await createWorktree(flavor: .codex)
         }
@@ -750,6 +859,15 @@ public final class AppStore: ObservableObject {
         selectedRunOutput = (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? ""
     }
 
+    public func openArtifact(_ artifact: Artifact) async {
+        do {
+            _ = try await commandRunner.run(CommandRequest(executable: "open", arguments: [artifact.path]))
+            statusMessage = "Opened \(artifact.path)."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     public func backupDatabaseNow() {
         perform {
             let timestamp = DateFormatter.backup.string(from: Date())
@@ -769,6 +887,132 @@ public final class AppStore: ObservableObject {
 
     private func latestArtifact(type: ArtifactType) -> Artifact? {
         artifacts.first { $0.type == type.rawValue }
+    }
+
+    public nonisolated static func parsePlanReviewDecision(from text: String) -> PlanReviewDecision {
+        let normalized = text.lowercased()
+        let firstLines = normalized
+            .split(separator: "\n", maxSplits: 12, omittingEmptySubsequences: true)
+            .prefix(12)
+            .joined(separator: "\n")
+        let decisionRegion = firstLines.isEmpty ? normalized : firstLines
+
+        if decisionRegion.contains("escalate_to_codex_build") || decisionRegion.contains("escalate to codex build") {
+            return .escalateToCodexBuild
+        }
+        if decisionRegion.contains("decision: approve") || decisionRegion.contains("recommendation: approve") {
+            return .approve
+        }
+        if decisionRegion.contains("decision: revise") || decisionRegion.contains("recommendation: revise") {
+            return .revise
+        }
+        if decisionRegion.contains("decision: reject") || decisionRegion.contains("recommendation: reject") || decisionRegion.contains("decision: block") {
+            return .reject
+        }
+        return .unknown
+    }
+
+    private nonisolated static func status(for decision: PlanReviewDecision) -> TaskStatus {
+        switch decision {
+        case .approve:
+            return .planApproved
+        case .revise, .unknown:
+            return .planReview
+        case .reject:
+            return .planRejected
+        case .escalateToCodexBuild:
+            return .escalationRecommended
+        }
+    }
+
+    private func writeApprovedPlanSnapshot(project: Project, task: FactoryTask) throws {
+        guard let repository else { throw FactoryError.missingSelection }
+        let directory = paths.runDirectory(project: project, task: task)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let plan = latestArtifact(type: .plan)
+        let planText = plan.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? "(No local plan artifact found.)"
+        let url = directory.appendingPathComponent("approved-plan.md")
+        let markdown = approvedPlanMarkdown(task: task, planPath: plan?.path ?? "missing", planText: planText)
+        try markdown.write(to: url, atomically: true, encoding: .utf8)
+        try repository.insert(artifact: Artifact(
+            taskId: task.id,
+            type: .approvedPlan,
+            path: url.path,
+            description: "Approved plan snapshot"
+        ))
+    }
+
+    private func approvedPlanMarkdown(task: FactoryTask, planPath: String, planText: String) -> String {
+        """
+        # Approved Plan: \(task.title)
+
+        Approved at: \(DateCoding.string(from: Date()))
+        Source plan: \(planPath)
+
+        ## Acceptance Criteria
+        \(task.acceptanceCriteria.isEmpty ? "- No explicit acceptance criteria." : task.acceptanceCriteria.map { "- \($0)" }.joined(separator: "\n"))
+
+        ## Plan
+        ```markdown
+        \(planText)
+        ```
+        """
+    }
+
+    private func planReviewPrompt(project: Project, task: FactoryTask, planPath: String, planText: String, reviewer: String) -> String {
+        let acceptance = task.acceptanceCriteria.isEmpty
+            ? "- Confirm the plan satisfies the task goal."
+            : task.acceptanceCriteria.map { "- \($0)" }.joined(separator: "\n")
+        let tests = project.testCommands.isEmpty
+            ? "- No test commands configured."
+            : project.testCommands.map { "- \($0)" }.joined(separator: "\n")
+
+        return """
+        You are Factory Desktop's \(reviewer). Review only. Do not edit files, run formatters, commit, merge, push, or change the worktree.
+
+        Return a clear decision on the first non-empty line exactly as one of:
+        Decision: approve
+        Decision: revise
+        Decision: reject
+        Decision: escalate_to_codex_build
+
+        Use approve only when the plan is ready for local execution. Use revise when the plan is close but needs edits. Use reject when it is materially wrong or unsafe. Use escalate_to_codex_build when the plan is sound but the implementation should be sent to Codex Build rather than built locally.
+
+        Project:
+        - Name: \(project.name)
+        - Type: \(project.type.rawValue)
+        - Source path: \(project.path)
+        - Default branch: \(project.defaultBranch)
+        - Test commands:
+        \(tests)
+
+        Task:
+        - ID: \(task.id)
+        - Title: \(task.title)
+        - Status: \(task.status.rawValue)
+        - Plan artifact: \(planPath)
+
+        Goal:
+        \(task.goal.isEmpty ? task.title : task.goal)
+
+        Context:
+        \(task.context.isEmpty ? "No extra context provided." : task.context)
+
+        Acceptance criteria:
+        \(acceptance)
+
+        Plan under review:
+        ```markdown
+        \(planText)
+        ```
+
+        After the decision line, include:
+        - Blocking issues, if any
+        - Required revisions, if any
+        - Acceptance coverage
+        - Verification gaps
+        - Residual risk
+        """
     }
 
     private func plannerPrompt(project: Project, task: FactoryTask) -> String {
