@@ -17,23 +17,42 @@ final class FactoryDesktopCoreTests: XCTestCase {
 
     func testWorkflowStagesMatchStagedReviewVocabulary() {
         XCTAssertEqual(TaskStatus.allCases.map(\.rawValue), [
-            "inbox",
+            "backlog",
+            "ready",
             "planning",
-            "plan_ready",
             "plan_review",
-            "plan_approved",
-            "plan_rejected",
-            "escalation_recommended",
+            "approved",
             "building",
-            "built",
             "testing",
-            "needs_review",
-            "ready_to_commit",
+            "needs_fixes",
+            "ready_for_review",
             "done",
-            "blocked"
+            "blocked",
+            "archived"
         ])
-        XCTAssertEqual(TaskStatus.storedValue("approved"), .planApproved)
+        XCTAssertEqual(TaskStatus.storedValue("inbox"), .backlog)
+        XCTAssertEqual(TaskStatus.storedValue("approved"), .approved)
+        XCTAssertEqual(TaskStatus.storedValue("plan_approved"), .approved)
+        XCTAssertEqual(TaskStatus.storedValue("ready_to_commit"), .readyForReview)
         XCTAssertEqual(TaskStatus.storedValue("running"), .building)
+    }
+
+    func testTaskStatusIsKanbanReady() {
+        XCTAssertEqual(TaskStatus.backlog.sortOrder, 0)
+        XCTAssertLessThan(TaskStatus.ready.sortOrder, TaskStatus.testing.sortOrder)
+        XCTAssertEqual(TaskStatus.needsFixes.category, .attention)
+        XCTAssertEqual(TaskStatus.readyForReview.category, .review)
+        XCTAssertEqual(TaskStatus.archived.category, .archive)
+    }
+
+    func testAutomaticStatusTransitionHelper() {
+        XCTAssertEqual(TaskStatusTransition.status(after: .planGenerated, current: .ready), .planReview)
+        XCTAssertEqual(TaskStatusTransition.status(after: .planApproved, current: .planReview), .approved)
+        XCTAssertEqual(TaskStatusTransition.status(after: .buildFailed, current: .building), .needsFixes)
+        XCTAssertEqual(TaskStatusTransition.status(after: .testsStarted, current: .approved), .testing)
+        XCTAssertEqual(TaskStatusTransition.status(after: .testsFailed, current: .testing), .needsFixes)
+        XCTAssertEqual(TaskStatusTransition.status(after: .testsFinished, current: .testing, testsPassed: true, diffExists: true), .readyForReview)
+        XCTAssertNil(TaskStatusTransition.status(after: .visualQCFinished, current: .readyForReview))
     }
 
     func testArtifactTypesMatchStagedReviewVocabulary() {
@@ -440,7 +459,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
         let review = TaskStateReview(
             projectId: "project",
             taskId: "task",
-            status: .needsReview,
+            status: .readyForReview,
             summary: "Tests were run; diff review is still needed.",
             latestArtifacts: [],
             worktreeSummaries: [],
@@ -468,6 +487,28 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(health.nextAction, "Review Diff")
     }
 
+    func testWorkflowCheckSummariesExposeHonestFoundationStates() {
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: "/tmp/demo", testCommands: ["swift test"])
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        let run = RunRecord(
+            id: "run-1",
+            taskId: "task",
+            executor: "command",
+            status: .failed,
+            outputPath: "/tmp/test-output.txt",
+            summary: "Failed: swift test",
+            startedAt: started,
+            endedAt: started.addingTimeInterval(12)
+        )
+        let artifact = Artifact(id: "test-artifact", taskId: "task", runId: "run-1", type: .testOutput, path: "/tmp/test-output.txt")
+
+        let summaries = WorkflowCheckSummariesBuilder.build(project: project, runs: [run], artifacts: [artifact])
+
+        XCTAssertEqual(summaries.first { $0.kind == .unitTests }?.status, .failed)
+        XCTAssertEqual(summaries.first { $0.kind == .e2eTests }?.status, .notConfigured)
+        XCTAssertEqual(summaries.first { $0.kind == .visualQC }?.status, .notConfigured)
+    }
+
     func testTaskStateMissingWorktreeSummaryDoesNotCrash() {
         let summary = TaskWorktreeSummary(label: "Local worktree", path: "/tmp/missing", exists: false)
 
@@ -486,7 +527,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
         let review = TaskStateReview(
             projectId: "project",
             taskId: "task",
-            status: .planReady,
+            status: .planReview,
             summary: "summary",
             latestArtifacts: [],
             worktreeSummaries: [],
@@ -503,7 +544,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
             recommendedAction: .planLocally
         )
 
-        XCTAssertEqual(review.status, .planReady)
+        XCTAssertEqual(review.status, .planReview)
     }
 
     func testBuildInfoRepoStateParsing() {
@@ -549,9 +590,41 @@ final class FactoryDesktopCoreTests: XCTestCase {
         try MigrationRunner(database: database, paths: paths).migrate()
 
         let rows = try database.query(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'tasks', 'runs', 'artifacts', 'schema_migrations');"
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'tasks', 'runs', 'artifacts', 'task_events', 'schema_migrations');"
         )
-        XCTAssertEqual(Set(rows.compactMap { $0["name"] ?? nil }), Set(["projects", "tasks", "runs", "artifacts", "schema_migrations"]))
+        XCTAssertEqual(Set(rows.compactMap { $0["name"] ?? nil }), Set(["projects", "tasks", "runs", "artifacts", "task_events", "schema_migrations"]))
+    }
+
+    func testRepositoryPersistsManualStatusChangeEvent() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("factory-desktop-tests-\(UUID().uuidString)", isDirectory: true)
+        let paths = FactoryPaths(root: root)
+        try paths.ensureBaseDirectories()
+        let database = try SQLiteDatabase(url: paths.database)
+        try MigrationRunner(database: database, paths: paths).migrate()
+        let repository = FactoryRepository(database: database)
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: "/tmp/demo")
+        var task = FactoryTask(id: "task", projectId: project.id, title: "Manual status")
+
+        try repository.upsert(project: project)
+        try repository.upsert(task: task)
+        let previousStatus = task.status
+        task.status = .readyForReview
+        try repository.upsert(task: task)
+        try repository.insert(taskEvent: TaskEvent(
+            taskId: task.id,
+            kind: .statusChangedManually,
+            source: .manual,
+            message: "Manual status changed to Ready for Review.",
+            previousStatus: previousStatus,
+            newStatus: task.status
+        ))
+
+        XCTAssertEqual(try repository.tasks(projectId: project.id).first?.status, .readyForReview)
+        let events = try repository.taskEvents(taskId: task.id)
+        XCTAssertEqual(events.first?.kind, .statusChangedManually)
+        XCTAssertEqual(events.first?.previousStatus, .backlog)
+        XCTAssertEqual(events.first?.newStatus, .readyForReview)
     }
 
     private func XCTAssertTaskStateRecommendation(

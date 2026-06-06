@@ -204,7 +204,7 @@ public struct TaskStateRecommendationInput: Equatable {
 
     public init(
         taskType: TaskType = .coding,
-        status: TaskStatus = .inbox,
+        status: TaskStatus = .backlog,
         hasExistingWorktree: Bool = false,
         hasPreflight: Bool = false,
         hasRiskyPreflight: Bool = false,

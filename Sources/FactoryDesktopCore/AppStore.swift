@@ -7,6 +7,7 @@ public final class AppStore: ObservableObject {
     @Published public private(set) var tasks: [FactoryTask] = []
     @Published public private(set) var runs: [RunRecord] = []
     @Published public private(set) var artifacts: [Artifact] = []
+    @Published public private(set) var taskEvents: [TaskEvent] = []
     @Published public var selectedProjectID: String?
     @Published public var selectedTaskID: String?
     @Published public var selectedModel: String = ModelPolicy.plannerDefault
@@ -118,6 +119,14 @@ public final class AppStore: ObservableObject {
         )
     }
 
+    public var workflowCheckSummaries: [WorkflowCheckSummary] {
+        WorkflowCheckSummariesBuilder.build(
+            project: selectedProject,
+            runs: runsForSelectedTask,
+            artifacts: artifacts
+        )
+    }
+
     public var selectedTaskWorktreeDisplays: [TaskWorktreeDisplay] {
         selectedTask.map(TaskWorktreeDisplayMapper.displays(for:)) ?? []
     }
@@ -172,9 +181,11 @@ public final class AppStore: ObservableObject {
         if let selectedTask {
             runs = try repository.runs(taskId: selectedTask.id)
             artifacts = try repository.artifacts(taskId: selectedTask.id)
+            taskEvents = try repository.taskEvents(taskId: selectedTask.id)
         } else {
             runs = []
             artifacts = []
+            taskEvents = []
         }
     }
 
@@ -249,10 +260,18 @@ public final class AppStore: ObservableObject {
                 projectId: project.id,
                 title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled task" : title,
                 type: type,
-                status: .inbox,
+                status: .backlog,
                 goal: goal
             )
             try repository.upsert(task: task)
+            try repository.insert(taskEvent: TaskEvent(
+                taskId: task.id,
+                kind: .statusChangedManually,
+                source: .manual,
+                message: "Task created.",
+                previousStatus: nil,
+                newStatus: task.status
+            ))
             try self.reload()
             self.selectedProjectID = project.id
             self.selectedTaskID = task.id
@@ -263,12 +282,39 @@ public final class AppStore: ObservableObject {
     public func saveTask(_ task: FactoryTask) {
         perform {
             guard let repository = self.repository else { return }
+            let previousStatus = self.tasks.first { $0.id == task.id }?.status
             var updated = task
             updated.updatedAt = Date()
             try repository.upsert(task: updated)
+            if let previousStatus, previousStatus != updated.status {
+                try repository.insert(taskEvent: TaskEvent(
+                    taskId: updated.id,
+                    kind: .statusChangedManually,
+                    source: .manual,
+                    message: "Manual status changed to \(updated.status.displayName).",
+                    previousStatus: previousStatus,
+                    newStatus: updated.status
+                ))
+            }
             try self.reload()
             self.selectedTaskID = updated.id
             self.statusMessage = "Saved task."
+        }
+    }
+
+    public func updateSelectedTaskStatus(_ status: TaskStatus) {
+        perform {
+            guard let task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            try self.updateStatus(
+                for: task,
+                to: status,
+                source: .manual,
+                eventKind: .statusChangedManually,
+                message: "Manual status changed to \(status.displayName)."
+            )
+            self.statusMessage = "Task status changed to \(status.displayName)."
         }
     }
 
@@ -398,9 +444,15 @@ public final class AppStore: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try prompt.write(to: promptURL, atomically: true, encoding: .utf8)
-            task.status = .planning
-            task.updatedAt = Date()
-            try repository.upsert(task: task)
+            try updateStatus(
+                for: &task,
+                to: .planning,
+                source: .automatic,
+                eventKind: .statusChangedAutomatically,
+                runId: run.id,
+                message: "Planning run started.",
+                repository: repository
+            )
             try repository.upsert(run: run)
             try reload()
             selectedTaskID = task.id
@@ -415,24 +467,30 @@ public final class AppStore: ObservableObject {
             run.status = .succeeded
             run.summary = "Planner output saved."
             run.endedAt = Date()
-            task.status = .planReady
-            task.updatedAt = Date()
             try repository.upsert(run: run)
-            try repository.upsert(task: task)
-            try repository.insert(artifact: Artifact(
+            let plannerPromptArtifact = Artifact(
                 taskId: task.id,
                 runId: run.id,
                 type: .plannerPrompt,
                 path: promptURL.path,
                 description: "Local planner prompt"
-            ))
-            try repository.insert(artifact: Artifact(
+            )
+            try repository.insert(artifact: plannerPromptArtifact)
+            let planArtifact = Artifact(
                 taskId: task.id,
                 runId: run.id,
                 type: .plan,
                 path: planURL.path,
                 description: "Local planner output"
-            ))
+            )
+            try repository.insert(artifact: planArtifact)
+            try applyWorkflowEvent(
+                .planGenerated,
+                to: &task,
+                runId: run.id,
+                artifactId: planArtifact.id,
+                message: "Plan generated and ready for review."
+            )
             try reload()
             selectedTaskID = task.id
             selectedRunOutput = output
@@ -479,18 +537,26 @@ public final class AppStore: ObservableObject {
                 contextTokens: ModelPolicy.effectiveContext(for: selectedModel)
             )
             try review.write(to: url, atomically: true, encoding: .utf8)
-            task.status = Self.status(for: Self.parsePlanReviewDecision(from: review))
-            if task.status == .planApproved {
+            let decision = Self.parsePlanReviewDecision(from: review)
+            let nextStatus = Self.status(for: decision)
+            try updateStatus(
+                for: &task,
+                to: nextStatus,
+                source: .automatic,
+                eventKind: decision == .approve ? .planApproved : .statusChangedAutomatically,
+                message: "Local plan review decision: \(decision.rawValue).",
+                repository: repository
+            )
+            if task.status == .approved {
                 try writeApprovedPlanSnapshot(project: project, task: task)
             }
-            task.updatedAt = Date()
-            try repository.upsert(task: task)
-            try repository.insert(artifact: Artifact(
+            let artifact = Artifact(
                 taskId: task.id,
                 type: .localPlanReview,
                 path: url.path,
                 description: "Local model plan review"
-            ))
+            )
+            try repository.insert(artifact: artifact)
             try reload()
             selectedTaskID = task.id
             selectedRunOutput = review
@@ -538,9 +604,15 @@ public final class AppStore: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try prompt.write(to: promptURL, atomically: true, encoding: .utf8)
-            task.status = .planReview
-            task.updatedAt = Date()
-            try repository.upsert(task: task)
+            try updateStatus(
+                for: &task,
+                to: .planReview,
+                source: .automatic,
+                eventKind: .statusChangedAutomatically,
+                runId: run.id,
+                message: "Codex plan review started.",
+                repository: repository
+            )
             try repository.upsert(run: run)
             try reload()
             selectedTaskID = task.id
@@ -560,27 +632,37 @@ public final class AppStore: ObservableObject {
             run.status = result.succeeded ? .succeeded : .failed
             run.summary = result.succeeded ? "Codex plan review completed" : "Codex plan review failed"
             run.endedAt = Date()
-            task.status = result.succeeded ? Self.status(for: Self.parsePlanReviewDecision(from: reviewText)) : .planReview
-            if task.status == .planApproved {
+            let decision = Self.parsePlanReviewDecision(from: reviewText)
+            let nextStatus = result.succeeded ? Self.status(for: decision) : .planReview
+            try updateStatus(
+                for: &task,
+                to: nextStatus,
+                source: .automatic,
+                eventKind: decision == .approve ? .planApproved : .statusChangedAutomatically,
+                runId: run.id,
+                message: result.succeeded ? "Codex plan review decision: \(decision.rawValue)." : "Codex plan review failed.",
+                repository: repository
+            )
+            if task.status == .approved {
                 try writeApprovedPlanSnapshot(project: project, task: task)
             }
-            task.updatedAt = Date()
             try repository.upsert(run: run)
-            try repository.upsert(task: task)
-            try repository.insert(artifact: Artifact(
+            let reviewArtifact = Artifact(
                 taskId: task.id,
                 runId: run.id,
                 type: .codexPlanReview,
                 path: reviewURL.path,
                 description: "Read-only Codex plan review"
-            ))
-            try repository.insert(artifact: Artifact(
+            )
+            try repository.insert(artifact: reviewArtifact)
+            let promptArtifact = Artifact(
                 taskId: task.id,
                 runId: run.id,
                 type: .codexPlanReviewHandoff,
                 path: promptURL.path,
                 description: "Read-only Codex plan review prompt"
-            ))
+            )
+            try repository.insert(artifact: promptArtifact)
             try reload()
             selectedTaskID = task.id
             selectedRunOutput = reviewText
@@ -648,15 +730,19 @@ public final class AppStore: ObservableObject {
             ```
             """
             try markdown.write(to: url, atomically: true, encoding: .utf8)
-            task.status = .planApproved
-            task.updatedAt = Date()
-            try repository.upsert(task: task)
-            try repository.insert(artifact: Artifact(
+            let artifact = Artifact(
                 taskId: task.id,
                 type: .approvedPlan,
                 path: url.path,
                 description: "Approved plan snapshot"
-            ))
+            )
+            try repository.insert(artifact: artifact)
+            try self.applyWorkflowEvent(
+                .planApproved,
+                to: &task,
+                artifactId: artifact.id,
+                message: "Plan approved manually."
+            )
             try self.reload()
             self.selectedTaskID = task.id
             self.statusMessage = "Approved plan and wrote \(url.path)."
@@ -668,7 +754,7 @@ public final class AppStore: ObservableObject {
             guard let repository = self.repository, let project = self.selectedProject, var task = self.selectedTask else {
                 throw FactoryError.missingSelection
             }
-            guard task.status == .planApproved else {
+            guard task.status == .approved else {
                 throw FactoryError.commandFailed("Approve the plan before building locally.")
             }
             let directory = self.paths.runDirectory(project: project, task: task)
@@ -685,15 +771,19 @@ public final class AppStore: ObservableObject {
             - Next step: make the implementation changes manually in the task worktree, then run tests and review the diff.
             """
             try markdown.write(to: url, atomically: true, encoding: .utf8)
-            task.status = .building
-            task.updatedAt = Date()
-            try repository.upsert(task: task)
-            try repository.insert(artifact: Artifact(
+            let artifact = Artifact(
                 taskId: task.id,
                 type: .implementationLog,
                 path: url.path,
                 description: "Manual implementation placeholder"
-            ))
+            )
+            try repository.insert(artifact: artifact)
+            try self.applyWorkflowEvent(
+                .buildStarted,
+                to: &task,
+                artifactId: artifact.id,
+                message: "Manual build handoff placeholder created."
+            )
             try self.reload()
             self.selectedTaskID = task.id
             self.statusMessage = "Wrote implementation placeholder to \(url.path)."
@@ -714,7 +804,7 @@ public final class AppStore: ObservableObject {
     }
 
     public func sendToCodex() async {
-        guard let status = selectedTask?.status, status == .planApproved || status == .escalationRecommended else {
+        guard let status = selectedTask?.status, status == .approved else {
             errorMessage = "Approve the plan or accept an escalation recommendation before sending to Codex Build."
             return
         }
@@ -797,26 +887,36 @@ public final class AppStore: ObservableObject {
 
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            task.status = .testing
-            task.updatedAt = Date()
-            try repository.upsert(task: task)
+            try applyWorkflowEvent(
+                .testsStarted,
+                to: &task,
+                runId: run.id,
+                message: "Test command started: \(command)."
+            )
             try repository.upsert(run: run)
             let result = try await gitService.runTestCommand(command, in: worktreePath)
             try result.output.write(to: outputURL, atomically: true, encoding: .utf8)
             run.status = .succeeded
             run.summary = "Passed: \(command)"
             run.endedAt = Date()
-            task.status = .needsReview
-            task.updatedAt = Date()
             try repository.upsert(run: run)
-            try repository.upsert(task: task)
-            try repository.insert(artifact: Artifact(
+            let artifact = Artifact(
                 taskId: task.id,
                 runId: run.id,
                 type: .testOutput,
                 path: outputURL.path,
                 description: "Test output: \(command)"
-            ))
+            )
+            try repository.insert(artifact: artifact)
+            try applyWorkflowEvent(
+                .testsFinished,
+                to: &task,
+                runId: run.id,
+                artifactId: artifact.id,
+                message: "Test command passed: \(command).",
+                testsPassed: true,
+                diffExists: !gitSnapshot.changedFiles.isEmpty
+            )
             try reload()
             selectedTaskID = task.id
             selectedRunOutput = result.output
@@ -827,17 +927,23 @@ public final class AppStore: ObservableObject {
             run.status = .failed
             run.summary = "Failed: \(command)"
             run.endedAt = Date()
-            task.status = .blocked
-            task.updatedAt = Date()
             try? repository.upsert(run: run)
-            try? repository.upsert(task: task)
-            try? repository.insert(artifact: Artifact(
+            let artifact = Artifact(
                 taskId: task.id,
                 runId: run.id,
                 type: .testOutput,
                 path: outputURL.path,
                 description: "Failed test output: \(command)"
-            ))
+            )
+            try? repository.insert(artifact: artifact)
+            try? applyWorkflowEvent(
+                .testsFailed,
+                to: &task,
+                runId: run.id,
+                artifactId: artifact.id,
+                message: "Test command failed: \(command).",
+                testsPassed: false
+            )
             try? reload()
             selectedTaskID = task.id
             selectedRunOutput = output
@@ -892,15 +998,19 @@ public final class AppStore: ObservableObject {
             ```
             """
             try markdown.write(to: url, atomically: true, encoding: .utf8)
-            task.status = .readyToCommit
-            task.updatedAt = Date()
-            try repository.upsert(task: task)
-            try repository.insert(artifact: Artifact(
+            let artifact = Artifact(
                 taskId: task.id,
                 type: .localDiffReview,
                 path: url.path,
                 description: "Local diff review"
-            ))
+            )
+            try repository.insert(artifact: artifact)
+            try applyWorkflowEvent(
+                .diffReviewed,
+                to: &task,
+                artifactId: artifact.id,
+                message: "Local diff review created."
+            )
             gitSnapshot = snapshot
             try reload()
             selectedTaskID = task.id
@@ -924,15 +1034,19 @@ public final class AppStore: ObservableObject {
                 gitSnapshot: self.gitSnapshot,
                 latestRun: self.runsForSelectedTask.first
             )
-            task.status = .needsReview
-            task.updatedAt = Date()
-            try repository.upsert(task: task)
-            try repository.insert(artifact: Artifact(
+            let artifact = Artifact(
                 taskId: task.id,
                 type: .codexDiffReviewHandoff,
                 path: url.path,
                 description: "Read-only Codex diff review prompt"
-            ))
+            )
+            try repository.insert(artifact: artifact)
+            try self.applyWorkflowEvent(
+                .statusChangedAutomatically,
+                to: &task,
+                artifactId: artifact.id,
+                message: "Codex diff review handoff generated."
+            )
             try self.reload()
             self.selectedTaskID = task.id
             self.statusMessage = "Wrote Codex diff review handoff to \(url.path)."
@@ -950,11 +1064,14 @@ public final class AppStore: ObservableObject {
                 gitSnapshot: self.gitSnapshot,
                 latestRun: self.runsForSelectedTask.first
             )
-            task.status = .readyToCommit
-            task.updatedAt = Date()
-            try repository.upsert(task: task)
             let artifact = Artifact(taskId: task.id, type: .finalReview, path: url.path, description: "Final review note")
             try repository.insert(artifact: artifact)
+            try self.applyWorkflowEvent(
+                .diffReviewed,
+                to: &task,
+                artifactId: artifact.id,
+                message: "Final review note created."
+            )
             try self.reload()
             self.selectedTaskID = task.id
             self.statusMessage = "Wrote review note to \(url.path)."
@@ -1134,6 +1251,88 @@ public final class AppStore: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func applyWorkflowEvent(
+        _ eventKind: TaskWorkflowEventKind,
+        to task: inout FactoryTask,
+        runId: String? = nil,
+        artifactId: String? = nil,
+        message: String = "",
+        testsPassed: Bool? = nil,
+        diffExists: Bool? = nil
+    ) throws {
+        guard let repository else { throw FactoryError.missingSelection }
+        let resolvedDiffExists = diffExists ?? !gitSnapshot.changedFiles.isEmpty
+        let nextStatus = TaskStatusTransition.status(
+            after: eventKind,
+            current: task.status,
+            testsPassed: testsPassed,
+            diffExists: resolvedDiffExists
+        )
+        try updateStatus(
+            for: &task,
+            to: nextStatus,
+            source: .automatic,
+            eventKind: eventKind,
+            runId: runId,
+            artifactId: artifactId,
+            message: message.isEmpty ? eventKind.displayName : message,
+            repository: repository
+        )
+    }
+
+    private func updateStatus(
+        for task: FactoryTask,
+        to status: TaskStatus,
+        source: TaskStatusChangeSource,
+        eventKind: TaskWorkflowEventKind,
+        runId: String? = nil,
+        artifactId: String? = nil,
+        message: String
+    ) throws {
+        var updated = task
+        try updateStatus(
+            for: &updated,
+            to: status,
+            source: source,
+            eventKind: eventKind,
+            runId: runId,
+            artifactId: artifactId,
+            message: message,
+            repository: repository
+        )
+        try reload()
+        selectedTaskID = updated.id
+    }
+
+    private func updateStatus(
+        for task: inout FactoryTask,
+        to status: TaskStatus?,
+        source: TaskStatusChangeSource,
+        eventKind: TaskWorkflowEventKind,
+        runId: String? = nil,
+        artifactId: String? = nil,
+        message: String,
+        repository: FactoryRepository?
+    ) throws {
+        guard let repository else { throw FactoryError.missingSelection }
+        let previousStatus = task.status
+        if let status {
+            task.status = status
+        }
+        task.updatedAt = Date()
+        try repository.upsert(task: task)
+        try repository.insert(taskEvent: TaskEvent(
+            taskId: task.id,
+            kind: eventKind,
+            source: source,
+            message: message,
+            previousStatus: previousStatus,
+            newStatus: status ?? task.status,
+            runId: runId,
+            artifactId: artifactId
+        ))
     }
 
     private func latestArtifact(type: ArtifactType) -> Artifact? {
@@ -1373,13 +1572,13 @@ public final class AppStore: ObservableObject {
     private nonisolated static func status(for decision: PlanReviewDecision) -> TaskStatus {
         switch decision {
         case .approve:
-            return .planApproved
+            return .approved
         case .revise, .unknown:
             return .planReview
         case .reject:
-            return .planRejected
+            return .needsFixes
         case .escalateToCodexBuild:
-            return .escalationRecommended
+            return .approved
         }
     }
 

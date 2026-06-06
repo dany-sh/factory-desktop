@@ -134,3 +134,80 @@ public enum TaskWorkflowHealthBuilder {
         return "missing"
     }
 }
+
+public enum WorkflowCheckSummariesBuilder {
+    public static func build(project: Project?, runs: [RunRecord], artifacts: [Artifact]) -> [WorkflowCheckSummary] {
+        WorkflowRunKind.allCases.map { kind in
+            switch kind {
+            case .build:
+                return summary(
+                    kind: kind,
+                    runs: runs,
+                    artifacts: artifacts,
+                    command: nil,
+                    configured: false
+                )
+            case .unitTests:
+                return summary(
+                    kind: kind,
+                    runs: runs.filter { run in
+                        run.executor == "command" && project?.testCommands.contains(run.summary.removingRunStatusPrefix) == true
+                    },
+                    artifacts: artifacts.filter { $0.artifactType == .testOutput },
+                    command: project?.testCommands.first,
+                    configured: project?.testCommands.isEmpty == false
+                )
+            case .integrationTests:
+                return summary(kind: kind, runs: [], artifacts: [], command: nil, configured: false)
+            case .e2eTests:
+                return summary(kind: kind, runs: [], artifacts: [], command: nil, configured: false)
+            case .visualQC:
+                return summary(kind: kind, runs: [], artifacts: [], command: nil, configured: false)
+            }
+        }
+    }
+
+    private static func summary(
+        kind: WorkflowRunKind,
+        runs: [RunRecord],
+        artifacts: [Artifact],
+        command: String?,
+        configured: Bool
+    ) -> WorkflowCheckSummary {
+        guard configured else {
+            return WorkflowCheckSummary(kind: kind, status: .notConfigured, command: command)
+        }
+        guard let run = runs.sorted(by: { $0.startedAt > $1.startedAt }).first else {
+            return WorkflowCheckSummary(kind: kind, status: .notRun, command: command)
+        }
+        return WorkflowCheckSummary(
+            kind: kind,
+            status: status(for: run),
+            run: run,
+            command: command,
+            artifact: artifacts.sorted(by: { $0.createdAt > $1.createdAt }).first
+        )
+    }
+
+    private static func status(for run: RunRecord) -> WorkflowCheckStatus {
+        switch run.status {
+        case .queued:
+            return .notRun
+        case .running:
+            return .running
+        case .succeeded:
+            return .passed
+        case .failed:
+            return .failed
+        case .cancelled:
+            return .cancelled
+        }
+    }
+}
+
+private extension String {
+    var removingRunStatusPrefix: String {
+        replacingOccurrences(of: "Passed: ", with: "")
+            .replacingOccurrences(of: "Failed: ", with: "")
+    }
+}

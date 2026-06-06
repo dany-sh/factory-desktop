@@ -177,6 +177,20 @@ public final class FactoryRepository {
         return rows.map(artifact(from:))
     }
 
+    public func taskEvents(taskId: String, limit: Int = 50) throws -> [TaskEvent] {
+        let rows = try database.query(
+            """
+            SELECT id, task_id, kind, source, message, previous_status, new_status, run_id, artifact_id, created_at
+            FROM task_events
+            WHERE task_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?;
+            """,
+            binds: [.text(taskId), .int(limit)]
+        )
+        return rows.map(taskEvent(from:))
+    }
+
     public func insert(artifact: Artifact) throws {
         try database.execute(
             """
@@ -191,6 +205,29 @@ public final class FactoryRepository {
                 .text(artifact.path),
                 .text(artifact.description),
                 .text(DateCoding.string(from: artifact.createdAt))
+            ]
+        )
+    }
+
+    public func insert(taskEvent: TaskEvent) throws {
+        try database.execute(
+            """
+            INSERT INTO task_events (
+              id, task_id, kind, source, message, previous_status, new_status, run_id, artifact_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            binds: [
+                .text(taskEvent.id),
+                .text(taskEvent.taskId),
+                .text(taskEvent.kind.rawValue),
+                .text(taskEvent.source.rawValue),
+                .text(taskEvent.message),
+                .text(taskEvent.previousStatus?.rawValue),
+                .text(taskEvent.newStatus?.rawValue),
+                .text(taskEvent.runId),
+                .text(taskEvent.artifactId),
+                .text(DateCoding.string(from: taskEvent.createdAt))
             ]
         )
     }
@@ -253,6 +290,21 @@ public final class FactoryRepository {
             type: row.required("type"),
             path: row.required("path"),
             description: row.optional("description") ?? "",
+            createdAt: DateCoding.date(from: row.required("created_at"))
+        )
+    }
+
+    private func taskEvent(from row: [String: String?]) -> TaskEvent {
+        TaskEvent(
+            id: row.required("id"),
+            taskId: row.required("task_id"),
+            kind: TaskWorkflowEventKind(rawValue: row.required("kind")) ?? .statusChangedAutomatically,
+            source: TaskStatusChangeSource(rawValue: row.optional("source") ?? "") ?? .automatic,
+            message: row.optional("message") ?? "",
+            previousStatus: row.optional("previous_status").map(TaskStatus.storedValue),
+            newStatus: row.optional("new_status").map(TaskStatus.storedValue),
+            runId: row.optional("run_id"),
+            artifactId: row.optional("artifact_id"),
             createdAt: DateCoding.date(from: row.required("created_at"))
         )
     }

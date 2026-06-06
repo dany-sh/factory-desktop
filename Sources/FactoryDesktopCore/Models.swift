@@ -25,47 +25,287 @@ public enum ProjectType: String, CaseIterable, Codable, Identifiable {
 }
 
 public enum TaskStatus: String, CaseIterable, Codable, Identifiable {
-    case inbox
+    case backlog
+    case ready
     case planning
-    case planReady = "plan_ready"
     case planReview = "plan_review"
-    case planApproved = "plan_approved"
-    case planRejected = "plan_rejected"
-    case escalationRecommended = "escalation_recommended"
+    case approved
     case building
-    case built
     case testing
-    case needsReview = "needs_review"
-    case readyToCommit = "ready_to_commit"
+    case needsFixes = "needs_fixes"
+    case readyForReview = "ready_for_review"
     case done
     case blocked
+    case archived
 
     public var id: String { rawValue }
 
     public var displayName: String {
         switch self {
-        case .inbox: "Inbox"
+        case .backlog: "Backlog"
+        case .ready: "Ready"
         case .planning: "Planning"
-        case .planReady: "Plan ready"
-        case .planReview: "Plan review"
-        case .planApproved: "Plan approved"
-        case .planRejected: "Plan rejected"
-        case .escalationRecommended: "Escalation recommended"
+        case .planReview: "Plan Review"
+        case .approved: "Approved"
         case .building: "Building"
-        case .built: "Built"
         case .testing: "Testing"
-        case .needsReview: "Needs review"
-        case .readyToCommit: "Ready to commit"
+        case .needsFixes: "Needs Fixes"
+        case .readyForReview: "Ready for Review"
         case .done: "Done"
         case .blocked: "Blocked"
+        case .archived: "Archived"
+        }
+    }
+
+    public var sortOrder: Int {
+        switch self {
+        case .backlog: 0
+        case .ready: 10
+        case .planning: 20
+        case .planReview: 30
+        case .approved: 40
+        case .building: 50
+        case .testing: 60
+        case .needsFixes: 70
+        case .readyForReview: 80
+        case .done: 90
+        case .blocked: 100
+        case .archived: 110
+        }
+    }
+
+    public var category: TaskStatusCategory {
+        switch self {
+        case .backlog, .ready:
+            return .queue
+        case .planning, .planReview, .approved:
+            return .planning
+        case .building, .testing:
+            return .active
+        case .needsFixes, .blocked:
+            return .attention
+        case .readyForReview:
+            return .review
+        case .done:
+            return .complete
+        case .archived:
+            return .archive
         }
     }
 
     public static func storedValue(_ value: String?) -> TaskStatus {
         switch value {
-        case "approved": .planApproved
-        case "running": .building
-        default: TaskStatus(rawValue: value ?? "") ?? .inbox
+        case "inbox", nil:
+            return .backlog
+        case "plan_ready", "plan_review":
+            return .planReview
+        case "approved", "plan_approved", "escalation_recommended":
+            return .approved
+        case "plan_rejected":
+            return .needsFixes
+        case "built", "needs_review", "ready_to_commit":
+            return .readyForReview
+        case "running":
+            return .building
+        default:
+            return TaskStatus(rawValue: value ?? "") ?? .backlog
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self = Self.storedValue(try container.decode(String.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+public enum TaskStatusCategory: String, CaseIterable, Codable, Identifiable {
+    case queue
+    case planning
+    case active
+    case attention
+    case review
+    case complete
+    case archive
+
+    public var id: String { rawValue }
+}
+
+public enum TaskStatusChangeSource: String, CaseIterable, Codable, Identifiable {
+    case manual
+    case automatic
+
+    public var id: String { rawValue }
+}
+
+public enum TaskWorkflowEventKind: String, CaseIterable, Codable, Identifiable {
+    case statusChangedManually = "status_changed_manually"
+    case statusChangedAutomatically = "status_changed_automatically"
+    case planGenerated = "plan_generated"
+    case planApproved = "plan_approved"
+    case planRejected = "plan_rejected"
+    case buildStarted = "build_started"
+    case buildFinished = "build_finished"
+    case buildFailed = "build_failed"
+    case testsStarted = "tests_started"
+    case testsFinished = "tests_finished"
+    case testsFailed = "tests_failed"
+    case visualQCStarted = "visual_qc_started"
+    case visualQCFinished = "visual_qc_finished"
+    case visualQCFailed = "visual_qc_failed"
+    case diffReviewed = "diff_reviewed"
+    case mergedClosed = "merged_closed"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        rawValue.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+}
+
+public struct TaskEvent: Identifiable, Equatable, Codable {
+    public var id: String
+    public var taskId: String
+    public var kind: TaskWorkflowEventKind
+    public var source: TaskStatusChangeSource
+    public var message: String
+    public var previousStatus: TaskStatus?
+    public var newStatus: TaskStatus?
+    public var runId: String?
+    public var artifactId: String?
+    public var createdAt: Date
+
+    public init(
+        id: String = UUID().uuidString,
+        taskId: String,
+        kind: TaskWorkflowEventKind,
+        source: TaskStatusChangeSource,
+        message: String = "",
+        previousStatus: TaskStatus? = nil,
+        newStatus: TaskStatus? = nil,
+        runId: String? = nil,
+        artifactId: String? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.taskId = taskId
+        self.kind = kind
+        self.source = source
+        self.message = message
+        self.previousStatus = previousStatus
+        self.newStatus = newStatus
+        self.runId = runId
+        self.artifactId = artifactId
+        self.createdAt = createdAt
+    }
+}
+
+public enum WorkflowCheckStatus: String, CaseIterable, Codable, Identifiable {
+    case notConfigured = "not_configured"
+    case notRun = "not_run"
+    case running
+    case passed
+    case failed
+    case cancelled
+    case unknown
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .notConfigured: "Not Configured"
+        case .notRun: "Not Run"
+        case .running: "Running"
+        case .passed: "Passed"
+        case .failed: "Failed"
+        case .cancelled: "Cancelled"
+        case .unknown: "Unknown"
+        }
+    }
+}
+
+public enum WorkflowRunKind: String, CaseIterable, Codable, Identifiable {
+    case build
+    case unitTests = "unit_tests"
+    case integrationTests = "integration_tests"
+    case e2eTests = "e2e_tests"
+    case visualQC = "visual_qc"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .build: "Build"
+        case .unitTests: "Unit Tests"
+        case .integrationTests: "Integration Tests"
+        case .e2eTests: "E2E Tests"
+        case .visualQC: "Visual QC"
+        }
+    }
+}
+
+public struct WorkflowCheckSummary: Identifiable, Equatable {
+    public var id: WorkflowRunKind { kind }
+    public var kind: WorkflowRunKind
+    public var status: WorkflowCheckStatus
+    public var run: RunRecord?
+    public var command: String?
+    public var artifact: Artifact?
+
+    public init(
+        kind: WorkflowRunKind,
+        status: WorkflowCheckStatus,
+        run: RunRecord? = nil,
+        command: String? = nil,
+        artifact: Artifact? = nil
+    ) {
+        self.kind = kind
+        self.status = status
+        self.run = run
+        self.command = command
+        self.artifact = artifact
+    }
+}
+
+public enum TaskStatusTransition {
+    public static func status(
+        after event: TaskWorkflowEventKind,
+        current: TaskStatus,
+        testsPassed: Bool? = nil,
+        diffExists: Bool = false
+    ) -> TaskStatus? {
+        switch event {
+        case .planGenerated:
+            return .planReview
+        case .planApproved:
+            return .approved
+        case .planRejected:
+            return .needsFixes
+        case .buildStarted:
+            return .building
+        case .buildFailed:
+            return .needsFixes
+        case .buildFinished:
+            return current == .building ? .approved : current
+        case .testsStarted:
+            return .testing
+        case .testsFailed:
+            return .needsFixes
+        case .testsFinished:
+            guard testsPassed == true else { return testsPassed == false ? .needsFixes : current }
+            return diffExists ? .readyForReview : current
+        case .diffReviewed:
+            return .readyForReview
+        case .mergedClosed:
+            return .done
+        case .visualQCFailed:
+            return .needsFixes
+        case .visualQCStarted, .visualQCFinished, .statusChangedManually, .statusChangedAutomatically:
+            return nil
         }
     }
 }
@@ -124,6 +364,7 @@ public enum RunStatus: String, CaseIterable, Codable, Identifiable {
     case running
     case succeeded
     case failed
+    case cancelled
 
     public var id: String { rawValue }
 }
@@ -194,7 +435,7 @@ public struct FactoryTask: Identifiable, Equatable, Codable {
         projectId: String,
         title: String,
         type: TaskType = .coding,
-        status: TaskStatus = .inbox,
+        status: TaskStatus = .backlog,
         priority: TaskPriority = .normal,
         goal: String = "",
         context: String = "",

@@ -84,7 +84,7 @@ struct TaskDetailView: View {
                         .font(.title2.weight(.semibold))
                         .lineLimit(2)
                     HStack(spacing: 8) {
-                        StatusPill(text: task.status.displayName)
+                        statusMenu(task: task)
                         StatusPill(text: task.type.displayName)
                         StatusPill(text: task.priority.displayName)
                         Text(task.id.shortID)
@@ -109,6 +109,40 @@ struct TaskDetailView: View {
         )
     }
 
+    private func statusMenu(task: FactoryTask) -> some View {
+        Menu {
+            ForEach(TaskStatus.allCases.sorted { $0.sortOrder < $1.sortOrder }) { status in
+                Button {
+                    store.updateSelectedTaskStatus(status)
+                } label: {
+                    if status == task.status {
+                        Label(status.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(status.displayName)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(task.status.category.color)
+                    .frame(width: 7, height: 7)
+                Text(task.status.displayName)
+                    .font(.caption.weight(.semibold))
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(task.status.category.color.opacity(0.14), in: Capsule())
+            .foregroundStyle(task.status.category.color)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Task status")
+    }
+
     private func taskForm(task: FactoryTask) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             TextField("Title", text: $draft.title)
@@ -116,11 +150,6 @@ struct TaskDetailView: View {
                 .focused($focusedField, equals: .title)
 
             HStack {
-                Picker("Status", selection: $draft.status) {
-                    ForEach(TaskStatus.allCases) { status in
-                        Text(status.displayName).tag(status)
-                    }
-                }
                 Picker("Type", selection: $draft.type) {
                     ForEach(TaskType.allCases) { type in
                         Text(type.displayName).tag(type)
@@ -221,6 +250,7 @@ struct TaskDetailView: View {
         VStack(alignment: .leading, spacing: 18) {
             taskStatePanel
             workflowHealthPanel
+            recentEventsPanel
             taskWorktreePanel
             preflightPanel
             DisclosureGroup("Task Brief", isExpanded: $isTaskBriefExpanded) {
@@ -241,6 +271,7 @@ struct TaskDetailView: View {
             Text("Workflow Health")
                 .font(.headline)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 10)], spacing: 10) {
+                InfoChip(label: "Task Status", value: store.selectedTask?.status.displayName ?? "Unknown")
                 InfoChip(label: "Worktree", value: health.worktree)
                 InfoChip(label: "Preflight", value: health.preflight)
                 InfoChip(label: "Plan", value: health.plan)
@@ -248,6 +279,53 @@ struct TaskDetailView: View {
                 InfoChip(label: "Tests", value: health.tests)
                 InfoChip(label: "Diff Review", value: health.diffReview)
                 InfoChip(label: "Next", value: health.nextAction)
+            }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
+    private var recentEventsPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Recent Events")
+                .font(.headline)
+            if store.taskEvents.isEmpty {
+                Text("No task events yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(store.taskEvents.prefix(6)) { event in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: event.source == .manual ? "person.crop.circle" : "gearshape")
+                            .foregroundStyle(event.source == .manual ? Color.accentColor : .secondary)
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 8) {
+                                Text(event.kind.displayName)
+                                    .font(.subheadline.weight(.semibold))
+                                if let newStatus = event.newStatus {
+                                    Text(newStatus.displayName)
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(newStatus.category.color)
+                                }
+                            }
+                            if !event.message.isEmpty {
+                                Text(event.message)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            Text(event.createdAt.formatted(date: .abbreviated, time: .shortened))
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.vertical, 4)
+                }
             }
         }
         .padding()
@@ -587,12 +665,16 @@ struct TaskDetailView: View {
     private var buildTestSection: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Implementation")
-                    .font(.headline)
-                HStack(spacing: 12) {
-                    InfoChip(label: "State", value: store.taskWorkflowHealth.implementation)
+                HStack {
+                    Text("Build & Test Status")
+                        .font(.headline)
+                    Spacer()
                     InfoChip(label: "Changed", value: "\(store.gitSnapshot.changedFiles.count)")
-                    InfoChip(label: "Tests", value: store.taskWorkflowHealth.tests)
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 10)], spacing: 10) {
+                    ForEach(store.workflowCheckSummaries) { summary in
+                        WorkflowCheckCard(summary: summary)
+                    }
                 }
                 changedFilesList
             }
@@ -760,12 +842,21 @@ struct TaskDetailView: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(run.summary.isEmpty ? run.executor : run.summary)
                                     .font(.body)
-                                Text("\(run.executor) \(run.model ?? "") · \(run.status.rawValue)")
+                                Text("\(run.executor) \(run.model ?? "") · \(run.status.rawValue) · \(run.id.shortID)")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                HStack(spacing: 8) {
+                                    Text("Started \(run.startedAt.formatted(date: .abbreviated, time: .shortened))")
+                                    Text("Duration \(run.durationText)")
+                                    if let outputPath = run.outputPath {
+                                        Text(URL(fileURLWithPath: outputPath).lastPathComponent)
+                                    }
+                                }
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
                             }
                             Spacer()
-                            Text(run.startedAt.formatted(date: .abbreviated, time: .shortened))
+                            Text(run.status.rawValue.capitalized)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -1033,6 +1124,44 @@ private struct StatusPill: View {
     }
 }
 
+private struct WorkflowCheckCard: View {
+    var summary: WorkflowCheckSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(summary.kind.displayName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Circle()
+                    .fill(summary.status.color)
+                    .frame(width: 7, height: 7)
+            }
+            Text(summary.status.displayName)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(summary.status.color)
+            if let run = summary.run {
+                Text("\(run.id.shortID) · \(run.durationText)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+            } else if let command = summary.command, !command.isEmpty {
+                Text(command)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            } else {
+                Text("No runner")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 private struct InfoChip: View {
     var label: String
     var value: String
@@ -1053,10 +1182,57 @@ private struct InfoChip: View {
     }
 }
 
+private extension TaskStatusCategory {
+    var color: Color {
+        switch self {
+        case .queue:
+            return .secondary
+        case .planning:
+            return .blue
+        case .active:
+            return .orange
+        case .attention:
+            return .red
+        case .review:
+            return .purple
+        case .complete:
+            return .green
+        case .archive:
+            return .gray
+        }
+    }
+}
+
+private extension WorkflowCheckStatus {
+    var color: Color {
+        switch self {
+        case .notConfigured, .notRun, .unknown:
+            return .secondary
+        case .running:
+            return .orange
+        case .passed:
+            return .green
+        case .failed, .cancelled:
+            return .red
+        }
+    }
+}
+
+private extension RunRecord {
+    var durationText: String {
+        guard let endedAt else { return "running" }
+        let interval = max(0, endedAt.timeIntervalSince(startedAt))
+        if interval < 1 { return "<1s" }
+        if interval < 60 { return "\(Int(interval))s" }
+        let minutes = Int(interval) / 60
+        let seconds = Int(interval) % 60
+        return "\(minutes)m \(seconds)s"
+    }
+}
+
 private struct TaskDraft {
     var title = ""
     var type: TaskType = .coding
-    var status: TaskStatus = .inbox
     var priority: TaskPriority = .normal
     var goal = ""
     var context = ""
@@ -1066,7 +1242,6 @@ private struct TaskDraft {
     init(task: FactoryTask) {
         title = task.title
         type = task.type
-        status = task.status
         priority = task.priority
         goal = task.goal
         context = task.context
@@ -1076,7 +1251,6 @@ private struct TaskDraft {
         var updated = task
         updated.title = title
         updated.type = type
-        updated.status = status
         updated.priority = priority
         updated.goal = goal
         updated.context = context
@@ -1087,7 +1261,6 @@ private struct TaskDraft {
     func hasChanges(comparedTo task: FactoryTask, acceptanceText: String) -> Bool {
         title != task.title ||
             type != task.type ||
-            status != task.status ||
             priority != task.priority ||
             goal != task.goal ||
             context != task.context ||

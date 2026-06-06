@@ -132,7 +132,7 @@ struct InspectorView: View {
             } label: {
                 Label("Commit Selected Worktree", systemImage: "checkmark.circle")
             }
-            .disabled(commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.selectedTask?.status != .readyToCommit || store.isWorking)
+            .disabled(commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.selectedTask?.status != .readyForReview || store.isWorking)
         }
         .buttonStyle(.bordered)
     }
@@ -141,7 +141,7 @@ struct InspectorView: View {
     private var nextActionButtons: some View {
         if let task = store.selectedTask {
             switch task.status {
-            case .inbox, .planning:
+            case .backlog, .ready, .planning:
                 if store.canPlanSelectedTaskLocally {
                     primaryButton("Plan Locally", systemImage: "brain") {
                         Task { await store.planLocally() }
@@ -156,7 +156,7 @@ struct InspectorView: View {
                             .foregroundStyle(.orange)
                     }
                 }
-            case .planReady:
+            case .planReview:
                 primaryButton("Review Plan Locally", systemImage: "checklist") {
                     Task { await store.reviewPlanLocally() }
                 }
@@ -169,17 +169,7 @@ struct InspectorView: View {
                 secondaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
                     Task { await store.planLocally() }
                 }
-            case .planReview:
-                primaryButton("Approve Plan", systemImage: "hand.thumbsup") {
-                    store.approvePlan()
-                }
-                secondaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
-                    Task { await store.planLocally() }
-                }
-                secondaryButton("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass") {
-                    store.generateCodexPlanReviewHandoff()
-                }
-            case .planApproved:
+            case .approved:
                 if store.latestTaskStateReview?.hasImplementationChanges == true {
                     primaryButton("Run Tests", systemImage: "checkmark.seal") {
                         Task { await store.runFirstTestCommand() }
@@ -195,24 +185,14 @@ struct InspectorView: View {
                 secondaryButton("Run Tests", systemImage: "checkmark.seal") {
                     Task { await store.runFirstTestCommand() }
                 }
-            case .escalationRecommended:
-                primaryButton("Generate Codex Build Handoff", systemImage: "paperplane") {
-                    store.generateCodexHandoff()
-                }
-                secondaryButton("Approve Plan", systemImage: "hand.thumbsup") {
-                    store.approvePlan()
-                }
-                secondaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
-                    Task { await store.planLocally() }
-                }
-            case .planRejected:
+            case .needsFixes:
                 primaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
                     Task { await store.planLocally() }
                 }
                 secondaryButton("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass") {
                     store.generateCodexPlanReviewHandoff()
                 }
-            case .building, .built, .testing:
+            case .building, .testing:
                 primaryButton("Run Tests", systemImage: "checkmark.seal") {
                     Task { await store.runFirstTestCommand() }
                 }
@@ -221,7 +201,7 @@ struct InspectorView: View {
                         Task { await store.reviewDiffLocally() }
                     }
                 }
-            case .needsReview:
+            case .readyForReview:
                 primaryButton("Review Diff Locally", systemImage: "doc.text.magnifyingglass") {
                     Task { await store.reviewDiffLocally() }
                 }
@@ -231,14 +211,7 @@ struct InspectorView: View {
                 secondaryButton("Generate Review Note", systemImage: "doc.badge.clock") {
                     store.generateReviewNote()
                 }
-            case .readyToCommit:
-                primaryButton("Generate Review Note", systemImage: "doc.badge.clock") {
-                    store.generateReviewNote()
-                }
-                secondaryButton("Generate Codex Diff Review Handoff", systemImage: "paperplane") {
-                    store.askCodexToReviewDiff()
-                }
-            case .done:
+            case .done, .archived:
                 Text("Task is done.")
                     .foregroundStyle(.secondary)
             case .blocked:
@@ -300,7 +273,7 @@ struct InspectorView: View {
 
     private var canSendToCodexBuild: Bool {
         guard let status = store.selectedTask?.status else { return false }
-        return !store.isWorking && (status == .planApproved || status == .escalationRecommended)
+        return !store.isWorking && status == .approved
     }
 
     private var taskStateCard: some View {

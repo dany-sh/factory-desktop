@@ -153,6 +153,29 @@ public final class MigrationRunner {
             CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id);
             CREATE INDEX IF NOT EXISTS idx_artifacts_task_id ON artifacts(task_id);
             """
+        ),
+        Migration(
+            version: 2,
+            name: "task_events",
+            sql: """
+            CREATE TABLE IF NOT EXISTS task_events (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              source TEXT NOT NULL,
+              message TEXT DEFAULT '',
+              previous_status TEXT,
+              new_status TEXT,
+              run_id TEXT,
+              artifact_id TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL,
+              FOREIGN KEY(artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_task_events_task_id_created_at ON task_events(task_id, created_at DESC);
+            """
         )
     ]
 }
