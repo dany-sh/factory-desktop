@@ -104,27 +104,53 @@ struct InspectorView: View {
                 }
             case .planReady:
                 primaryButton("Review Plan Locally", systemImage: "checklist") {
-                    store.reviewPlanLocally()
+                    Task { await store.reviewPlanLocally() }
                 }
                 secondaryButton("Ask Codex to Review Plan", systemImage: "doc.text.magnifyingglass") {
-                    store.askCodexToReviewPlan()
+                    Task { await store.askCodexToReviewPlan() }
                 }
                 secondaryButton("Approve Plan", systemImage: "hand.thumbsup") {
                     store.approvePlan()
+                }
+                secondaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
+                    Task { await store.planLocally() }
                 }
             case .planReview:
                 primaryButton("Approve Plan", systemImage: "hand.thumbsup") {
                     store.approvePlan()
                 }
+                secondaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
+                    Task { await store.planLocally() }
+                }
                 secondaryButton("Ask Codex to Review Plan", systemImage: "doc.text.magnifyingglass") {
-                    store.askCodexToReviewPlan()
+                    Task { await store.askCodexToReviewPlan() }
                 }
             case .planApproved:
                 primaryButton("Build Locally", systemImage: "hammer") {
                     store.buildLocallyPlaceholder()
                 }
+                secondaryButton("Send to Codex Build", systemImage: "paperplane") {
+                    Task { await store.sendToCodex() }
+                }
                 secondaryButton("Run Tests", systemImage: "checkmark.seal") {
                     Task { await store.runFirstTestCommand() }
+                }
+            case .escalationRecommended:
+                primaryButton("Send to Codex Build", systemImage: "paperplane") {
+                    Task { await store.sendToCodex() }
+                }
+                secondaryButton("Approve Plan", systemImage: "hand.thumbsup") {
+                    store.approvePlan()
+                }
+                secondaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
+                    Task { await store.planLocally() }
+                }
+            case .planRejected:
+                primaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
+                    Task { await store.planLocally() }
+                }
+                secondaryButton("Ask Codex to Review Plan", systemImage: "doc.text.magnifyingglass") {
+                    Task { await store.askCodexToReviewPlan() }
                 }
             case .building, .built, .testing:
                 primaryButton("Run Tests", systemImage: "checkmark.seal") {
@@ -207,9 +233,14 @@ struct InspectorView: View {
         Button {
             Task { await store.sendToCodex() }
         } label: {
-            Label("Send to Codex", systemImage: "terminal")
+            Label("Send to Codex Build", systemImage: "paperplane")
         }
-        .disabled(store.selectedTask == nil || store.isWorking)
+        .disabled(!canSendToCodexBuild)
+    }
+
+    private var canSendToCodexBuild: Bool {
+        guard let status = store.selectedTask?.status else { return false }
+        return !store.isWorking && (status == .planApproved || status == .escalationRecommended)
     }
 
     private func primaryButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
@@ -278,6 +309,12 @@ struct InspectorView: View {
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
+                        Button {
+                            Task { await store.openArtifact(artifact) }
+                        } label: {
+                            Label("Open Artifact", systemImage: "arrow.up.forward.app")
+                        }
+                        .controlSize(.small)
                     }
                     .padding(.vertical, 4)
                 }

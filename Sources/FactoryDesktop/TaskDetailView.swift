@@ -18,6 +18,7 @@ struct TaskDetailView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 18) {
                             workflowBar
+                            planPanel
                             runLog
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -164,14 +165,69 @@ struct TaskDetailView: View {
                 .disabled(store.isWorking)
 
                 Button {
-                    store.generateCodexHandoff()
+                    Task { await store.askCodexToReviewPlan() }
                 } label: {
-                    Label("Generate Handoff", systemImage: "doc.text")
+                    Label("Ask Codex to Review Plan", systemImage: "doc.text.magnifyingglass")
                 }
+                .disabled(store.isWorking || store.latestPlanArtifact == nil)
             }
             Text("Factory v0.1 plans and records. It does not autonomously edit files.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
+    private var planPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Plan")
+                    .font(.headline)
+                Spacer()
+                if let artifact = store.latestPlanArtifact {
+                    Text(artifact.path)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            if store.latestPlanText.isEmpty {
+                Text("No saved plan yet. Run Plan Locally to create plan.md.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    Text(store.latestPlanText)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                }
+                .frame(minHeight: 260)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            }
+
+            if !store.latestPlanReviewText.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Latest Plan Review")
+                        .font(.subheadline.weight(.semibold))
+                    ScrollView {
+                        Text(store.latestPlanReviewText)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                    }
+                    .frame(minHeight: 180)
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+                }
+            }
         }
         .padding()
         .background(.background, in: RoundedRectangle(cornerRadius: 16))

@@ -5,17 +5,20 @@ public struct CommandRequest: Equatable {
     public var arguments: [String]
     public var workingDirectory: URL?
     public var manuallyApproved: Bool
+    public var standardInput: String?
 
     public init(
         executable: String,
         arguments: [String] = [],
         workingDirectory: URL? = nil,
-        manuallyApproved: Bool = false
+        manuallyApproved: Bool = false,
+        standardInput: String? = nil
     ) {
         self.executable = executable
         self.arguments = arguments
         self.workingDirectory = workingDirectory
         self.manuallyApproved = manuallyApproved
+        self.standardInput = standardInput
     }
 
     public var displayString: String {
@@ -54,11 +57,26 @@ public final class CommandRunner {
             let outputPipe = Pipe()
             process.standardOutput = outputPipe
             process.standardError = outputPipe
+            let inputPipe: Pipe?
+            if request.standardInput != nil {
+                let pipe = Pipe()
+                process.standardInput = pipe
+                inputPipe = pipe
+            } else {
+                inputPipe = nil
+            }
 
             try process.run()
+            let outputTask = Task {
+                outputPipe.fileHandleForReading.readDataToEndOfFile()
+            }
+            if let standardInput = request.standardInput, let inputPipe {
+                inputPipe.fileHandleForWriting.write(Data(standardInput.utf8))
+                try? inputPipe.fileHandleForWriting.close()
+            }
             process.waitUntilExit()
 
-            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let data = await outputTask.value
             let output = String(data: data, encoding: .utf8) ?? ""
             return CommandResult(command: request.displayString, exitCode: process.terminationStatus, output: output)
         }.value
@@ -107,9 +125,36 @@ public final class CommandRunner {
             return arguments.count >= 2 && arguments[0] == "-m" && arguments[1] == "pytest"
         case "open", "code":
             return true
+        case "codex":
+            return isAllowedCodex(arguments)
         default:
             return false
         }
+    }
+
+    private func isAllowedCodex(_ arguments: [String]) -> Bool {
+        guard arguments.first == "exec" else { return false }
+        guard optionValue(in: arguments, short: "-s", long: "--sandbox") == "read-only" else { return false }
+        guard optionValue(in: arguments, short: "-C", long: "--cd") != nil else { return false }
+        guard !arguments.contains("--dangerously-bypass-approvals-and-sandbox") else { return false }
+        guard !arguments.contains("--dangerously-bypass-hook-trust") else { return false }
+        guard !arguments.contains("--add-dir") else { return false }
+        return true
+    }
+
+    private func optionValue(in arguments: [String], short: String, long: String) -> String? {
+        for index in arguments.indices {
+            let argument = arguments[index]
+            if argument == short || argument == long {
+                let valueIndex = arguments.index(after: index)
+                return arguments.indices.contains(valueIndex) ? arguments[valueIndex] : nil
+            }
+            let longPrefix = "\(long)="
+            if argument.hasPrefix(longPrefix) {
+                return String(argument.dropFirst(longPrefix.count))
+            }
+        }
+        return nil
     }
 
     private func isAllowedGit(_ arguments: [String], manuallyApproved: Bool) -> Bool {
