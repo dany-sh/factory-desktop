@@ -110,6 +110,50 @@ public final class GitService {
         )
     }
 
+    public func inspectWorktree(label: String, path: String) async -> TaskWorktreeSummary {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return TaskWorktreeSummary(label: label, path: path, exists: false)
+        }
+
+        let directory = URL(fileURLWithPath: path)
+        do {
+            let statusResult = try await commandRunner.run(CommandRequest(
+                executable: "git",
+                arguments: ["status", "--porcelain=v1", "--branch"],
+                workingDirectory: directory
+            ))
+            guard statusResult.succeeded else {
+                return TaskWorktreeSummary(label: label, path: path, exists: true, isClean: nil)
+            }
+
+            let summary = PreflightStatusSummary.parsePorcelainV1BranchStatus(statusResult.output)
+            let headResult = try await commandRunner.run(CommandRequest(
+                executable: "git",
+                arguments: ["rev-parse", "--short", "HEAD"],
+                workingDirectory: directory
+            ))
+            let headSHA = headResult.succeeded ? normalized(headResult.output) : nil
+            let latestChangeAt = Self.latestChangeDate(fromStatusOutput: statusResult.output, in: directory)
+
+            return TaskWorktreeSummary(
+                label: label,
+                path: path,
+                exists: true,
+                branch: summary.branch,
+                headSHA: headSHA,
+                isClean: summary.isClean,
+                stagedCount: summary.stagedCount,
+                unstagedCount: summary.unstagedCount,
+                untrackedCount: summary.untrackedCount,
+                hasImplementationChanges: !summary.isClean,
+                latestChangeAt: latestChangeAt
+            )
+        } catch {
+            return TaskWorktreeSummary(label: label, path: path, exists: true, isClean: nil)
+        }
+    }
+
     public func commitAll(path: String, defaultBranch: String, message: String) async throws -> CommandResult {
         let directory = URL(fileURLWithPath: path)
         let status = try await commandRunner.run(
@@ -172,6 +216,29 @@ public final class GitService {
             .split(separator: " ")
             .map(String.init)
             .filter { !$0.isEmpty }
+    }
+
+    private static func latestChangeDate(fromStatusOutput output: String, in directory: URL) -> Date? {
+        changedPaths(fromStatusOutput: output)
+            .compactMap { path in
+                let url = directory.appendingPathComponent(path)
+                return try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            }
+            .max()
+    }
+
+    private static func changedPaths(fromStatusOutput output: String) -> [String] {
+        output
+            .split(separator: "\n")
+            .compactMap { line -> String? in
+                guard !line.hasPrefix("## ") else { return nil }
+                guard line.count > 3 else { return nil }
+                let value = String(line.dropFirst(3))
+                if let arrowRange = value.range(of: " -> ") {
+                    return String(value[arrowRange.upperBound...])
+                }
+                return value.isEmpty ? nil : value
+            }
     }
 
     private func discoverPreflightTargets(project: Project, tasks: [FactoryTask]) -> [PreflightTarget] {

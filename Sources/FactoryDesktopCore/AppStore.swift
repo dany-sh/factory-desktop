@@ -12,6 +12,7 @@ public final class AppStore: ObservableObject {
     @Published public var selectedModel: String = ModelPolicy.plannerDefault
     @Published public var gitSnapshot: GitSnapshot = GitSnapshot()
     @Published public var latestPreflightReport: PreflightReport?
+    @Published public private(set) var latestTaskStateReview: TaskStateReview?
     @Published public private(set) var buildInfo: BuildInfo
     @Published public var selectedRunOutput: String = ""
     @Published public var statusMessage: String = ""
@@ -64,6 +65,25 @@ public final class AppStore: ObservableObject {
         return review.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? ""
     }
 
+    public var latestTaskStateReviewArtifact: Artifact? {
+        latestArtifact(type: .taskStateReview)
+    }
+
+    public var latestTaskStateReviewText: String {
+        latestTaskStateReviewArtifact.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? ""
+    }
+
+    public var canPlanSelectedTaskLocally: Bool {
+        guard let project = selectedProject, let task = selectedTask else { return false }
+        return project.type != .codeRepo || hasExistingTaskWorktree(task)
+    }
+
+    public var selectedTaskWorktreeWarning: String? {
+        guard let project = selectedProject, let task = selectedTask else { return nil }
+        guard project.type == .codeRepo, !hasExistingTaskWorktree(task) else { return nil }
+        return "Create a local or Codex task worktree before planning this code task."
+    }
+
     public init(paths: FactoryPaths = FactoryPaths()) {
         self.paths = paths
         self.buildInfo = BuildInfoService.current(launchTimestamp: Date())
@@ -113,6 +133,7 @@ public final class AppStore: ObservableObject {
         selectedProjectID = projectID
         selectedTaskID = tasks.first { $0.projectId == projectID }?.id
         latestPreflightReport = nil
+        latestTaskStateReview = nil
         Task { await refreshGitStatus() }
         do {
             try reloadRunsAndArtifacts()
@@ -125,6 +146,7 @@ public final class AppStore: ObservableObject {
         selectedTaskID = taskID
         selectedRunOutput = ""
         latestPreflightReport = nil
+        latestTaskStateReview = nil
         Task { await refreshGitStatus() }
         do {
             try reloadRunsAndArtifacts()
@@ -274,7 +296,11 @@ public final class AppStore: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let report = await gitService.preflightReport(project: project, tasks: projectTasks)
-            try report.markdown.write(to: url, atomically: true, encoding: .utf8)
+            var markdown = report.markdown
+            if project.type == .codeRepo && !hasExistingTaskWorktree(task) {
+                markdown += "\n## Selected Task Worktree\n\nNo task worktree exists for the selected coding task. Create a local or Codex worktree before planning or implementing this task.\n"
+            }
+            try markdown.write(to: url, atomically: true, encoding: .utf8)
             try repository.insert(artifact: Artifact(
                 taskId: task.id,
                 type: .preflight,
@@ -282,7 +308,7 @@ public final class AppStore: ObservableObject {
                 description: "Read-only preflight check"
             ))
             latestPreflightReport = report
-            selectedRunOutput = report.markdown
+            selectedRunOutput = markdown
             try reloadRunsAndArtifacts()
             statusMessage = "Wrote preflight check to \(url.path)."
         } catch {
@@ -293,6 +319,11 @@ public final class AppStore: ObservableObject {
     public func planLocally() async {
         guard let project = selectedProject, var task = selectedTask, let repository else {
             errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        guard project.type != .codeRepo || hasExistingTaskWorktree(task) else {
+            errorMessage = "Create a local or Codex task worktree before planning this code task."
+            statusMessage = "Create Worktree is the next safe action for this code task."
             return
         }
         isWorking = true
@@ -886,6 +917,121 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    public func reviewTaskState() async {
+        guard let repository, let project = selectedProject, let task = selectedTask else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        do {
+            let artifactSummaries = taskStateArtifactSummaries()
+            let taskWorktreeSummaries = await taskStateWorktreeSummaries(task: task)
+            let canonicalSummary = await canonicalWorktreeSummary(project: project)
+            let worktreeSummaries = ([canonicalSummary] + taskWorktreeSummaries).compactMap { $0 }
+            let missingArtifacts = artifactSummaries
+                .filter { !$0.exists }
+                .map { "Missing artifact file for \($0.type.displayName): \($0.path)" }
+            let missingWorktrees = taskWorktreeSummaries
+                .filter { !$0.exists }
+                .map { "Missing \($0.label.lowercased()) path: \($0.path)" }
+            var warningIssues = missingArtifacts + missingWorktrees
+
+            let hasPlan = artifactSummaries.contains { $0.type == .plan && $0.exists }
+            let hasRawPlanReview = artifactSummaries.contains {
+                ($0.type == .localPlanReview || $0.type == .codexPlanReview) && $0.exists
+            }
+            let hasApprovedPlan = artifactSummaries.contains { $0.type == .approvedPlan && $0.exists }
+            let hasPlanReview = hasRawPlanReview || hasApprovedPlan
+            let latestDecision = hasApprovedPlan ? nil : latestPlanReviewDecision(from: artifactSummaries)
+            let hasPreflight = artifactSummaries.contains { $0.type == .preflight && $0.exists }
+            let latestPreflight = latestExistingArtifact(type: .preflight)
+            let latestTestOutput = latestExistingArtifact(type: .testOutput)
+            let hasStalePreflight = preflightIsStale(preflight: latestPreflight, taskWorktrees: taskWorktreeSummaries, latestTestOutput: latestTestOutput)
+            let canonicalDirty = canonicalSummary?.hasImplementationChanges == true
+            let hasRiskyPreflight = canonicalDirty
+            let hasImplementationChanges = taskWorktreeSummaries.contains { $0.exists && $0.hasImplementationChanges }
+            let hasTestOutput = latestTestOutput != nil
+            let hasPassingTestOutput = latestTestOutput.map { testOutputPassed($0) } ?? false
+            let hasDiffReview = artifactSummaries.contains {
+                ($0.type == .localDiffReview || $0.type == .finalReview) && $0.exists
+            }
+            let hasExistingWorktree = taskWorktreeSummaries.contains { $0.exists }
+            let appearsMerged = task.status == .done || latestPreflightSuggestsArchive()
+            if hasStalePreflight {
+                warningIssues.append("Latest preflight is stale relative to newer implementation changes or test output.")
+            }
+            if hasPreflight, latestPreflightArtifactHasRisk(), !canonicalDirty {
+                warningIssues.append("Preflight reports non-canonical or stale worktree risk; active task worktree changes are not blockers.")
+            }
+            let blockingIssues = hasRiskyPreflight
+                ? ["Canonical repo has dirty or risky Git state."]
+                : []
+
+            let input = TaskStateRecommendationInput(
+                taskType: task.type,
+                status: task.status,
+                hasExistingWorktree: hasExistingWorktree,
+                hasPreflight: hasPreflight,
+                hasRiskyPreflight: hasRiskyPreflight,
+                hasStalePreflight: hasStalePreflight,
+                hasPlan: hasPlan,
+                hasPlanReview: hasPlanReview,
+                latestPlanDecision: latestDecision,
+                hasApprovedPlan: hasApprovedPlan,
+                hasImplementationChanges: hasImplementationChanges,
+                hasTestOutput: hasTestOutput,
+                hasPassingTestOutput: hasPassingTestOutput,
+                hasDiffReview: hasDiffReview,
+                appearsMerged: appearsMerged
+            )
+            let recommendation = TaskStateRecommendationEvaluator.recommend(input)
+
+            var review = TaskStateReview(
+                projectId: project.id,
+                taskId: task.id,
+                status: task.status,
+                summary: recommendation.1,
+                latestArtifacts: artifactSummaries,
+                worktreeSummaries: worktreeSummaries,
+                latestPlanDecision: latestDecision,
+                hasPlan: hasPlan,
+                hasPlanReview: hasPlanReview,
+                hasApprovedPlan: hasApprovedPlan,
+                hasPreflight: hasPreflight,
+                hasRiskyPreflight: hasRiskyPreflight,
+                hasImplementationChanges: hasImplementationChanges,
+                hasTestOutput: hasTestOutput,
+                hasPassingTestOutput: hasPassingTestOutput,
+                hasDiffReview: hasDiffReview,
+                hasStalePreflight: hasStalePreflight,
+                blockingIssues: blockingIssues,
+                warningIssues: warningIssues,
+                recommendedAction: recommendation.0
+            )
+            review.markdown = taskStateReviewMarkdown(project: project, task: task, review: review)
+
+            let directory = paths.runDirectory(project: project, task: task)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("task-state-review.md")
+            try review.markdown.write(to: url, atomically: true, encoding: .utf8)
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                type: .taskStateReview,
+                path: url.path,
+                description: "Task state review and next-action recommendation"
+            ))
+            latestTaskStateReview = review
+            selectedRunOutput = review.markdown
+            try reloadRunsAndArtifacts()
+            statusMessage = "Wrote task state review to \(url.path)."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     public func loadRunOutput(_ run: RunRecord) {
         guard let outputPath = run.outputPath else {
             selectedRunOutput = ""
@@ -922,6 +1068,219 @@ public final class AppStore: ObservableObject {
 
     private func latestArtifact(type: ArtifactType) -> Artifact? {
         artifacts.first { $0.type == type.rawValue }
+    }
+
+    private func latestExistingArtifact(type: ArtifactType) -> Artifact? {
+        artifacts.first { $0.type == type.rawValue && FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private func hasExistingTaskWorktree(_ task: FactoryTask) -> Bool {
+        [task.localWorktreePath, task.codexWorktreePath]
+            .compactMap { $0 }
+            .contains { path in
+                var isDirectory: ObjCBool = false
+                return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+            }
+    }
+
+    private func taskStateArtifactSummaries() -> [TaskArtifactSummary] {
+        let relevantTypes: [ArtifactType] = [
+            .plan,
+            .localPlanReview,
+            .codexPlanReview,
+            .approvedPlan,
+            .preflight,
+            .testOutput,
+            .localDiffReview,
+            .codexDiffReviewHandoff,
+            .finalReview,
+            .taskStateReview
+        ]
+        return relevantTypes.compactMap { type in
+            let candidates = artifacts.filter { $0.type == type.rawValue }
+            guard let artifact = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) ?? candidates.first else {
+                return nil
+            }
+            let exists = FileManager.default.fileExists(atPath: artifact.path)
+            let decision: PlanReviewDecision?
+            if exists, type == .localPlanReview || type == .codexPlanReview {
+                let text = (try? String(contentsOfFile: artifact.path, encoding: .utf8)) ?? ""
+                decision = Self.parsePlanReviewDecision(from: text)
+            } else {
+                decision = nil
+            }
+            let summary = exists ? nil : "Missing artifact file."
+            return TaskArtifactSummary(
+                id: artifact.id,
+                type: type,
+                path: artifact.path,
+                exists: exists,
+                createdAt: artifact.createdAt,
+                decision: decision,
+                summary: summary
+            )
+        }
+        .sorted { left, right in
+            if left.exists != right.exists {
+                return left.exists && !right.exists
+            }
+            return left.createdAt > right.createdAt
+        }
+    }
+
+    private func taskStateWorktreeSummaries(task: FactoryTask) async -> [TaskWorktreeSummary] {
+        var summaries: [TaskWorktreeSummary] = []
+        if let localPath = task.localWorktreePath {
+            if let gitService {
+                summaries.append(await gitService.inspectWorktree(label: "Local worktree", path: localPath))
+            } else {
+                summaries.append(TaskWorktreeSummary(label: "Local worktree", path: localPath, exists: FileManager.default.fileExists(atPath: localPath)))
+            }
+        }
+        if let codexPath = task.codexWorktreePath, codexPath != task.localWorktreePath {
+            if let gitService {
+                summaries.append(await gitService.inspectWorktree(label: "Codex worktree", path: codexPath))
+            } else {
+                summaries.append(TaskWorktreeSummary(label: "Codex worktree", path: codexPath, exists: FileManager.default.fileExists(atPath: codexPath)))
+            }
+        }
+        return summaries
+    }
+
+    private func canonicalWorktreeSummary(project: Project) async -> TaskWorktreeSummary? {
+        guard project.type == .codeRepo else { return nil }
+        if let gitService {
+            return await gitService.inspectWorktree(label: "Canonical repo", path: project.path)
+        }
+        return TaskWorktreeSummary(label: "Canonical repo", path: project.path, exists: FileManager.default.fileExists(atPath: project.path))
+    }
+
+    private func latestPlanReviewDecision(from summaries: [TaskArtifactSummary]) -> PlanReviewDecision? {
+        summaries
+            .filter { ($0.type == .localPlanReview || $0.type == .codexPlanReview) && $0.exists }
+            .sorted { $0.createdAt > $1.createdAt }
+            .first?
+            .decision
+    }
+
+    private func latestPreflightArtifactHasRisk() -> Bool {
+        guard let artifact = latestExistingArtifact(type: .preflight) else { return false }
+        guard let text = try? String(contentsOfFile: artifact.path, encoding: .utf8) else { return false }
+        let normalized = text.lowercased()
+        let riskyPhrases = [
+            "dirty worktree",
+            "missing path",
+            "uncommitted changes",
+            "unexpected branch location",
+            "unpushed default branch",
+            "overall recommendation: inspect diff",
+            "overall recommendation: commit",
+            "overall recommendation: merge",
+            "overall recommendation: push",
+            "overall recommendation: fix missing path",
+            "overall recommendation: investigate"
+        ]
+        return riskyPhrases.contains { normalized.contains($0) }
+    }
+
+    private func preflightIsStale(preflight: Artifact?, taskWorktrees: [TaskWorktreeSummary], latestTestOutput: Artifact?) -> Bool {
+        guard let preflight else { return false }
+        let newerTaskChange = taskWorktrees
+            .compactMap(\.latestChangeAt)
+            .contains { $0 > preflight.createdAt }
+        let newerTestOutput = latestTestOutput.map { $0.createdAt > preflight.createdAt } ?? false
+        return newerTaskChange || newerTestOutput
+    }
+
+    private func testOutputPassed(_ artifact: Artifact) -> Bool {
+        let description = artifact.description.lowercased()
+        if description.contains("failed") { return false }
+        if description.contains("passed") || description.hasPrefix("test output") { return true }
+        guard let text = try? String(contentsOfFile: artifact.path, encoding: .utf8).lowercased() else {
+            return false
+        }
+        return !text.contains("failed") && !text.contains("error:")
+    }
+
+    private func latestPreflightSuggestsArchive() -> Bool {
+        guard let artifact = latestExistingArtifact(type: .preflight) else { return false }
+        guard let text = try? String(contentsOfFile: artifact.path, encoding: .utf8) else { return false }
+        let normalized = text.lowercased()
+        return normalized.contains("overall recommendation: archive") || normalized.contains("merged to default: yes")
+    }
+
+    private func taskStateReviewMarkdown(project: Project, task: FactoryTask, review: TaskStateReview) -> String {
+        let blockingIssues = review.blockingIssues.isEmpty
+            ? "- None."
+            : review.blockingIssues.map { "- \($0)" }.joined(separator: "\n")
+        let warningIssues = review.warningIssues.isEmpty
+            ? "- None."
+            : review.warningIssues.map { "- \($0)" }.joined(separator: "\n")
+        let artifactRows = review.latestArtifacts.map { artifact in
+            "| \(artifact.type.rawValue) | \(artifact.exists ? "yes" : "no") | \(DateCoding.string(from: artifact.createdAt)) | \(artifact.decision?.rawValue ?? "-") | \(Self.markdownTableCell(artifact.path)) |"
+        }.joined(separator: "\n")
+        let worktreeRows = review.worktreeSummaries.isEmpty
+            ? "| none | no | - | - | - | 0 | 0 | 0 |"
+            : review.worktreeSummaries.map { worktree in
+                "| \(Self.markdownTableCell(worktree.label)) | \(worktree.exists ? "yes" : "no") | \(worktree.branch ?? "-") | \(worktree.headSHA ?? "-") | \(worktree.isClean.map { $0 ? "yes" : "no" } ?? "-") | \(worktree.stagedCount) | \(worktree.unstagedCount) | \(worktree.untrackedCount) |"
+            }.joined(separator: "\n")
+
+        let planReviewWarning = review.hasPlan && !review.hasPlanReview
+            ? "\nPlan exists but has not been reviewed.\n"
+            : ""
+
+        return """
+        # Task State Review: \(task.title)
+
+        Generated at: \(DateCoding.string(from: review.createdAt))
+        Project: \(project.name)
+        Task: \(task.id)
+        Status: \(task.status.rawValue)
+        Recommended action: \(review.recommendedAction.displayName)
+
+        ## Summary
+
+        \(review.summary)
+        \(planReviewWarning)
+        - Latest review decision: \(review.hasApprovedPlan ? "superseded by approved_plan" : review.latestPlanDecision?.rawValue ?? "none")
+        - Implementation changes exist: \(review.hasImplementationChanges ? "yes" : "no")
+        - Tests were run: \(review.hasTestOutput ? "yes" : "no")
+        - Tests passed: \(review.hasPassingTestOutput ? "yes" : "no")
+        - Preflight stale: \(review.hasStalePreflight ? "yes" : "no")
+        - Ready to commit or merge: \(review.recommendedAction == .commitAndMerge ? "yes" : "no")
+
+        ## Blocking Issues
+
+        \(blockingIssues)
+
+        ## Warnings
+
+        \(warningIssues)
+
+        ## Latest Artifacts
+
+        | Type | Exists | Created | Decision | Path |
+        |---|---|---|---|---|
+        \(artifactRows.isEmpty ? "| none | no | - | - | - |" : artifactRows)
+
+        ## Worktrees
+
+        | Label | Exists | Branch | SHA | Clean | Staged | Unstaged | Untracked |
+        |---|---|---|---|---|---:|---:|---:|
+        \(worktreeRows)
+
+        ## Decision Basis
+
+        \(review.summary)
+
+        ## Next Action
+
+        \(review.recommendedAction.displayName)
+        """
+    }
+
+    private nonisolated static func markdownTableCell(_ value: String) -> String {
+        value.replacingOccurrences(of: "|", with: "\\|")
     }
 
     public nonisolated static func parsePlanReviewDecision(from text: String) -> PlanReviewDecision {

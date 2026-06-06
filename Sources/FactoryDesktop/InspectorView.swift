@@ -12,6 +12,7 @@ struct InspectorView: View {
                 projectCard
                 worktreeCard
                 actionCard
+                taskStateCard
                 preflightCard
                 gitCard
                 artifactsCard
@@ -73,13 +74,35 @@ struct InspectorView: View {
     private var actionCard: some View {
         InspectorCard(title: "Next Actions") {
             VStack(alignment: .leading, spacing: 8) {
+                if let review = store.latestTaskStateReview {
+                    recommendedActionButton(review.recommendedAction)
+                } else {
+                    Button {
+                        Task { await store.reviewTaskState() }
+                    } label: {
+                        Label("Review Task State", systemImage: "list.bullet.clipboard")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(store.selectedTask == nil || store.isWorking)
+                }
+
+                if store.latestTaskStateReview != nil {
+                    Button {
+                        Task { await store.reviewTaskState() }
+                    } label: {
+                        Label("Review Task State", systemImage: "list.bullet.clipboard")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .disabled(store.selectedTask == nil || store.isWorking)
+                }
+
                 Button {
                     Task { await store.runPreflightCheck() }
                 } label: {
                     Label("Preflight Check", systemImage: "checklist.checked")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .buttonStyle(.borderedProminent)
                 .disabled(store.selectedTask == nil || store.isWorking)
 
                 Divider()
@@ -110,8 +133,19 @@ struct InspectorView: View {
         if let task = store.selectedTask {
             switch task.status {
             case .inbox, .planning:
-                primaryButton("Plan Locally", systemImage: "brain") {
-                    Task { await store.planLocally() }
+                if store.canPlanSelectedTaskLocally {
+                    primaryButton("Plan Locally", systemImage: "brain") {
+                        Task { await store.planLocally() }
+                    }
+                } else {
+                    primaryButton("Create Local Worktree", systemImage: "point.3.connected.trianglepath.dotted") {
+                        Task { await store.createWorktree(flavor: .local) }
+                    }
+                    if let warning = store.selectedTaskWorktreeWarning {
+                        Text(warning)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                 }
             case .planReady:
                 primaryButton("Review Plan Locally", systemImage: "checklist") {
@@ -137,8 +171,14 @@ struct InspectorView: View {
                     Task { await store.askCodexToReviewPlan() }
                 }
             case .planApproved:
-                primaryButton("Build Locally", systemImage: "hammer") {
-                    store.buildLocallyPlaceholder()
+                if store.latestTaskStateReview?.hasImplementationChanges == true {
+                    primaryButton("Run Tests", systemImage: "checkmark.seal") {
+                        Task { await store.runFirstTestCommand() }
+                    }
+                } else {
+                    primaryButton("Build Locally", systemImage: "hammer") {
+                        store.buildLocallyPlaceholder()
+                    }
                 }
                 secondaryButton("Send to Codex Build", systemImage: "paperplane") {
                     Task { await store.sendToCodex() }
@@ -254,6 +294,40 @@ struct InspectorView: View {
         return !store.isWorking && (status == .planApproved || status == .escalationRecommended)
     }
 
+    private var taskStateCard: some View {
+        InspectorCard(title: "Task State Review") {
+            if let review = store.latestTaskStateReview {
+                InfoRow(label: "Recommended", value: review.recommendedAction.displayName)
+                InfoRow(label: "Summary", value: review.summary)
+                if review.hasPlan && !review.hasPlanReview {
+                    Text("Plan exists but has not been reviewed.")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
+                HStack(spacing: 12) {
+                    TaskStateMetric(label: "Plan", value: review.hasPlan ? "yes" : "no")
+                    TaskStateMetric(label: "Review", value: review.hasPlanReview ? "yes" : "no")
+                    TaskStateMetric(label: "Preflight", value: review.hasPreflight ? (review.hasRiskyPreflight ? "risk" : "yes") : "no")
+                }
+                HStack(spacing: 12) {
+                    TaskStateMetric(label: "Changes", value: review.hasImplementationChanges ? "yes" : "no")
+                    TaskStateMetric(label: "Tests", value: review.hasTestOutput ? "yes" : "no")
+                    TaskStateMetric(label: "Diff", value: review.hasDiffReview ? "yes" : "no")
+                }
+            } else if let artifact = store.latestTaskStateReviewArtifact {
+                InfoRow(label: "Latest artifact", value: artifact.path)
+                Button {
+                    Task { await store.openArtifact(artifact) }
+                } label: {
+                    Label("Open Artifact", systemImage: "arrow.up.forward.app")
+                }
+            } else {
+                Text("Run Review Task State to inspect artifacts and get one recommended next action.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var preflightCard: some View {
         InspectorCard(title: "Preflight") {
             if let report = store.latestPreflightReport {
@@ -274,6 +348,61 @@ struct InspectorView: View {
             } else {
                 Text("Run Preflight Check to inspect the canonical repo and Factory-managed worktrees.")
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func recommendedActionButton(_ action: TaskStateRecommendedAction) -> some View {
+        switch action {
+        case .createWorktree:
+            primaryButton("Create Local Worktree", systemImage: "point.3.connected.trianglepath.dotted") {
+                Task { await store.createWorktree(flavor: .local) }
+            }
+        case .runPreflight, .inspectPreflightFixGitState:
+            primaryButton(action.displayName, systemImage: "checklist.checked") {
+                Task { await store.runPreflightCheck() }
+            }
+        case .planLocally, .revisePlan:
+            primaryButton(action.displayName, systemImage: "brain") {
+                Task { await store.planLocally() }
+            }
+            .disabled(store.isWorking || !store.canPlanSelectedTaskLocally)
+        case .reviewPlanLocally:
+            primaryButton(action.displayName, systemImage: "checklist") {
+                Task { await store.reviewPlanLocally() }
+            }
+        case .askCodexToReviewPlan:
+            primaryButton(action.displayName, systemImage: "doc.text.magnifyingglass") {
+                Task { await store.askCodexToReviewPlan() }
+            }
+        case .approvePlan:
+            primaryButton(action.displayName, systemImage: "hand.thumbsup") {
+                store.approvePlan()
+            }
+        case .buildLocally:
+            primaryButton(action.displayName, systemImage: "hammer") {
+                store.buildLocallyPlaceholder()
+            }
+        case .runTests:
+            primaryButton(action.displayName, systemImage: "checkmark.seal") {
+                Task { await store.runFirstTestCommand() }
+            }
+        case .reviewDiff:
+            primaryButton(action.displayName, systemImage: "doc.text.magnifyingglass") {
+                Task { await store.reviewDiffLocally() }
+            }
+        case .commitAndMerge:
+            Text("Primary next action: Commit and Merge")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+        case .archive:
+            Text("Primary next action: Archive")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+        case .investigate:
+            primaryButton(action.displayName, systemImage: "list.bullet.clipboard") {
+                Task { await store.reviewTaskState() }
             }
         }
     }
@@ -405,6 +534,25 @@ private struct PreflightMetric: View {
                 .foregroundStyle(.secondary)
             Text("\(value)")
                 .font(.headline)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct TaskStateMetric: View {
+    var label: String
+    var value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(8)

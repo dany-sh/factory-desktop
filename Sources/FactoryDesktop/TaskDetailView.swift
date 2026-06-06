@@ -19,6 +19,7 @@ struct TaskDetailView: View {
                         VStack(alignment: .leading, spacing: 18) {
                             workflowBar
                             preflightPanel
+                            taskStatePanel
                             planPanel
                             runLog
                         }
@@ -166,11 +167,18 @@ struct TaskDetailView: View {
                 .disabled(store.isWorking)
 
                 Button {
+                    Task { await store.reviewTaskState() }
+                } label: {
+                    Label("Review Task State", systemImage: "list.bullet.clipboard")
+                }
+                .disabled(store.isWorking)
+
+                Button {
                     Task { await store.planLocally() }
                 } label: {
                     Label("Plan Locally", systemImage: "brain")
                 }
-                .disabled(store.isWorking)
+                .disabled(store.isWorking || !store.canPlanSelectedTaskLocally)
 
                 Button {
                     Task { await store.askCodexToReviewPlan() }
@@ -182,6 +190,11 @@ struct TaskDetailView: View {
             Text("Factory v0.1 plans and records. It does not autonomously edit files.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let warning = store.selectedTaskWorktreeWarning {
+                Text(warning)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+            }
         }
         .padding()
         .background(.background, in: RoundedRectangle(cornerRadius: 16))
@@ -214,6 +227,69 @@ struct TaskDetailView: View {
                 }
             } else {
                 Text("Run Preflight Check to inspect the project repo and Factory worktrees.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
+    private var taskStatePanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Task State Review")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    Task { await store.reviewTaskState() }
+                } label: {
+                    Label("Review", systemImage: "list.bullet.clipboard")
+                }
+                .disabled(store.isWorking)
+            }
+
+            if let review = store.latestTaskStateReview {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Primary Next Action")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(review.recommendedAction.displayName)
+                        .font(.title3.weight(.semibold))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                HStack(spacing: 16) {
+                    InfoChip(label: "Next", value: review.recommendedAction.displayName)
+                    InfoChip(label: "Plan", value: review.hasPlan ? "yes" : "no")
+                    InfoChip(label: "Review", value: review.hasPlanReview ? "yes" : "no")
+                    InfoChip(label: "Preflight", value: review.hasPreflight ? (review.hasRiskyPreflight ? "risk" : "yes") : "no")
+                    InfoChip(label: "Tests", value: review.hasTestOutput ? "yes" : "no")
+                    InfoChip(label: "Diff", value: review.hasDiffReview ? "yes" : "no")
+                }
+                Text(review.summary)
+                    .foregroundStyle(.secondary)
+                if review.hasPlan && !review.hasPlanReview {
+                    Text("Plan exists but has not been reviewed.")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
+            } else if !store.latestTaskStateReviewText.isEmpty {
+                ScrollView {
+                    Text(store.latestTaskStateReviewText)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                }
+                .frame(minHeight: 180)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            } else {
+                Text("Review Task State to summarize artifacts, worktrees, preflight, tests, diff review, and the next action.")
                     .foregroundStyle(.secondary)
             }
         }

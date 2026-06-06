@@ -49,7 +49,8 @@ final class FactoryDesktopCoreTests: XCTestCase {
             "local_diff_review",
             "codex_diff_review_handoff",
             "final_review",
-            "preflight"
+            "preflight",
+            "task_state_review"
         ])
     }
 
@@ -166,6 +167,249 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(AppStore.parsePlanReviewDecision(from: "Looks fine but no machine-readable decision."), .unknown)
     }
 
+    func testTaskStateRecommendsCreateWorktreeWhenCodingTaskHasNoWorktree() {
+        XCTAssertTaskStateRecommendation(.createWorktree, for: TaskStateRecommendationInput(taskType: .coding))
+    }
+
+    func testTaskStateRiskyPreflightOverridesPlanning() {
+        XCTAssertTaskStateRecommendation(.inspectPreflightFixGitState, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasRiskyPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            hasApprovedPlan: true,
+            hasImplementationChanges: true
+        ))
+    }
+
+    func testTaskStateRecommendsPreflightWhenWorktreeExistsWithoutPreflight() {
+        XCTAssertTaskStateRecommendation(.runPreflight, for: TaskStateRecommendationInput(hasExistingWorktree: true))
+    }
+
+    func testTaskStateRecommendsLocalPlanningWhenNoPlanExistsAfterPreflight() {
+        XCTAssertTaskStateRecommendation(.planLocally, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true
+        ))
+    }
+
+    func testTaskStatePlanExistsWithoutReviewUsesRequiredMessage() {
+        let result = TaskStateRecommendationEvaluator.recommend(TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasPlan: true
+        ))
+
+        XCTAssertEqual(result.0, .reviewPlanLocally)
+        XCTAssertEqual(result.1, "Plan exists but has not been reviewed.")
+    }
+
+    func testTaskStateReviewReviseRecommendsRevisePlan() {
+        XCTAssertTaskStateRecommendation(.revisePlan, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .revise
+        ))
+    }
+
+    func testTaskStateReviewRejectRecommendsInvestigate() {
+        XCTAssertTaskStateRecommendation(.investigate, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .reject
+        ))
+    }
+
+    func testTaskStateApprovedReviewWithoutApprovedPlanRecommendsApprovePlan() {
+        XCTAssertTaskStateRecommendation(.approvePlan, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .approve
+        ))
+    }
+
+    func testTaskStateApprovedPlanWithoutChangesRecommendsBuildLocally() {
+        XCTAssertTaskStateRecommendation(.buildLocally, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .approve,
+            hasApprovedPlan: true
+        ))
+    }
+
+    func testTaskStateChangesWithoutTestsRecommendsRunTests() {
+        XCTAssertTaskStateRecommendation(.runTests, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .approve,
+            hasApprovedPlan: true,
+            hasImplementationChanges: true
+        ))
+    }
+
+    func testTaskStateDirtyActiveWorktreeWithoutTestsRecommendsRunTests() {
+        XCTAssertTaskStateRecommendation(.runTests, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .revise,
+            hasApprovedPlan: true,
+            hasImplementationChanges: true
+        ))
+    }
+
+    func testTaskStateTestsWithoutDiffReviewRecommendsReviewDiff() {
+        XCTAssertTaskStateRecommendation(.reviewDiff, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .approve,
+            hasApprovedPlan: true,
+            hasImplementationChanges: true,
+            hasTestOutput: true
+        ))
+    }
+
+    func testTaskStateDirtyActiveWorktreeWithTestsRecommendsReviewDiff() {
+        XCTAssertTaskStateRecommendation(.reviewDiff, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .revise,
+            hasApprovedPlan: true,
+            hasImplementationChanges: true,
+            hasTestOutput: true
+        ))
+    }
+
+    func testTaskStateDirtyCanonicalRepoRecommendsInspectPreflightFixGitState() {
+        XCTAssertTaskStateRecommendation(.inspectPreflightFixGitState, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasRiskyPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            hasApprovedPlan: true,
+            hasImplementationChanges: true,
+            hasTestOutput: true
+        ))
+    }
+
+    func testTaskStateApprovedPlanSupersedesOlderReviseReview() {
+        XCTAssertTaskStateRecommendation(.buildLocally, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .revise,
+            hasApprovedPlan: true
+        ))
+    }
+
+    func testTaskStateStalePreflightDoesNotOverrideNewerImplementationAndTests() {
+        XCTAssertTaskStateRecommendation(.reviewDiff, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasStalePreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            hasApprovedPlan: true,
+            hasImplementationChanges: true,
+            hasTestOutput: true
+        ))
+    }
+
+    func testTaskStateStalePreflightWithoutNewerWorkRecommendsRunPreflight() {
+        XCTAssertTaskStateRecommendation(.runPreflight, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasStalePreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            hasApprovedPlan: true
+        ))
+    }
+
+    func testTaskStateCodexDiffReviewHandoffDoesNotCountAsDiffReview() {
+        XCTAssertTaskStateRecommendation(.reviewDiff, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .approve,
+            hasApprovedPlan: true,
+            hasImplementationChanges: true,
+            hasTestOutput: true,
+            hasDiffReview: false
+        ))
+    }
+
+    func testTaskStateDiffReviewWithChangesRecommendsCommitAndMerge() {
+        XCTAssertTaskStateRecommendation(.commitAndMerge, for: TaskStateRecommendationInput(
+            hasExistingWorktree: true,
+            hasPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .approve,
+            hasApprovedPlan: true,
+            hasImplementationChanges: true,
+            hasTestOutput: true,
+            hasPassingTestOutput: true,
+            hasDiffReview: true
+        ))
+    }
+
+    func testTaskStateMissingWorktreeSummaryDoesNotCrash() {
+        let summary = TaskWorktreeSummary(label: "Local worktree", path: "/tmp/missing", exists: false)
+
+        XCTAssertFalse(summary.exists)
+        XCTAssertFalse(summary.hasImplementationChanges)
+    }
+
+    func testTaskStateMissingArtifactSummaryDoesNotCrash() {
+        let summary = TaskArtifactSummary(type: .plan, path: "/tmp/missing-plan.md", exists: false, createdAt: Date())
+
+        XCTAssertFalse(summary.exists)
+        XCTAssertEqual(summary.type, .plan)
+    }
+
+    func testTaskStateReviewUsesTaskStatus() {
+        let review = TaskStateReview(
+            projectId: "project",
+            taskId: "task",
+            status: .planReady,
+            summary: "summary",
+            latestArtifacts: [],
+            worktreeSummaries: [],
+            latestPlanDecision: nil,
+            hasPlan: false,
+            hasPlanReview: false,
+            hasApprovedPlan: false,
+            hasPreflight: false,
+            hasRiskyPreflight: false,
+            hasImplementationChanges: false,
+            hasTestOutput: false,
+            hasDiffReview: false,
+            blockingIssues: [],
+            recommendedAction: .planLocally
+        )
+
+        XCTAssertEqual(review.status, .planReady)
+    }
+
     func testBuildInfoRepoStateParsing() {
         XCTAssertEqual(BuildInfoService.repoState(fromPorcelainOutput: ""), .clean)
         XCTAssertEqual(BuildInfoService.repoState(fromPorcelainOutput: "\n"), .clean)
@@ -212,5 +456,14 @@ final class FactoryDesktopCoreTests: XCTestCase {
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'tasks', 'runs', 'artifacts', 'schema_migrations');"
         )
         XCTAssertEqual(Set(rows.compactMap { $0["name"] ?? nil }), Set(["projects", "tasks", "runs", "artifacts", "schema_migrations"]))
+    }
+
+    private func XCTAssertTaskStateRecommendation(
+        _ expected: TaskStateRecommendedAction,
+        for input: TaskStateRecommendationInput,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(TaskStateRecommendationEvaluator.recommend(input).0, expected, file: file, line: line)
     }
 }
