@@ -154,8 +154,8 @@ public enum PreflightTargetType: String, CaseIterable, Codable, Identifiable {
     public var displayName: String {
         switch self {
         case .canonicalRepo: "Canonical repo"
-        case .localWorktree: "Local worktree"
-        case .codexWorktree: "Codex worktree"
+        case .localWorktree: "Task worktree"
+        case .codexWorktree: "Alternate worktree"
         case .factoryWorktree: "Factory worktree"
         }
     }

@@ -5,6 +5,7 @@ struct InspectorView: View {
     @EnvironmentObject private var store: AppStore
     @State private var commitMessage = ""
     @State private var showingCommitConfirmation = false
+    @State private var showAllArtifacts = false
 
     var body: some View {
         ScrollView {
@@ -58,12 +59,20 @@ struct InspectorView: View {
     }
 
     private var worktreeCard: some View {
-        InspectorCard(title: "Task Branches") {
-            if let task = store.selectedTask {
-                InfoRow(label: "Local branch", value: task.localBranch ?? "Not created")
-                InfoRow(label: "Local path", value: task.localWorktreePath ?? "Not created")
-                InfoRow(label: "Codex branch", value: task.codexBranch ?? "Not created")
-                InfoRow(label: "Codex path", value: task.codexWorktreePath ?? "Not created")
+        InspectorCard(title: "Task Worktree") {
+            if store.selectedTask != nil {
+                if store.selectedTaskWorktreeDisplays.isEmpty {
+                    Text("No task worktree created.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(store.selectedTaskWorktreeDisplays) { display in
+                        InfoRow(label: display.label, value: display.path ?? "Not created")
+                        InfoRow(label: "Task branch", value: display.branch ?? "Not created")
+                        Text(display.executionMode)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
             } else {
                 Text("Select a task to create worktrees.")
                     .foregroundStyle(.secondary)
@@ -138,7 +147,7 @@ struct InspectorView: View {
                         Task { await store.planLocally() }
                     }
                 } else {
-                    primaryButton("Create Local Worktree", systemImage: "point.3.connected.trianglepath.dotted") {
+                    primaryButton("Create Task Worktree", systemImage: "point.3.connected.trianglepath.dotted") {
                         Task { await store.createWorktree(flavor: .local) }
                     }
                     if let warning = store.selectedTaskWorktreeWarning {
@@ -151,8 +160,8 @@ struct InspectorView: View {
                 primaryButton("Review Plan Locally", systemImage: "checklist") {
                     Task { await store.reviewPlanLocally() }
                 }
-                secondaryButton("Ask Codex to Review Plan", systemImage: "doc.text.magnifyingglass") {
-                    Task { await store.askCodexToReviewPlan() }
+                secondaryButton("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass") {
+                    store.generateCodexPlanReviewHandoff()
                 }
                 secondaryButton("Approve Plan", systemImage: "hand.thumbsup") {
                     store.approvePlan()
@@ -167,8 +176,8 @@ struct InspectorView: View {
                 secondaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
                     Task { await store.planLocally() }
                 }
-                secondaryButton("Ask Codex to Review Plan", systemImage: "doc.text.magnifyingglass") {
-                    Task { await store.askCodexToReviewPlan() }
+                secondaryButton("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass") {
+                    store.generateCodexPlanReviewHandoff()
                 }
             case .planApproved:
                 if store.latestTaskStateReview?.hasImplementationChanges == true {
@@ -180,15 +189,15 @@ struct InspectorView: View {
                         store.buildLocallyPlaceholder()
                     }
                 }
-                secondaryButton("Send to Codex Build", systemImage: "paperplane") {
-                    Task { await store.sendToCodex() }
+                secondaryButton("Generate Codex Build Handoff", systemImage: "paperplane") {
+                    store.generateCodexHandoff()
                 }
                 secondaryButton("Run Tests", systemImage: "checkmark.seal") {
                     Task { await store.runFirstTestCommand() }
                 }
             case .escalationRecommended:
-                primaryButton("Send to Codex Build", systemImage: "paperplane") {
-                    Task { await store.sendToCodex() }
+                primaryButton("Generate Codex Build Handoff", systemImage: "paperplane") {
+                    store.generateCodexHandoff()
                 }
                 secondaryButton("Approve Plan", systemImage: "hand.thumbsup") {
                     store.approvePlan()
@@ -200,8 +209,8 @@ struct InspectorView: View {
                 primaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
                     Task { await store.planLocally() }
                 }
-                secondaryButton("Ask Codex to Review Plan", systemImage: "doc.text.magnifyingglass") {
-                    Task { await store.askCodexToReviewPlan() }
+                secondaryButton("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass") {
+                    store.generateCodexPlanReviewHandoff()
                 }
             case .building, .built, .testing:
                 primaryButton("Run Tests", systemImage: "checkmark.seal") {
@@ -216,7 +225,7 @@ struct InspectorView: View {
                 primaryButton("Review Diff Locally", systemImage: "doc.text.magnifyingglass") {
                     Task { await store.reviewDiffLocally() }
                 }
-                secondaryButton("Ask Codex to Review Diff", systemImage: "paperplane") {
+                secondaryButton("Generate Codex Diff Review Handoff", systemImage: "paperplane") {
                     store.askCodexToReviewDiff()
                 }
                 secondaryButton("Generate Review Note", systemImage: "doc.badge.clock") {
@@ -226,7 +235,7 @@ struct InspectorView: View {
                 primaryButton("Generate Review Note", systemImage: "doc.badge.clock") {
                     store.generateReviewNote()
                 }
-                secondaryButton("Ask Codex to Review Diff", systemImage: "paperplane") {
+                secondaryButton("Generate Codex Diff Review Handoff", systemImage: "paperplane") {
                     store.askCodexToReviewDiff()
                 }
             case .done:
@@ -259,7 +268,7 @@ struct InspectorView: View {
                 Button {
                     Task { await store.createWorktree(flavor: .local) }
                 } label: {
-                    Label("Create Local Worktree", systemImage: "point.3.connected.trianglepath.dotted")
+                    Label("Create Task Worktree", systemImage: "point.3.connected.trianglepath.dotted")
                 }
                 .disabled(store.isWorking)
             }
@@ -268,7 +277,7 @@ struct InspectorView: View {
                 Button {
                     Task { await store.createWorktree(flavor: .codex) }
                 } label: {
-                    Label("Create Codex Worktree", systemImage: "terminal")
+                    Label("Create Alternate Worktree", systemImage: "terminal")
                 }
                 .disabled(store.isWorking)
             }
@@ -282,9 +291,9 @@ struct InspectorView: View {
         .disabled(store.selectedTask == nil)
 
         Button {
-            Task { await store.sendToCodex() }
+            store.generateCodexHandoff()
         } label: {
-            Label("Send to Codex Build", systemImage: "paperplane")
+            Label("Generate Codex Build Handoff", systemImage: "paperplane")
         }
         .disabled(!canSendToCodexBuild)
     }
@@ -356,7 +365,7 @@ struct InspectorView: View {
     private func recommendedActionButton(_ action: TaskStateRecommendedAction) -> some View {
         switch action {
         case .createWorktree:
-            primaryButton("Create Local Worktree", systemImage: "point.3.connected.trianglepath.dotted") {
+            primaryButton("Create Task Worktree", systemImage: "point.3.connected.trianglepath.dotted") {
                 Task { await store.createWorktree(flavor: .local) }
             }
         case .runPreflight, .inspectPreflightFixGitState:
@@ -373,8 +382,8 @@ struct InspectorView: View {
                 Task { await store.reviewPlanLocally() }
             }
         case .askCodexToReviewPlan:
-            primaryButton(action.displayName, systemImage: "doc.text.magnifyingglass") {
-                Task { await store.askCodexToReviewPlan() }
+            primaryButton("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass") {
+                store.generateCodexPlanReviewHandoff()
             }
         case .approvePlan:
             primaryButton(action.displayName, systemImage: "hand.thumbsup") {
@@ -461,13 +470,34 @@ struct InspectorView: View {
 
     private var artifactsCard: some View {
         InspectorCard(title: "Artifacts") {
+            let groups = store.artifactDisplayGroups
             if store.artifacts.isEmpty {
                 Text("Handoffs and review notes will appear here.")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(store.artifacts) { artifact in
+                Toggle("Show All Artifacts", isOn: $showAllArtifacts)
+                    .toggleStyle(.switch)
+                artifactList(title: "Current", artifacts: groups.current)
+                if showAllArtifacts {
+                    artifactList(title: "History", artifacts: groups.history)
+                    artifactList(title: "Raw Logs / Prompts", artifacts: groups.rawLogs)
+                }
+            }
+        }
+    }
+
+    private func artifactList(title: String, artifacts: [Artifact]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if artifacts.isEmpty {
+                Text("None.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(artifacts) { artifact in
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(ArtifactType(rawValue: artifact.type)?.displayName ?? artifact.type)
+                        Text(artifact.artifactType?.displayName ?? artifact.type)
                             .font(.subheadline.weight(.semibold))
                         Text(artifact.path)
                             .font(.system(.caption, design: .monospaced))

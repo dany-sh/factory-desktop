@@ -134,8 +134,8 @@ struct SettingsView: View {
             }
         case .worktrees:
             settingsGroup("Worktrees") {
-                SettingsRow(title: "Local worktree", value: store.selectedTask?.localWorktreePath ?? "Not created")
-                SettingsRow(title: "Codex worktree", value: store.selectedTask?.codexWorktreePath ?? "Not created")
+                SettingsRow(title: "Task worktree", value: store.selectedTask?.localWorktreePath ?? "Not created")
+                SettingsRow(title: "Alternate worktree", value: store.selectedTask?.codexWorktreePath ?? "Not created")
             }
         case .about:
             settingsGroup("About") {

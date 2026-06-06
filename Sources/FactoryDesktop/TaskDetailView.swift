@@ -6,6 +6,9 @@ struct TaskDetailView: View {
     @State private var draft = TaskDraft()
     @State private var acceptanceText = ""
     @State private var loadedTaskID: String?
+    @State private var selectedStage: TaskWorkspaceStage = .overview
+    @State private var isTaskBriefExpanded = false
+    @State private var showAllArtifacts = false
     @FocusState private var focusedField: TaskEditorField?
 
     var body: some View {
@@ -13,17 +16,16 @@ struct TaskDetailView: View {
             if let task = store.selectedTask {
                 VStack(alignment: .leading, spacing: 18) {
                     header(task: task)
-                    taskForm(task: task)
+                    Picker("Stage", selection: $selectedStage) {
+                        ForEach(TaskWorkspaceStage.allCases) { stage in
+                            Text(stage.title).tag(stage)
+                        }
+                    }
+                    .pickerStyle(.segmented)
 
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 18) {
-                            workflowBar
-                            preflightPanel
-                            taskStatePanel
-                            planPanel
-                            runLog
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        taskWorkspaceContent(task: task)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .scrollDismissesKeyboard(.never)
                 }
@@ -75,22 +77,36 @@ struct TaskDetailView: View {
     }
 
     private func header(task: FactoryTask) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(task.title)
-                .font(.largeTitle.weight(.semibold))
-                .lineLimit(2)
-            HStack {
-                StatusPill(text: task.status.displayName)
-                Text(task.id)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(task.title)
+                        .font(.title2.weight(.semibold))
+                        .lineLimit(2)
+                    HStack(spacing: 8) {
+                        StatusPill(text: task.status.displayName)
+                        StatusPill(text: task.type.displayName)
+                        StatusPill(text: task.priority.displayName)
+                        Text(task.id.shortID)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    worktreeSummaryLine
+                }
                 Spacer()
                 if store.isWorking {
                     ProgressView()
                         .controlSize(.small)
                 }
+                compactPrimaryAction
             }
         }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
     }
 
     private func taskForm(task: FactoryTask) -> some View {
@@ -139,12 +155,160 @@ struct TaskDetailView: View {
                 field: .acceptanceCriteria
             )
         }
-        .padding()
-        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 16))
     }
 
     private func save(_ task: FactoryTask) {
         store.saveTask(draft.task(updating: task, acceptanceText: acceptanceText))
+    }
+
+    @ViewBuilder
+    private func taskWorkspaceContent(task: FactoryTask) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            switch selectedStage {
+            case .overview:
+                overviewSection(task: task)
+            case .planReview:
+                planReviewSection
+            case .buildTest:
+                buildTestSection
+            case .diff:
+                diffSection
+            case .artifacts:
+                artifactsSection
+            }
+        }
+        .padding(.bottom, 28)
+    }
+
+    private var compactPrimaryAction: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Next Action")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if let review = store.latestTaskStateReview {
+                primaryActionButton(review.recommendedAction)
+            } else {
+                Button {
+                    Task { await store.reviewTaskState() }
+                } label: {
+                    Label("Review Task State", systemImage: "list.bullet.clipboard")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.selectedTask == nil || store.isWorking)
+            }
+        }
+        .frame(minWidth: 210, alignment: .leading)
+    }
+
+    private var worktreeSummaryLine: some View {
+        let displays = store.selectedTaskWorktreeDisplays
+        return Group {
+            if displays.isEmpty {
+                Text("Task worktree: missing")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(displays.map { "\($0.label): \($0.branch ?? "no branch")" }.joined(separator: "  |  "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+    }
+
+    private func overviewSection(task: FactoryTask) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            taskStatePanel
+            workflowHealthPanel
+            taskWorktreePanel
+            preflightPanel
+            DisclosureGroup("Task Brief", isExpanded: $isTaskBriefExpanded) {
+                taskForm(task: task)
+            }
+            .padding()
+            .background(.background, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(.separator.opacity(0.6))
+            )
+        }
+    }
+
+    private var workflowHealthPanel: some View {
+        let health = store.taskWorkflowHealth
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Workflow Health")
+                .font(.headline)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 10)], spacing: 10) {
+                InfoChip(label: "Worktree", value: health.worktree)
+                InfoChip(label: "Preflight", value: health.preflight)
+                InfoChip(label: "Plan", value: health.plan)
+                InfoChip(label: "Implementation", value: health.implementation)
+                InfoChip(label: "Tests", value: health.tests)
+                InfoChip(label: "Diff Review", value: health.diffReview)
+                InfoChip(label: "Next", value: health.nextAction)
+            }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
+    private var taskWorktreePanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Task Worktree")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    Task { await store.createWorktree(flavor: .local) }
+                } label: {
+                    Label("Create Task Worktree", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+                .disabled(store.selectedTask == nil || store.selectedTask?.localWorktreePath != nil || store.isWorking)
+                Button {
+                    Task { await store.createWorktree(flavor: .codex) }
+                } label: {
+                    Label("Create Alternate Worktree", systemImage: "terminal")
+                }
+                .disabled(store.selectedTask == nil || store.selectedTask?.codexWorktreePath != nil || store.isWorking)
+            }
+
+            if store.selectedTaskWorktreeDisplays.isEmpty {
+                Text("No task worktree exists yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(store.selectedTaskWorktreeDisplays) { display in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(display.label)
+                                .font(.subheadline.weight(.semibold))
+                            Text(display.executionMode)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        Text("Task branch: \(display.branch ?? "not created")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(display.path ?? "No path")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
     }
 
     private var workflowBar: some View {
@@ -181,9 +345,9 @@ struct TaskDetailView: View {
                 .disabled(store.isWorking || !store.canPlanSelectedTaskLocally)
 
                 Button {
-                    Task { await store.askCodexToReviewPlan() }
+                    store.generateCodexPlanReviewHandoff()
                 } label: {
-                    Label("Ask Codex to Review Plan", systemImage: "doc.text.magnifyingglass")
+                    Label("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass")
                 }
                 .disabled(store.isWorking || store.latestPlanArtifact == nil)
             }
@@ -226,7 +390,7 @@ struct TaskDetailView: View {
                     InfoChip(label: "Unpushed", value: "\(report.unpushedCount)")
                 }
             } else {
-                Text("Run Preflight Check to inspect the project repo and Factory worktrees.")
+                Text("Run Preflight Check to inspect the project repo and task worktrees.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -355,6 +519,230 @@ struct TaskDetailView: View {
         )
     }
 
+    private var planReviewSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text(store.latestApprovedPlanArtifact == nil ? "Current Plan" : "Approved Plan")
+                        .font(.headline)
+                    Spacer()
+                    if let artifact = store.currentPlanArtifact {
+                        artifactPath(artifact)
+                    }
+                }
+
+                if store.currentPlanText.isEmpty {
+                    Text("No saved plan yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    markdownBox(store.currentPlanText, minHeight: 320)
+                }
+
+                if !store.latestPlanReviewText.isEmpty {
+                    Divider()
+                    HStack {
+                        Text("Latest Plan Review")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Text(AppStore.parsePlanReviewDecision(from: store.latestPlanReviewText).rawValue)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(store.latestApprovedPlanArtifact == nil ? .secondary : .tertiary)
+                    }
+                    if store.latestApprovedPlanArtifact != nil {
+                        Text("Approved plan is the current planning signal; older review decisions are history.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    markdownBox(store.latestPlanReviewText, minHeight: 180)
+                }
+            }
+            .padding()
+            .background(.background, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(.separator.opacity(0.6))
+            )
+
+            actionPanel(title: "Plan Actions") {
+                actionButton("Plan Locally", systemImage: "brain", prominent: store.latestTaskStateReview?.recommendedAction == .planLocally) {
+                    Task { await store.planLocally() }
+                }
+                .disabled(store.isWorking || !store.canPlanSelectedTaskLocally)
+                actionButton("Review Plan Locally", systemImage: "checklist", prominent: store.latestTaskStateReview?.recommendedAction == .reviewPlanLocally) {
+                    Task { await store.reviewPlanLocally() }
+                }
+                .disabled(store.isWorking || store.latestPlanArtifact == nil)
+                actionButton("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass") {
+                    store.generateCodexPlanReviewHandoff()
+                }
+                .disabled(store.isWorking || store.latestPlanArtifact == nil)
+                actionButton("Approve Plan", systemImage: "hand.thumbsup", prominent: store.latestTaskStateReview?.recommendedAction == .approvePlan) {
+                    store.approvePlan()
+                }
+                .disabled(store.isWorking || store.latestPlanArtifact == nil)
+            }
+        }
+    }
+
+    private var buildTestSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Implementation")
+                    .font(.headline)
+                HStack(spacing: 12) {
+                    InfoChip(label: "State", value: store.taskWorkflowHealth.implementation)
+                    InfoChip(label: "Changed", value: "\(store.gitSnapshot.changedFiles.count)")
+                    InfoChip(label: "Tests", value: store.taskWorkflowHealth.tests)
+                }
+                changedFilesList
+            }
+            .padding()
+            .background(.background, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(.separator.opacity(0.6))
+            )
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Latest Test Output")
+                        .font(.headline)
+                    Spacer()
+                    if let artifact = store.latestTestOutputArtifact {
+                        artifactPath(artifact)
+                    }
+                }
+                if store.latestTestOutputText.isEmpty {
+                    Text("No test output artifact yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    markdownBox(store.latestTestOutputText, minHeight: 240)
+                }
+            }
+            .padding()
+            .background(.background, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(.separator.opacity(0.6))
+            )
+
+            actionPanel(title: "Build & Test Actions") {
+                let hasChanges = store.latestTaskStateReview?.hasImplementationChanges == true || !store.gitSnapshot.changedFiles.isEmpty
+                actionButton("Build Locally", systemImage: "hammer", prominent: store.latestTaskStateReview?.recommendedAction == .buildLocally && !hasChanges) {
+                    store.buildLocallyPlaceholder()
+                }
+                .disabled(store.isWorking || hasChanges)
+                actionButton("Generate Codex Build Handoff", systemImage: "paperplane") {
+                    store.generateCodexHandoff()
+                }
+                .disabled(store.isWorking || store.selectedTask == nil)
+                actionButton("Run Tests", systemImage: "checkmark.seal", prominent: store.latestTaskStateReview?.recommendedAction == .runTests || hasChanges) {
+                    Task { await store.runFirstTestCommand() }
+                }
+                .disabled(store.isWorking)
+            }
+        }
+    }
+
+    private var diffSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Diff Summary")
+                    .font(.headline)
+                HStack(spacing: 12) {
+                    InfoChip(label: "Changed", value: "\(store.gitSnapshot.changedFiles.count)")
+                    InfoChip(label: "Tests", value: store.taskWorkflowHealth.tests)
+                    InfoChip(label: "Diff Review", value: store.taskWorkflowHealth.diffReview)
+                    InfoChip(label: "Readiness", value: store.latestTaskStateReview?.recommendedAction == .commitAndMerge ? "ready" : "not ready")
+                }
+                changedFilesList
+                Text(store.gitSnapshot.diffStat.isEmpty ? "(empty)" : store.gitSnapshot.diffStat)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+            }
+            .padding()
+            .background(.background, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(.separator.opacity(0.6))
+            )
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Latest Diff Review")
+                        .font(.headline)
+                    Spacer()
+                    if let artifact = store.latestDiffReviewArtifact {
+                        artifactPath(artifact)
+                    }
+                }
+                if store.latestDiffReviewText.isEmpty {
+                    Text("No diff review artifact yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    markdownBox(store.latestDiffReviewText, minHeight: 240)
+                }
+            }
+            .padding()
+            .background(.background, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(.separator.opacity(0.6))
+            )
+
+            actionPanel(title: "Diff Actions") {
+                actionButton("Review Diff Locally", systemImage: "doc.text.magnifyingglass", prominent: store.latestTaskStateReview?.recommendedAction == .reviewDiff) {
+                    Task { await store.reviewDiffLocally() }
+                }
+                .disabled(store.isWorking || store.gitSnapshot.changedFiles.isEmpty)
+                actionButton("Generate Codex Diff Review Handoff", systemImage: "paperplane") {
+                    store.askCodexToReviewDiff()
+                }
+                .disabled(store.isWorking || store.gitSnapshot.changedFiles.isEmpty)
+                actionButton("Generate Commit Note", systemImage: "doc.badge.clock") {
+                    store.generateReviewNote()
+                }
+                .disabled(store.isWorking || store.gitSnapshot.changedFiles.isEmpty)
+                Text("Commit and merge remain outside this workspace flow.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var artifactsSection: some View {
+        let groups = store.artifactDisplayGroups
+        return VStack(alignment: .leading, spacing: 18) {
+            Toggle("Show All Artifacts", isOn: $showAllArtifacts)
+                .toggleStyle(.switch)
+
+            artifactGroup(title: "Current", artifacts: groups.current, initiallyExpanded: true)
+            artifactGroup(title: "History", artifacts: groups.history, initiallyExpanded: showAllArtifacts)
+            artifactGroup(title: "Raw Logs / Prompts", artifacts: groups.rawLogs, initiallyExpanded: showAllArtifacts)
+        }
+    }
+
+    private var changedFilesList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Changed Files")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if store.gitSnapshot.changedFiles.isEmpty {
+                Text("No changed files detected.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(store.gitSnapshot.changedFiles, id: \.self) { file in
+                    Text(file)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
     private var runLog: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Run Log")
@@ -406,6 +794,170 @@ struct TaskDetailView: View {
         }
     }
 
+    @ViewBuilder
+    private func primaryActionButton(_ action: TaskStateRecommendedAction) -> some View {
+        switch action {
+        case .createWorktree:
+            actionButton("Create Task Worktree", systemImage: "point.3.connected.trianglepath.dotted", prominent: true) {
+                Task { await store.createWorktree(flavor: .local) }
+            }
+        case .runPreflight, .inspectPreflightFixGitState:
+            actionButton(action.displayName, systemImage: "checklist.checked", prominent: true) {
+                Task { await store.runPreflightCheck() }
+            }
+        case .planLocally, .revisePlan:
+            actionButton(action.displayName, systemImage: "brain", prominent: true) {
+                Task { await store.planLocally() }
+            }
+            .disabled(store.isWorking || !store.canPlanSelectedTaskLocally)
+        case .reviewPlanLocally:
+            actionButton("Review Plan", systemImage: "checklist", prominent: true) {
+                Task { await store.reviewPlanLocally() }
+            }
+        case .askCodexToReviewPlan:
+            actionButton("Generate Plan Review Handoff", systemImage: "doc.text.magnifyingglass", prominent: true) {
+                store.generateCodexPlanReviewHandoff()
+            }
+        case .approvePlan:
+            actionButton(action.displayName, systemImage: "hand.thumbsup", prominent: true) {
+                store.approvePlan()
+            }
+        case .buildLocally:
+            actionButton("Build", systemImage: "hammer", prominent: true) {
+                store.buildLocallyPlaceholder()
+            }
+        case .runTests:
+            actionButton(action.displayName, systemImage: "checkmark.seal", prominent: true) {
+                Task { await store.runFirstTestCommand() }
+            }
+        case .reviewDiff:
+            actionButton(action.displayName, systemImage: "doc.text.magnifyingglass", prominent: true) {
+                Task { await store.reviewDiffLocally() }
+            }
+        case .commitAndMerge:
+            Text("Ready to Commit")
+                .font(.headline)
+        case .archive:
+            Text("Archive")
+                .font(.headline)
+        case .investigate:
+            actionButton(action.displayName, systemImage: "list.bullet.clipboard", prominent: true) {
+                Task { await store.reviewTaskState() }
+            }
+        }
+    }
+
+    private func actionPanel<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 10)], alignment: .leading, spacing: 10) {
+                content()
+            }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
+    @ViewBuilder
+    private func actionButton(_ title: String, systemImage: String, prominent: Bool = false, action: @escaping () -> Void) -> some View {
+        if prominent {
+            Button(action: action) {
+                Label(title, systemImage: systemImage)
+            }
+            .buttonStyle(.borderedProminent)
+        } else {
+            Button(action: action) {
+                Label(title, systemImage: systemImage)
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private func markdownBox(_ text: String, minHeight: CGFloat) -> some View {
+        ScrollView {
+            Text(text)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+        }
+        .frame(minHeight: minHeight)
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func artifactPath(_ artifact: Artifact) -> some View {
+        Button {
+            Task { await store.openArtifact(artifact) }
+        } label: {
+            Label("Open Artifact", systemImage: "arrow.up.forward.app")
+        }
+        .controlSize(.small)
+    }
+
+    @ViewBuilder
+    private func artifactGroup(title: String, artifacts: [Artifact], initiallyExpanded: Bool) -> some View {
+        if initiallyExpanded {
+            artifactGroupBody(title: title, artifacts: artifacts)
+        } else {
+            DisclosureGroup(title) {
+                artifactRows(artifacts)
+                    .padding(.top, 8)
+            }
+            .padding()
+            .background(.background, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(.separator.opacity(0.6))
+            )
+        }
+    }
+
+    private func artifactGroupBody(title: String, artifacts: [Artifact]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.headline)
+            artifactRows(artifacts)
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
+    @ViewBuilder
+    private func artifactRows(_ artifacts: [Artifact]) -> some View {
+        if artifacts.isEmpty {
+            Text("No artifacts.")
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(artifacts) { artifact in
+                HStack(alignment: .top, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(artifact.artifactType?.displayName ?? artifact.type)
+                            .font(.subheadline.weight(.semibold))
+                        Text(artifact.path)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    Spacer()
+                    artifactPath(artifact)
+                }
+                .padding(.vertical, 5)
+                if artifact.id != artifacts.last?.id {
+                    Divider()
+                }
+            }
+        }
+    }
+
     private func loadIfNeeded(_ task: FactoryTask) {
         guard loadedTaskID != task.id else { return }
         load(task)
@@ -424,6 +976,26 @@ private enum TaskEditorField: Hashable {
     case goal
     case context
     case acceptanceCriteria
+}
+
+private enum TaskWorkspaceStage: String, CaseIterable, Identifiable {
+    case overview
+    case planReview
+    case buildTest
+    case diff
+    case artifacts
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .overview: "Overview"
+        case .planReview: "Plan & Review"
+        case .buildTest: "Build & Test"
+        case .diff: "Diff"
+        case .artifacts: "Artifacts"
+        }
+    }
 }
 
 private struct LabeledTextEditor: View {

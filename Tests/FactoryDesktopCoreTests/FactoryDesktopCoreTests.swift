@@ -372,6 +372,102 @@ final class FactoryDesktopCoreTests: XCTestCase {
         ))
     }
 
+    func testTaskStatePrimaryActionDisplayUsesTaskWorktreeLanguage() {
+        XCTAssertEqual(TaskStateRecommendedAction.createWorktree.displayName, "Create Task Worktree")
+        XCTAssertEqual(TaskStateRecommendedAction.commitAndMerge.displayName, "Ready to Commit")
+    }
+
+    func testArtifactGroupingPromotesApprovedPlanAndCurrentArtifacts() {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let artifacts = [
+            Artifact(id: "plan", taskId: "task", type: .plan, path: "/tmp/plan.md", createdAt: base),
+            Artifact(id: "approved", taskId: "task", type: .approvedPlan, path: "/tmp/approved-plan.md", createdAt: base.addingTimeInterval(10)),
+            Artifact(id: "review", taskId: "task", type: .localPlanReview, path: "/tmp/local-plan-review.md", createdAt: base.addingTimeInterval(20)),
+            Artifact(id: "preflight", taskId: "task", type: .preflight, path: "/tmp/preflight.md", createdAt: base.addingTimeInterval(30)),
+            Artifact(id: "prompt", taskId: "task", type: .plannerPrompt, path: "/tmp/planner-prompt.md", createdAt: base.addingTimeInterval(40))
+        ]
+
+        let groups = ArtifactGrouping.group(artifacts)
+
+        XCTAssertTrue(groups.current.contains { $0.id == "approved" })
+        XCTAssertTrue(groups.current.contains { $0.id == "preflight" })
+        XCTAssertFalse(groups.current.contains { $0.id == "plan" })
+        XCTAssertTrue(groups.history.contains { $0.id == "plan" })
+        XCTAssertTrue(groups.history.contains { $0.id == "review" })
+        XCTAssertTrue(groups.rawLogs.contains { $0.id == "prompt" })
+    }
+
+    func testArtifactGroupingKeepsCodexDiffHandoffWithRawPrompts() {
+        let handoff = Artifact(id: "handoff", taskId: "task", type: .codexDiffReviewHandoff, path: "/tmp/codex-diff-review-handoff.md")
+
+        let groups = ArtifactGrouping.group([handoff])
+
+        XCTAssertTrue(groups.rawLogs.contains { $0.id == "handoff" })
+        XCTAssertFalse(groups.current.contains { $0.id == "handoff" })
+    }
+
+    func testTaskWorktreeDisplayMapsSingleWorktreeToTaskWorktree() {
+        let task = FactoryTask(
+            projectId: "project",
+            title: "Task",
+            localBranch: "local/task",
+            localWorktreePath: "/tmp/task"
+        )
+
+        let displays = TaskWorktreeDisplayMapper.displays(for: task)
+
+        XCTAssertEqual(displays.count, 1)
+        XCTAssertEqual(displays.first?.label, "Task Worktree")
+        XCTAssertEqual(displays.first?.executionMode, "Local")
+    }
+
+    func testTaskWorktreeDisplayMapsSecondWorktreeToAlternateWorktree() {
+        let task = FactoryTask(
+            projectId: "project",
+            title: "Task",
+            localBranch: "local/task",
+            codexBranch: "codex/task",
+            localWorktreePath: "/tmp/task",
+            codexWorktreePath: "/tmp/task-alt"
+        )
+
+        let displays = TaskWorktreeDisplayMapper.displays(for: task)
+
+        XCTAssertEqual(displays.map(\.label), ["Primary Task Worktree", "Alternate Worktree"])
+    }
+
+    func testWorkflowHealthSummarizesTaskStateReview() {
+        let review = TaskStateReview(
+            projectId: "project",
+            taskId: "task",
+            status: .needsReview,
+            summary: "Tests were run; diff review is still needed.",
+            latestArtifacts: [],
+            worktreeSummaries: [],
+            latestPlanDecision: nil,
+            hasPlan: true,
+            hasPlanReview: true,
+            hasApprovedPlan: true,
+            hasPreflight: true,
+            hasRiskyPreflight: false,
+            hasImplementationChanges: true,
+            hasTestOutput: true,
+            hasPassingTestOutput: true,
+            hasDiffReview: false,
+            blockingIssues: [],
+            recommendedAction: .reviewDiff
+        )
+        let task = FactoryTask(projectId: "project", title: "Task", localWorktreePath: "/tmp/task")
+
+        let health = TaskWorkflowHealthBuilder.build(task: task, review: review, artifacts: [], gitSnapshot: GitSnapshot())
+
+        XCTAssertEqual(health.worktree, "dirty")
+        XCTAssertEqual(health.plan, "approved")
+        XCTAssertEqual(health.tests, "passed")
+        XCTAssertEqual(health.diffReview, "missing")
+        XCTAssertEqual(health.nextAction, "Review Diff")
+    }
+
     func testTaskStateMissingWorktreeSummaryDoesNotCrash() {
         let summary = TaskWorktreeSummary(label: "Local worktree", path: "/tmp/missing", exists: false)
 

@@ -56,8 +56,24 @@ public final class AppStore: ObservableObject {
         latestArtifact(type: .plan)
     }
 
+    public var latestApprovedPlanArtifact: Artifact? {
+        latestArtifact(type: .approvedPlan)
+    }
+
     public var latestPlanText: String {
         latestPlanArtifact.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? ""
+    }
+
+    public var latestApprovedPlanText: String {
+        latestApprovedPlanArtifact.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? ""
+    }
+
+    public var currentPlanText: String {
+        latestApprovedPlanText.isEmpty ? latestPlanText : latestApprovedPlanText
+    }
+
+    public var currentPlanArtifact: Artifact? {
+        latestApprovedPlanArtifact ?? latestPlanArtifact
     }
 
     public var latestPlanReviewText: String {
@@ -73,6 +89,39 @@ public final class AppStore: ObservableObject {
         latestTaskStateReviewArtifact.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? ""
     }
 
+    public var latestTestOutputArtifact: Artifact? {
+        latestArtifact(type: .testOutput)
+    }
+
+    public var latestTestOutputText: String {
+        latestTestOutputArtifact.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? ""
+    }
+
+    public var latestDiffReviewArtifact: Artifact? {
+        latestArtifact(type: .finalReview) ?? latestArtifact(type: .localDiffReview)
+    }
+
+    public var latestDiffReviewText: String {
+        latestDiffReviewArtifact.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? ""
+    }
+
+    public var artifactDisplayGroups: ArtifactDisplayGroups {
+        ArtifactGrouping.group(artifacts)
+    }
+
+    public var taskWorkflowHealth: TaskWorkflowHealth {
+        TaskWorkflowHealthBuilder.build(
+            task: selectedTask,
+            review: latestTaskStateReview,
+            artifacts: artifacts,
+            gitSnapshot: gitSnapshot
+        )
+    }
+
+    public var selectedTaskWorktreeDisplays: [TaskWorktreeDisplay] {
+        selectedTask.map(TaskWorktreeDisplayMapper.displays(for:)) ?? []
+    }
+
     public var canPlanSelectedTaskLocally: Bool {
         guard let project = selectedProject, let task = selectedTask else { return false }
         return project.type != .codeRepo || hasExistingTaskWorktree(task)
@@ -81,7 +130,7 @@ public final class AppStore: ObservableObject {
     public var selectedTaskWorktreeWarning: String? {
         guard let project = selectedProject, let task = selectedTask else { return nil }
         guard project.type == .codeRepo, !hasExistingTaskWorktree(task) else { return nil }
-        return "Create a local or Codex task worktree before planning this code task."
+        return "Create a task worktree before planning this code task."
     }
 
     public init(paths: FactoryPaths = FactoryPaths()) {
@@ -273,7 +322,7 @@ public final class AppStore: ObservableObject {
             try repository.upsert(task: task)
             try reload()
             selectedTaskID = task.id
-            statusMessage = "Created \(flavor.rawValue) worktree at \(result.path)."
+            statusMessage = "Created \(flavor == .local ? "task" : "alternate") worktree at \(result.path)."
             await refreshGitStatus()
         } catch {
             errorMessage = error.localizedDescription
@@ -298,7 +347,7 @@ public final class AppStore: ObservableObject {
             let report = await gitService.preflightReport(project: project, tasks: projectTasks)
             var markdown = report.markdown
             if project.type == .codeRepo && !hasExistingTaskWorktree(task) {
-                markdown += "\n## Selected Task Worktree\n\nNo task worktree exists for the selected coding task. Create a local or Codex worktree before planning or implementing this task.\n"
+                markdown += "\n## Selected Task Worktree\n\nNo task worktree exists for the selected coding task. Create a task worktree before planning or implementing this task.\n"
             }
             try markdown.write(to: url, atomically: true, encoding: .utf8)
             try repository.insert(artifact: Artifact(
@@ -322,8 +371,8 @@ public final class AppStore: ObservableObject {
             return
         }
         guard project.type != .codeRepo || hasExistingTaskWorktree(task) else {
-            errorMessage = "Create a local or Codex task worktree before planning this code task."
-            statusMessage = "Create Worktree is the next safe action for this code task."
+            errorMessage = "Create a task worktree before planning this code task."
+            statusMessage = "Create Task Worktree is the next safe action for this code task."
             return
         }
         isWorking = true
@@ -553,6 +602,27 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    public func generateCodexPlanReviewHandoff() {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject, let task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            let url = try self.handoffService.codexPlanReviewHandoff(
+                project: project,
+                task: task,
+                latestPlan: self.latestPlanArtifact
+            )
+            try repository.insert(artifact: Artifact(
+                taskId: task.id,
+                type: .codexPlanReviewHandoff,
+                path: url.path,
+                description: "Read-only Codex plan review handoff"
+            ))
+            try self.reloadRunsAndArtifacts()
+            self.statusMessage = "Wrote Codex plan review handoff to \(url.path)."
+        }
+    }
+
     public func approvePlan() {
         perform {
             guard let repository = self.repository, let project = self.selectedProject, var task = self.selectedTask else {
@@ -655,12 +725,12 @@ public final class AppStore: ObservableObject {
         generateCodexHandoff()
 
         guard let path = selectedTask?.codexWorktreePath, let gitService else {
-            errorMessage = "Create a Codex worktree first."
+            errorMessage = "Create an alternate worktree first."
             return
         }
         do {
             _ = try await gitService.openTerminal(path: path)
-            statusMessage = "Opened Terminal in Codex worktree. Run `codex` and use the generated handoff."
+            statusMessage = "Opened Terminal in the alternate worktree. Run `codex` and use the generated handoff."
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -1130,18 +1200,12 @@ public final class AppStore: ObservableObject {
 
     private func taskStateWorktreeSummaries(task: FactoryTask) async -> [TaskWorktreeSummary] {
         var summaries: [TaskWorktreeSummary] = []
-        if let localPath = task.localWorktreePath {
+        for display in TaskWorktreeDisplayMapper.displays(for: task) {
+            guard let path = display.path else { continue }
             if let gitService {
-                summaries.append(await gitService.inspectWorktree(label: "Local worktree", path: localPath))
+                summaries.append(await gitService.inspectWorktree(label: display.label, path: path))
             } else {
-                summaries.append(TaskWorktreeSummary(label: "Local worktree", path: localPath, exists: FileManager.default.fileExists(atPath: localPath)))
-            }
-        }
-        if let codexPath = task.codexWorktreePath, codexPath != task.localWorktreePath {
-            if let gitService {
-                summaries.append(await gitService.inspectWorktree(label: "Codex worktree", path: codexPath))
-            } else {
-                summaries.append(TaskWorktreeSummary(label: "Codex worktree", path: codexPath, exists: FileManager.default.fileExists(atPath: codexPath)))
+                summaries.append(TaskWorktreeSummary(label: display.label, path: path, exists: FileManager.default.fileExists(atPath: path)))
             }
         }
         return summaries

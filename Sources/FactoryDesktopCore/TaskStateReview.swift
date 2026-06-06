@@ -167,18 +167,18 @@ public enum TaskStateRecommendedAction: String, Codable, CaseIterable, Identifia
 
     public var displayName: String {
         switch self {
-        case .createWorktree: "Create Worktree"
+        case .createWorktree: "Create Task Worktree"
         case .runPreflight: "Run Preflight"
         case .inspectPreflightFixGitState: "Inspect Preflight / Fix Git State"
         case .planLocally: "Plan Locally"
         case .reviewPlanLocally: "Review Plan Locally"
-        case .askCodexToReviewPlan: "Ask Codex to Review Plan"
+        case .askCodexToReviewPlan: "Generate Codex Plan Review Handoff"
         case .revisePlan: "Revise Plan"
         case .approvePlan: "Approve Plan"
         case .buildLocally: "Build Locally"
         case .runTests: "Run Tests"
         case .reviewDiff: "Review Diff"
-        case .commitAndMerge: "Commit and Merge"
+        case .commitAndMerge: "Ready to Commit"
         case .archive: "Archive"
         case .investigate: "Investigate"
         }
