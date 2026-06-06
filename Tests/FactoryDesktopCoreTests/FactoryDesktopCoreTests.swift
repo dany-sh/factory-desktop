@@ -72,6 +72,40 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "rm", arguments: ["-rf", "/tmp/nope"])))
     }
 
+    func testBuildInfoRepoStateParsing() {
+        XCTAssertEqual(BuildInfoService.repoState(fromPorcelainOutput: ""), .clean)
+        XCTAssertEqual(BuildInfoService.repoState(fromPorcelainOutput: "\n"), .clean)
+        XCTAssertEqual(BuildInfoService.repoState(fromPorcelainOutput: " M Sources/App.swift\n"), .dirty)
+        XCTAssertEqual(BuildInfoService.repoState(fromPorcelainOutput: "?? Sources/New.swift\n"), .dirty)
+        XCTAssertEqual(BuildInfoService.repoState(fromPorcelainOutput: nil), .unknown)
+    }
+
+    func testBuildInfoNormalizesEmptyGitValuesToUnknown() {
+        XCTAssertEqual(BuildInfoService.normalizedGitValue("main\n"), "main")
+        XCTAssertEqual(BuildInfoService.normalizedGitValue("   \n"), "unknown")
+        XCTAssertEqual(BuildInfoService.normalizedGitValue(nil), "unknown")
+    }
+
+    func testBuildInfoCompactsWorktreeBranchForSidebar() {
+        XCTAssertEqual(BuildInfo.compactBranchName("main"), "main")
+        XCTAssertEqual(BuildInfo.compactBranchName("codex/88CE8956-add-visible-build-and-run-identity"), "codex/88CE8956")
+        XCTAssertEqual(BuildInfo.compactBranchName("local/ABC123-task-title"), "local/ABC123")
+    }
+
+    func testBuildInfoFallbackDoesNotDependOnRealGitRepo() {
+        let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
+        let missingRepo = FileManager.default.temporaryDirectory
+            .appendingPathComponent("factory-desktop-missing-repo-\(UUID().uuidString)", isDirectory: true)
+        let info = BuildInfoService.current(sourceRoot: missingRepo, launchTimestamp: timestamp)
+
+        XCTAssertEqual(info.branch, "unknown")
+        XCTAssertEqual(info.shortSHA, "unknown")
+        XCTAssertEqual(info.repoState, .unknown)
+        XCTAssertEqual(info.repoPath, missingRepo.path)
+        XCTAssertEqual(info.launchTimestamp, timestamp)
+        XCTAssertFalse(info.appVersion.isEmpty)
+    }
+
     func testMigrationCreatesInitialTables() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("factory-desktop-tests-\(UUID().uuidString)", isDirectory: true)

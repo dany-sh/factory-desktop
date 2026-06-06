@@ -94,6 +94,14 @@ struct SidebarView: View {
             .buttonStyle(.bordered)
             .padding()
 
+            Text(store.buildInfo.compactIdentity)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal)
+
             if !store.statusMessage.isEmpty {
                 Text(store.statusMessage)
                     .font(.caption)

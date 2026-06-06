@@ -11,6 +11,7 @@ public final class AppStore: ObservableObject {
     @Published public var selectedTaskID: String?
     @Published public var selectedModel: String = ModelPolicy.plannerDefault
     @Published public var gitSnapshot: GitSnapshot = GitSnapshot()
+    @Published public private(set) var buildInfo: BuildInfo
     @Published public var selectedRunOutput: String = ""
     @Published public var statusMessage: String = ""
     @Published public var errorMessage: String?
@@ -51,6 +52,7 @@ public final class AppStore: ObservableObject {
 
     public init(paths: FactoryPaths = FactoryPaths()) {
         self.paths = paths
+        self.buildInfo = BuildInfoService.current(launchTimestamp: Date())
         self.commandRunner = CommandRunner()
         self.ollamaClient = OllamaClient()
         self.handoffService = HandoffService(paths: paths)

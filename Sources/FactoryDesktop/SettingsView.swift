@@ -140,8 +140,13 @@ struct SettingsView: View {
         case .about:
             settingsGroup("About") {
                 SettingsRow(title: "App", value: "Factory Desktop")
-                SettingsRow(title: "Version", value: "0.1")
-                SettingsRow(title: "Database", value: store.paths.database.path)
+                SettingsRow(title: "App version", value: store.buildInfo.appVersion)
+                SettingsRow(title: "Branch", value: store.buildInfo.branch, monospacedValue: true)
+                SettingsRow(title: "Short SHA", value: store.buildInfo.shortSHA, monospacedValue: true)
+                SettingsRow(title: "Repo state", value: store.buildInfo.repoState.displayName)
+                SettingsRow(title: "Repo path", value: store.buildInfo.repoPath, monospacedValue: true)
+                SettingsRow(title: "Launch timestamp", value: store.buildInfo.launchTimestamp.formatted(date: .abbreviated, time: .standard))
+                SettingsRow(title: "Database", value: store.paths.database.path, monospacedValue: true)
             }
         }
     }
@@ -169,6 +174,7 @@ private struct SettingsRow: View {
     var title: String
     var value: String
     var monospacedTitle = false
+    var monospacedValue = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
@@ -177,7 +183,7 @@ private struct SettingsRow: View {
                 .foregroundStyle(.primary)
             Spacer()
             Text(value)
-                .font(.callout)
+                .font(monospacedValue ? .system(.callout, design: .monospaced) : .callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.trailing)
                 .textSelection(.enabled)
