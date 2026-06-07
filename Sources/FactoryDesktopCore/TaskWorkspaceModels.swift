@@ -138,32 +138,35 @@ public enum TaskWorkflowHealthBuilder {
 public enum WorkflowCheckSummariesBuilder {
     public static func build(project: Project?, runs: [RunRecord], artifacts: [Artifact]) -> [WorkflowCheckSummary] {
         WorkflowRunKind.allCases.map { kind in
-            switch kind {
-            case .build:
-                return summary(
-                    kind: kind,
-                    runs: runs,
-                    artifacts: artifacts,
-                    command: nil,
-                    configured: false
-                )
-            case .unitTests:
-                return summary(
-                    kind: kind,
-                    runs: runs.filter { run in
-                        run.executor == "command" && project?.testCommands.contains(run.summary.removingRunStatusPrefix) == true
-                    },
-                    artifacts: artifacts.filter { $0.artifactType == .testOutput },
-                    command: project?.testCommands.first,
-                    configured: project?.testCommands.isEmpty == false
-                )
-            case .integrationTests:
-                return summary(kind: kind, runs: [], artifacts: [], command: nil, configured: false)
-            case .e2eTests:
-                return summary(kind: kind, runs: [], artifacts: [], command: nil, configured: false)
-            case .visualQC:
-                return summary(kind: kind, runs: [], artifacts: [], command: nil, configured: false)
-            }
+            let command = project?.commandConfiguration.command(for: kind)
+            return summary(
+                kind: kind,
+                runs: matchingRuns(kind: kind, runs: runs, project: project),
+                artifacts: artifactsFor(kind: kind, artifacts: artifacts),
+                command: command,
+                configured: command != nil
+            )
+        }
+    }
+
+    private static func matchingRuns(kind: WorkflowRunKind, runs: [RunRecord], project: Project?) -> [RunRecord] {
+        let typedRuns = runs.filter { $0.runType == kind }
+        if !typedRuns.isEmpty || kind != .unitTests {
+            return typedRuns
+        }
+        return runs.filter { run in
+            run.executor == "command" && project?.testCommands.contains(run.summary.removingRunStatusPrefix) == true
+        }
+    }
+
+    private static func artifactsFor(kind: WorkflowRunKind, artifacts: [Artifact]) -> [Artifact] {
+        switch kind {
+        case .unitTests, .integrationTests, .e2eTests:
+            return artifacts.filter { $0.artifactType == .testOutput }
+        case .build:
+            return artifacts.filter { $0.artifactType == .implementationLog }
+        case .visualQC:
+            return artifacts
         }
     }
 

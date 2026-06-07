@@ -176,6 +176,23 @@ public final class MigrationRunner {
 
             CREATE INDEX IF NOT EXISTS idx_task_events_task_id_created_at ON task_events(task_id, created_at DESC);
             """
+        ),
+        Migration(
+            version: 3,
+            name: "local_runner_foundation",
+            sql: """
+            ALTER TABLE projects ADD COLUMN command_config_json TEXT DEFAULT '{}';
+            ALTER TABLE runs ADD COLUMN project_id TEXT DEFAULT '';
+            ALTER TABLE runs ADD COLUMN run_type TEXT;
+            ALTER TABLE runs ADD COLUMN command TEXT;
+            ALTER TABLE runs ADD COLUMN exit_code INTEGER;
+
+            UPDATE runs
+            SET project_id = COALESCE((
+              SELECT project_id FROM tasks WHERE tasks.id = runs.task_id
+            ), '')
+            WHERE project_id IS NULL OR project_id = '';
+            """
         )
     ]
 }

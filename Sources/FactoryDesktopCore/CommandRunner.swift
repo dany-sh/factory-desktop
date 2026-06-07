@@ -118,11 +118,22 @@ public final class CommandRunner {
         case "xcodebuild":
             return true
         case "swift":
-            return arguments.first == "test"
+            return ["build", "test"].contains(arguments.first ?? "")
         case "npm":
-            return arguments.count >= 2 && arguments[0] == "run" && ["lint", "test"].contains(arguments[1])
+            return arguments.count >= 2 && arguments[0] == "run" && [
+                "build",
+                "lint",
+                "test",
+                "integration",
+                "e2e",
+                "visual",
+                "visual-qc",
+                "visualqc"
+            ].contains(arguments[1])
         case "python", "python3":
             return arguments.count >= 2 && arguments[0] == "-m" && arguments[1] == "pytest"
+        case "true", "false", "printf", "echo":
+            return true
         case "open", "code":
             return true
         case "codex":

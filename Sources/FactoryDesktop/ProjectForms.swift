@@ -9,7 +9,11 @@ struct RegisterProjectView: View {
     @State private var type: ProjectType = .codeRepo
     @State private var path = SelfRepoLocator.sourceRoot.path
     @State private var defaultBranch = "main"
-    @State private var testCommands = "swift test"
+    @State private var buildCommand = "swift build"
+    @State private var unitTestCommand = "swift test"
+    @State private var integrationTestCommand = ""
+    @State private var e2eTestCommand = ""
+    @State private var visualQCCommand = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -29,12 +33,16 @@ struct RegisterProjectView: View {
                     }
                 }
                 TextField("Default branch", text: $defaultBranch)
-                VStack(alignment: .leading) {
-                    Text("Test commands")
-                    TextEditor(text: $testCommands)
-                        .font(.system(.body, design: .monospaced))
-                        .frame(minHeight: 90)
-                }
+                TextField("Build command", text: $buildCommand)
+                    .font(.system(.body, design: .monospaced))
+                TextField("Unit test command", text: $unitTestCommand)
+                    .font(.system(.body, design: .monospaced))
+                TextField("Integration test command", text: $integrationTestCommand)
+                    .font(.system(.body, design: .monospaced))
+                TextField("E2E test command", text: $e2eTestCommand)
+                    .font(.system(.body, design: .monospaced))
+                TextField("Visual QC command", text: $visualQCCommand)
+                    .font(.system(.body, design: .monospaced))
             }
             HStack {
                 Button("Cancel", role: .cancel) {
@@ -51,7 +59,11 @@ struct RegisterProjectView: View {
                         type: type,
                         path: path,
                         defaultBranch: defaultBranch,
-                        testCommandsText: testCommands
+                        buildCommand: buildCommand,
+                        unitTestCommand: unitTestCommand,
+                        integrationTestCommand: integrationTestCommand,
+                        e2eTestCommand: e2eTestCommand,
+                        visualQCCommand: visualQCCommand
                     )
                     dismiss()
                 }

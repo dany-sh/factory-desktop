@@ -246,6 +246,56 @@ public enum WorkflowRunKind: String, CaseIterable, Codable, Identifiable {
         case .visualQC: "Visual QC"
         }
     }
+
+    public var isTestKind: Bool {
+        switch self {
+        case .unitTests, .integrationTests, .e2eTests:
+            return true
+        case .build, .visualQC:
+            return false
+        }
+    }
+}
+
+public struct ProjectCommandConfiguration: Equatable, Codable {
+    public var build: String?
+    public var unitTests: String?
+    public var integrationTests: String?
+    public var e2eTests: String?
+    public var visualQC: String?
+
+    public init(
+        build: String? = nil,
+        unitTests: String? = nil,
+        integrationTests: String? = nil,
+        e2eTests: String? = nil,
+        visualQC: String? = nil
+    ) {
+        self.build = Self.normalized(build)
+        self.unitTests = Self.normalized(unitTests)
+        self.integrationTests = Self.normalized(integrationTests)
+        self.e2eTests = Self.normalized(e2eTests)
+        self.visualQC = Self.normalized(visualQC)
+    }
+
+    public static func fromLegacyTestCommands(_ commands: [String]) -> ProjectCommandConfiguration {
+        ProjectCommandConfiguration(unitTests: commands.first)
+    }
+
+    public func command(for kind: WorkflowRunKind) -> String? {
+        switch kind {
+        case .build: build
+        case .unitTests: unitTests
+        case .integrationTests: integrationTests
+        case .e2eTests: e2eTests
+        case .visualQC: visualQC
+        }
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }
 
 public struct WorkflowCheckSummary: Identifiable, Equatable {
@@ -385,7 +435,15 @@ public struct Project: Identifiable, Equatable, Codable {
     public var type: ProjectType
     public var path: String
     public var defaultBranch: String
-    public var testCommands: [String]
+    public var commandConfiguration: ProjectCommandConfiguration
+    public var testCommands: [String] {
+        get {
+            commandConfiguration.unitTests.map { [$0] } ?? []
+        }
+        set {
+            commandConfiguration.unitTests = newValue.first
+        }
+    }
     public var metadata: [String: String]
     public var createdAt: Date
     public var updatedAt: Date
@@ -397,6 +455,7 @@ public struct Project: Identifiable, Equatable, Codable {
         path: String,
         defaultBranch: String = "main",
         testCommands: [String] = [],
+        commandConfiguration: ProjectCommandConfiguration? = nil,
         metadata: [String: String] = [:],
         createdAt: Date = Date(),
         updatedAt: Date = Date()
@@ -406,7 +465,7 @@ public struct Project: Identifiable, Equatable, Codable {
         self.type = type
         self.path = path
         self.defaultBranch = defaultBranch
-        self.testCommands = testCommands
+        self.commandConfiguration = commandConfiguration ?? .fromLegacyTestCommands(testCommands)
         self.metadata = metadata
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -467,22 +526,34 @@ public struct FactoryTask: Identifiable, Equatable, Codable {
 
 public struct RunRecord: Identifiable, Equatable, Codable {
     public var id: String
-    public var taskId: String
+    public var projectId: String
+    public var taskId: String?
+    public var runType: WorkflowRunKind?
     public var executor: String
     public var model: String?
     public var status: RunStatus
+    public var command: String?
+    public var exitCode: Int?
     public var promptPath: String?
     public var outputPath: String?
     public var summary: String
     public var startedAt: Date
     public var endedAt: Date?
 
+    public var duration: TimeInterval? {
+        endedAt.map { $0.timeIntervalSince(startedAt) }
+    }
+
     public init(
         id: String = UUID().uuidString,
-        taskId: String,
+        projectId: String = "",
+        taskId: String?,
+        runType: WorkflowRunKind? = nil,
         executor: String,
         model: String? = nil,
         status: RunStatus,
+        command: String? = nil,
+        exitCode: Int? = nil,
         promptPath: String? = nil,
         outputPath: String? = nil,
         summary: String = "",
@@ -490,10 +561,14 @@ public struct RunRecord: Identifiable, Equatable, Codable {
         endedAt: Date? = nil
     ) {
         self.id = id
+        self.projectId = projectId
         self.taskId = taskId
+        self.runType = runType
         self.executor = executor
         self.model = model
         self.status = status
+        self.command = command
+        self.exitCode = exitCode
         self.promptPath = promptPath
         self.outputPath = outputPath
         self.summary = summary

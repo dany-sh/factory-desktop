@@ -215,7 +215,17 @@ public final class AppStore: ObservableObject {
         }
     }
 
-    public func registerProject(name: String, type: ProjectType, path: String, defaultBranch: String, testCommandsText: String) {
+    public func registerProject(
+        name: String,
+        type: ProjectType,
+        path: String,
+        defaultBranch: String,
+        buildCommand: String = "",
+        unitTestCommand: String = "",
+        integrationTestCommand: String = "",
+        e2eTestCommand: String = "",
+        visualQCCommand: String = ""
+    ) {
         perform {
             guard let repository = self.repository else { return }
             let url = URL(fileURLWithPath: path).standardizedFileURL
@@ -229,7 +239,13 @@ public final class AppStore: ObservableObject {
                 type: type,
                 path: url.path,
                 defaultBranch: defaultBranch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "main" : defaultBranch,
-                testCommands: Self.lines(from: testCommandsText),
+                commandConfiguration: ProjectCommandConfiguration(
+                    build: buildCommand,
+                    unitTests: unitTestCommand,
+                    integrationTests: integrationTestCommand,
+                    e2eTests: e2eTestCommand,
+                    visualQC: visualQCCommand
+                ),
                 metadata: [:],
                 updatedAt: Date()
             )
@@ -247,7 +263,8 @@ public final class AppStore: ObservableObject {
             type: .codeRepo,
             path: root.path,
             defaultBranch: "main",
-            testCommandsText: "swift test"
+            buildCommand: "swift build",
+            unitTestCommand: "swift test"
         )
     }
 
@@ -854,17 +871,17 @@ public final class AppStore: ObservableObject {
     }
 
     public func runFirstTestCommand() async {
-        guard let project = selectedProject, var task = selectedTask, let repository, let gitService else {
+        await runWorkflowCommand(.unitTests)
+    }
+
+    public func runWorkflowCommand(_ kind: WorkflowRunKind) async {
+        guard let project = selectedProject, var task = selectedTask, let repository else {
             errorMessage = FactoryError.missingSelection.localizedDescription
             return
         }
-        guard let command = project.testCommands.first else {
-            errorMessage = "No test command configured for \(project.name)."
-            return
-        }
-        let worktreePath = task.localWorktreePath ?? task.codexWorktreePath
-        guard let worktreePath else {
-            errorMessage = "Create a task worktree before running tests."
+        guard project.commandConfiguration.command(for: kind) != nil else {
+            statusMessage = "\(kind.displayName) is not configured."
+            selectedRunOutput = ""
             return
         }
 
@@ -872,82 +889,90 @@ public final class AppStore: ObservableObject {
         defer { isWorking = false }
 
         let runID = UUID().uuidString
-        let directory = paths.runDirectory(project: project, task: task)
-        let outputURL = directory.appendingPathComponent("\(runID.shortID)-test-output.txt")
-        var run = RunRecord(
-            id: runID,
-            taskId: task.id,
-            executor: "command",
-            model: nil,
-            status: .running,
-            promptPath: nil,
-            outputPath: outputURL.path,
-            summary: command
-        )
+        let runner = LocalRunnerService(commandRunner: commandRunner, paths: paths, repository: repository)
 
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try applyWorkflowEvent(
-                .testsStarted,
-                to: &task,
-                runId: run.id,
-                message: "Test command started: \(command)."
+            let result = try await runner.runConfiguredCommand(
+                project: project,
+                task: task,
+                kind: kind,
+                runID: runID,
+                onRunStarted: { startedRun in
+                    try self.applyWorkflowEvent(
+                        Self.startedEvent(for: kind),
+                        to: &task,
+                        runId: startedRun.id,
+                        message: "\(kind.displayName) started: \(startedRun.command ?? "missing command")."
+                    )
+                    try self.reload()
+                    self.selectedTaskID = task.id
+                    self.statusMessage = "\(kind.displayName) running..."
+                }
             )
-            try repository.upsert(run: run)
-            let result = try await gitService.runTestCommand(command, in: worktreePath)
-            try result.output.write(to: outputURL, atomically: true, encoding: .utf8)
-            run.status = .succeeded
-            run.summary = "Passed: \(command)"
-            run.endedAt = Date()
-            try repository.upsert(run: run)
-            let artifact = Artifact(
-                taskId: task.id,
-                runId: run.id,
-                type: .testOutput,
-                path: outputURL.path,
-                description: "Test output: \(command)"
-            )
-            try repository.insert(artifact: artifact)
+            guard let run = result.run else {
+                statusMessage = "\(kind.displayName) is not configured."
+                return
+            }
+            let artifact = try insertLocalRunnerArtifact(kind: kind, task: task, run: run)
             try applyWorkflowEvent(
-                .testsFinished,
+                Self.finishedEvent(for: kind, passed: result.status == .passed),
                 to: &task,
                 runId: run.id,
                 artifactId: artifact.id,
-                message: "Test command passed: \(command).",
-                testsPassed: true,
+                message: "\(kind.displayName) \(result.status == .passed ? "passed" : "failed"): \(run.command ?? "missing command").",
+                testsPassed: kind.isTestKind ? result.status == .passed : nil,
                 diffExists: !gitSnapshot.changedFiles.isEmpty
             )
             try reload()
             selectedTaskID = task.id
             selectedRunOutput = result.output
-            statusMessage = "Test command passed."
+            statusMessage = result.status == .passed ? "\(kind.displayName) passed." : "\(kind.displayName) failed."
+            if result.status == .failed {
+                errorMessage = "\(kind.displayName) failed. See \(result.logPath ?? "run log")."
+            }
         } catch {
-            let output = error.localizedDescription
-            try? output.write(to: outputURL, atomically: true, encoding: .utf8)
-            run.status = .failed
-            run.summary = "Failed: \(command)"
-            run.endedAt = Date()
-            try? repository.upsert(run: run)
-            let artifact = Artifact(
-                taskId: task.id,
-                runId: run.id,
-                type: .testOutput,
-                path: outputURL.path,
-                description: "Failed test output: \(command)"
-            )
-            try? repository.insert(artifact: artifact)
-            try? applyWorkflowEvent(
-                .testsFailed,
-                to: &task,
-                runId: run.id,
-                artifactId: artifact.id,
-                message: "Test command failed: \(command).",
-                testsPassed: false
-            )
             try? reload()
             selectedTaskID = task.id
-            selectedRunOutput = output
+            selectedRunOutput = error.localizedDescription
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func insertLocalRunnerArtifact(kind: WorkflowRunKind, task: FactoryTask, run: RunRecord) throws -> Artifact {
+        guard let repository, let outputPath = run.outputPath else {
+            throw FactoryError.missingSelection
+        }
+        let artifactType: ArtifactType = kind.isTestKind ? .testOutput : .implementationLog
+        let artifact = Artifact(
+            taskId: task.id,
+            runId: run.id,
+            type: artifactType,
+            path: outputPath,
+            description: "Local runner log: \(kind.displayName)"
+        )
+        try repository.insert(artifact: artifact)
+        return artifact
+    }
+
+    private static func startedEvent(for kind: WorkflowRunKind) -> TaskWorkflowEventKind {
+        switch kind {
+        case .build:
+            return .buildStarted
+        case .unitTests, .integrationTests, .e2eTests:
+            return .testsStarted
+        case .visualQC:
+            return .visualQCStarted
+        }
+    }
+
+    private static func finishedEvent(for kind: WorkflowRunKind, passed: Bool) -> TaskWorkflowEventKind {
+        switch kind {
+        case .build:
+            return passed ? .buildFinished : .buildFailed
+        case .unitTests, .integrationTests, .e2eTests:
+            return passed ? .testsFinished : .testsFailed
+        case .visualQC:
+            return passed ? .visualQCFinished : .visualQCFailed
         }
     }
 

@@ -10,7 +10,7 @@ public final class FactoryRepository {
     public func projects() throws -> [Project] {
         let rows = try database.query(
             """
-            SELECT id, name, type, path, default_branch, test_commands_json, metadata_json, created_at, updated_at
+            SELECT id, name, type, path, default_branch, test_commands_json, command_config_json, metadata_json, created_at, updated_at
             FROM projects
             ORDER BY updated_at DESC, name ASC;
             """
@@ -21,13 +21,14 @@ public final class FactoryRepository {
     public func upsert(project: Project) throws {
         try database.execute(
             """
-            INSERT INTO projects (id, name, type, path, default_branch, test_commands_json, metadata_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO projects (id, name, type, path, default_branch, test_commands_json, command_config_json, metadata_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(path) DO UPDATE SET
               name = excluded.name,
               type = excluded.type,
               default_branch = excluded.default_branch,
               test_commands_json = excluded.test_commands_json,
+              command_config_json = excluded.command_config_json,
               metadata_json = excluded.metadata_json,
               updated_at = excluded.updated_at;
             """,
@@ -38,6 +39,7 @@ public final class FactoryRepository {
                 .text(project.path),
                 .text(project.defaultBranch),
                 .text(JSONCoding.encodeArray(project.testCommands)),
+                .text(JSONCoding.encode(project.commandConfiguration)),
                 .text(JSONCoding.encodeDictionary(project.metadata)),
                 .text(DateCoding.string(from: project.createdAt)),
                 .text(DateCoding.string(from: project.updatedAt))
@@ -125,7 +127,7 @@ public final class FactoryRepository {
     public func runs(taskId: String) throws -> [RunRecord] {
         let rows = try database.query(
             """
-            SELECT id, task_id, executor, model, status, prompt_path, output_path, summary, started_at, ended_at
+            SELECT id, project_id, task_id, run_type, executor, model, status, command, exit_code, prompt_path, output_path, summary, started_at, ended_at
             FROM runs
             WHERE task_id = ?
             ORDER BY started_at DESC;
@@ -138,23 +140,33 @@ public final class FactoryRepository {
     public func upsert(run: RunRecord) throws {
         try database.execute(
             """
-            INSERT INTO runs (id, task_id, executor, model, status, prompt_path, output_path, summary, started_at, ended_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO runs (id, project_id, task_id, run_type, executor, model, status, command, exit_code, prompt_path, output_path, summary, started_at, ended_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
+              project_id = excluded.project_id,
+              task_id = excluded.task_id,
+              run_type = excluded.run_type,
               executor = excluded.executor,
               model = excluded.model,
               status = excluded.status,
+              command = excluded.command,
+              exit_code = excluded.exit_code,
               prompt_path = excluded.prompt_path,
               output_path = excluded.output_path,
               summary = excluded.summary,
+              started_at = excluded.started_at,
               ended_at = excluded.ended_at;
             """,
             binds: [
                 .text(run.id),
+                .text(run.projectId),
                 .text(run.taskId),
+                .text(run.runType?.rawValue),
                 .text(run.executor),
                 .text(run.model),
                 .text(run.status.rawValue),
+                .text(run.command),
+                run.exitCode.map(SQLiteValue.int) ?? .null,
                 .text(run.promptPath),
                 .text(run.outputPath),
                 .text(run.summary),
@@ -233,13 +245,19 @@ public final class FactoryRepository {
     }
 
     private func project(from row: [String: String?]) -> Project {
-        Project(
+        let legacyCommands = JSONCoding.decodeArray(row.optional("test_commands_json"))
+        let commandConfiguration = JSONCoding.decode(
+            row.optional("command_config_json"),
+            as: ProjectCommandConfiguration.self
+        ) ?? .fromLegacyTestCommands(legacyCommands)
+        return Project(
             id: row.required("id"),
             name: row.required("name"),
             type: ProjectType(rawValue: row.required("type")) ?? .generic,
             path: row.required("path"),
             defaultBranch: row.optional("default_branch") ?? "main",
-            testCommands: JSONCoding.decodeArray(row.optional("test_commands_json")),
+            testCommands: legacyCommands,
+            commandConfiguration: commandConfiguration,
             metadata: JSONCoding.decodeDictionary(row.optional("metadata_json")),
             createdAt: DateCoding.date(from: row.required("created_at")),
             updatedAt: DateCoding.date(from: row.required("updated_at"))
@@ -270,10 +288,14 @@ public final class FactoryRepository {
         let endedAt = row.optional("ended_at").map(DateCoding.date(from:))
         return RunRecord(
             id: row.required("id"),
-            taskId: row.required("task_id"),
+            projectId: row.optional("project_id") ?? "",
+            taskId: row.optional("task_id"),
+            runType: row.optional("run_type").flatMap(WorkflowRunKind.init(rawValue:)),
             executor: row.required("executor"),
             model: row.optional("model"),
             status: RunStatus(rawValue: row.optional("status") ?? "") ?? .failed,
+            command: row.optional("command"),
+            exitCode: row.optional("exit_code").flatMap(Int.init),
             promptPath: row.optional("prompt_path"),
             outputPath: row.optional("output_path"),
             summary: row.optional("summary") ?? "",

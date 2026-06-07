@@ -710,18 +710,30 @@ struct TaskDetailView: View {
 
             actionPanel(title: "Build & Test Actions") {
                 let hasChanges = store.latestTaskStateReview?.hasImplementationChanges == true || !store.gitSnapshot.changedFiles.isEmpty
-                actionButton("Build Locally", systemImage: "hammer", prominent: store.latestTaskStateReview?.recommendedAction == .buildLocally && !hasChanges) {
-                    store.buildLocallyPlaceholder()
+                actionButton("Build", systemImage: "hammer", prominent: store.latestTaskStateReview?.recommendedAction == .buildLocally && !hasChanges) {
+                    Task { await store.runWorkflowCommand(.build) }
                 }
-                .disabled(store.isWorking || hasChanges)
+                .disabled(store.isWorking)
+                actionButton("Unit Tests", systemImage: "checkmark.seal", prominent: store.latestTaskStateReview?.recommendedAction == .runTests || hasChanges) {
+                    Task { await store.runWorkflowCommand(.unitTests) }
+                }
+                .disabled(store.isWorking)
+                actionButton("Integration Tests", systemImage: "checklist", prominent: false) {
+                    Task { await store.runWorkflowCommand(.integrationTests) }
+                }
+                .disabled(store.isWorking)
+                actionButton("E2E Tests", systemImage: "rectangle.connected.to.line.below", prominent: false) {
+                    Task { await store.runWorkflowCommand(.e2eTests) }
+                }
+                .disabled(store.isWorking)
+                actionButton("Visual QC", systemImage: "eye", prominent: false) {
+                    Task { await store.runWorkflowCommand(.visualQC) }
+                }
+                .disabled(store.isWorking)
                 actionButton("Generate Codex Build Handoff", systemImage: "paperplane") {
                     store.generateCodexHandoff()
                 }
                 .disabled(store.isWorking || store.selectedTask == nil)
-                actionButton("Run Tests", systemImage: "checkmark.seal", prominent: store.latestTaskStateReview?.recommendedAction == .runTests || hasChanges) {
-                    Task { await store.runFirstTestCommand() }
-                }
-                .disabled(store.isWorking)
             }
         }
     }
@@ -915,11 +927,11 @@ struct TaskDetailView: View {
             }
         case .buildLocally:
             actionButton("Build", systemImage: "hammer", prominent: true) {
-                store.buildLocallyPlaceholder()
+                Task { await store.runWorkflowCommand(.build) }
             }
         case .runTests:
             actionButton(action.displayName, systemImage: "checkmark.seal", prominent: true) {
-                Task { await store.runFirstTestCommand() }
+                Task { await store.runWorkflowCommand(.unitTests) }
             }
         case .reviewDiff:
             actionButton(action.displayName, systemImage: "doc.text.magnifyingglass", prominent: true) {
@@ -1142,7 +1154,7 @@ private struct WorkflowCheckCard: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(summary.status.color)
             if let run = summary.run {
-                Text("\(run.id.shortID) · \(run.durationText)")
+                Text("\(run.id.shortID) · \(run.durationText)\(run.exitCode.map { " · exit \($0)" } ?? "")")
                     .font(.caption2.monospaced())
                     .foregroundStyle(.tertiary)
             } else if let command = summary.command, !command.isEmpty {

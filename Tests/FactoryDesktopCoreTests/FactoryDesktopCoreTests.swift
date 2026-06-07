@@ -509,6 +509,135 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(summaries.first { $0.kind == .visualQC }?.status, .notConfigured)
     }
 
+    func testProjectCommandConfigurationDefaults() {
+        let empty = ProjectCommandConfiguration()
+        XCTAssertNil(empty.command(for: .build))
+        XCTAssertNil(empty.command(for: .unitTests))
+        XCTAssertNil(empty.command(for: .integrationTests))
+        XCTAssertNil(empty.command(for: .e2eTests))
+        XCTAssertNil(empty.command(for: .visualQC))
+
+        let legacy = Project(name: "Demo", type: .codeRepo, path: "/tmp/demo", testCommands: ["swift test"])
+        XCTAssertEqual(legacy.commandConfiguration.command(for: .unitTests), "swift test")
+        XCTAssertEqual(legacy.testCommands, ["swift test"])
+    }
+
+    func testRepositoryPersistsProjectCommandConfiguration() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(
+            id: "project",
+            name: "Demo",
+            type: .codeRepo,
+            path: fixture.root.path,
+            commandConfiguration: ProjectCommandConfiguration(
+                build: "swift build",
+                unitTests: "swift test",
+                integrationTests: "npm run integration",
+                e2eTests: "npm run e2e",
+                visualQC: "npm run visual-qc"
+            )
+        )
+
+        try fixture.repository.upsert(project: project)
+        let stored = try XCTUnwrap(fixture.repository.projects().first)
+
+        XCTAssertEqual(stored.commandConfiguration.command(for: .build), "swift build")
+        XCTAssertEqual(stored.commandConfiguration.command(for: .unitTests), "swift test")
+        XCTAssertEqual(stored.commandConfiguration.command(for: .integrationTests), "npm run integration")
+        XCTAssertEqual(stored.commandConfiguration.command(for: .e2eTests), "npm run e2e")
+        XCTAssertEqual(stored.commandConfiguration.command(for: .visualQC), "npm run visual-qc")
+    }
+
+    func testLocalRunnerMissingCommandDoesNotCreateFakeRun() async throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Run missing", localWorktreePath: fixture.root.path)
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        let runner = LocalRunnerService(commandRunner: CommandRunner(), paths: fixture.paths, repository: fixture.repository)
+        let result = try await runner.runConfiguredCommand(project: project, task: task, kind: .unitTests)
+
+        XCTAssertEqual(result.status, .notConfigured)
+        XCTAssertNil(result.run)
+        XCTAssertEqual(try fixture.repository.runs(taskId: task.id), [])
+    }
+
+    func testLocalRunnerRunLifecycleAndSuccessfulExitCode() async throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(
+            id: "project",
+            name: "Demo",
+            type: .codeRepo,
+            path: fixture.root.path,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf local-runner-ok")
+        )
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Run success", localWorktreePath: fixture.root.path)
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        let runner = LocalRunnerService(commandRunner: CommandRunner(), paths: fixture.paths, repository: fixture.repository)
+        var sawRunningRecord = false
+        let result = try await runner.runConfiguredCommand(project: project, task: task, kind: .unitTests) { startedRun in
+            let stored = try XCTUnwrap(fixture.repository.runs(taskId: task.id).first { $0.id == startedRun.id })
+            sawRunningRecord = stored.status == .running
+        }
+
+        XCTAssertTrue(sawRunningRecord)
+        XCTAssertEqual(result.status, .passed)
+        XCTAssertEqual(result.run?.status, .succeeded)
+        XCTAssertEqual(result.run?.exitCode, 0)
+        XCTAssertTrue(result.output.contains("local-runner-ok"))
+    }
+
+    func testLocalRunnerFailingCommandExitCode() async throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(
+            id: "project",
+            name: "Demo",
+            type: .codeRepo,
+            path: fixture.root.path,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "false")
+        )
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Run failure", localWorktreePath: fixture.root.path)
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        let runner = LocalRunnerService(commandRunner: CommandRunner(), paths: fixture.paths, repository: fixture.repository)
+        let result = try await runner.runConfiguredCommand(project: project, task: task, kind: .unitTests)
+
+        XCTAssertEqual(result.status, .failed)
+        XCTAssertEqual(result.run?.status, .failed)
+        XCTAssertEqual(result.run?.exitCode, 1)
+    }
+
+    func testRepositoryPersistsLocalRunnerRunRecords() async throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(
+            id: "project",
+            name: "Demo",
+            type: .codeRepo,
+            path: fixture.root.path,
+            commandConfiguration: ProjectCommandConfiguration(build: "printf build-ok")
+        )
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Persist run", localWorktreePath: fixture.root.path)
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        let runner = LocalRunnerService(commandRunner: CommandRunner(), paths: fixture.paths, repository: fixture.repository)
+        _ = try await runner.runConfiguredCommand(project: project, task: task, kind: .build, runID: "run-1")
+        let stored = try XCTUnwrap(fixture.repository.runs(taskId: task.id).first)
+
+        XCTAssertEqual(stored.id, "run-1")
+        XCTAssertEqual(stored.projectId, project.id)
+        XCTAssertEqual(stored.taskId, task.id)
+        XCTAssertEqual(stored.runType, .build)
+        XCTAssertEqual(stored.command, "printf build-ok")
+        XCTAssertEqual(stored.exitCode, 0)
+        XCTAssertNotNil(stored.outputPath)
+        XCTAssertNotNil(stored.endedAt)
+    }
+
     func testTaskStateMissingWorktreeSummaryDoesNotCrash() {
         let summary = TaskWorktreeSummary(label: "Local worktree", path: "/tmp/missing", exists: false)
 
@@ -634,5 +763,15 @@ final class FactoryDesktopCoreTests: XCTestCase {
         line: UInt = #line
     ) {
         XCTAssertEqual(TaskStateRecommendationEvaluator.recommend(input).0, expected, file: file, line: line)
+    }
+
+    private func makeRepositoryFixture() throws -> (root: URL, paths: FactoryPaths, repository: FactoryRepository) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("factory-desktop-tests-\(UUID().uuidString)", isDirectory: true)
+        let paths = FactoryPaths(root: root)
+        try paths.ensureBaseDirectories()
+        let database = try SQLiteDatabase(url: paths.database)
+        try MigrationRunner(database: database, paths: paths).migrate()
+        return (root, paths, FactoryRepository(database: database))
     }
 }
