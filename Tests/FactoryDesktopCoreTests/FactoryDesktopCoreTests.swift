@@ -482,6 +482,338 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(TaskStateRecommendedAction.noActionRequired.displayName, "No Action Required")
     }
 
+    func testTaskLifecycleMergedBranchRecommendsDoneWhenCleanAndReachable() {
+        let evaluation = TaskLifecycleService.evaluate(TaskLifecycleFacts(
+            currentStatus: .readyForReview,
+            taskType: .coding,
+            hasBranch: true,
+            hasWorktree: true,
+            worktreeIsDirty: false,
+            hasCommits: true,
+            appearsMergedIntoDefault: true,
+            latestTestStatus: .passed,
+            hasDiffReviewArtifact: true,
+            hasApprovedPlan: true,
+            hasPreflight: true,
+            cleanupSafetyState: .safe
+        ))
+
+        XCTAssertEqual(evaluation.recommendedStatus, .done)
+        XCTAssertEqual(evaluation.recommendedAction, .noActionRequired)
+        XCTAssertTrue(evaluation.isAutomaticSafe)
+        XCTAssertFalse(evaluation.requiredManualReview)
+    }
+
+    func testTaskLifecycleReviewedTestedCommitsRecommendReadyForReviewBeforeMerge() {
+        let evaluation = TaskLifecycleService.evaluate(TaskLifecycleFacts(
+            currentStatus: .testing,
+            taskType: .coding,
+            hasBranch: true,
+            hasWorktree: true,
+            worktreeIsDirty: false,
+            hasCommits: true,
+            appearsMergedIntoDefault: false,
+            latestTestStatus: .passed,
+            hasDiffReviewArtifact: true,
+            hasApprovedPlan: true,
+            hasPreflight: true,
+            cleanupSafetyState: .safe
+        ))
+
+        XCTAssertEqual(evaluation.recommendedStatus, .readyForReview)
+        XCTAssertEqual(evaluation.recommendedAction, .commitAndMerge)
+        XCTAssertTrue(evaluation.isAutomaticSafe)
+        XCTAssertFalse(evaluation.requiredManualReview)
+    }
+
+    func testTaskLifecycleFailedTestsRecommendNeedsFixes() {
+        let evaluation = TaskLifecycleService.evaluate(TaskLifecycleFacts(
+            currentStatus: .testing,
+            taskType: .coding,
+            hasBranch: true,
+            hasWorktree: true,
+            worktreeIsDirty: false,
+            hasCommits: true,
+            appearsMergedIntoDefault: false,
+            latestTestStatus: .failed,
+            hasApprovedPlan: true,
+            hasPreflight: true,
+            cleanupSafetyState: .safe
+        ))
+
+        XCTAssertEqual(evaluation.recommendedStatus, .needsFixes)
+        XCTAssertEqual(evaluation.recommendedAction, .investigate)
+        XCTAssertTrue(evaluation.isAutomaticSafe)
+    }
+
+    func testTaskLifecycleArchivedTaskRemainsPassive() {
+        let evaluation = TaskLifecycleService.evaluate(TaskLifecycleFacts(
+            currentStatus: .archived,
+            taskType: .coding,
+            hasBranch: true,
+            hasWorktree: true,
+            worktreeIsDirty: true,
+            hasCommits: true,
+            appearsMergedIntoDefault: true,
+            latestTestStatus: .failed,
+            cleanupSafetyState: .dirty
+        ))
+
+        XCTAssertEqual(evaluation.recommendedStatus, .archived)
+        XCTAssertEqual(evaluation.recommendedAction, .noActionRequired)
+        XCTAssertFalse(evaluation.isAutomaticSafe)
+        XCTAssertFalse(evaluation.requiredManualReview)
+    }
+
+    func testTaskLifecycleManualOverridePathRequiresManualReview() {
+        let facts = TaskLifecycleFacts(currentStatus: .ready, cleanupSafetyState: .safe)
+        let evaluation = TaskLifecycleService.manualOverride(
+            facts: facts,
+            requestedStatus: .blocked,
+            reason: "User marked the task blocked."
+        )
+
+        XCTAssertEqual(evaluation.recommendedStatus, .blocked)
+        XCTAssertEqual(evaluation.recommendedAction, .investigate)
+        XCTAssertEqual(evaluation.reason, "User marked the task blocked.")
+        XCTAssertFalse(evaluation.isAutomaticSafe)
+        XCTAssertTrue(evaluation.requiredManualReview)
+    }
+
+    func testTaskLifecycleDoesNotAutoCompleteDirtyOrAmbiguousWorktree() {
+        let dirty = TaskLifecycleService.evaluate(TaskLifecycleFacts(
+            currentStatus: .readyForReview,
+            taskType: .coding,
+            hasBranch: true,
+            hasWorktree: true,
+            worktreeIsDirty: true,
+            hasCommits: true,
+            appearsMergedIntoDefault: true,
+            latestTestStatus: .passed,
+            hasDiffReviewArtifact: true,
+            hasApprovedPlan: true,
+            hasPreflight: true,
+            cleanupSafetyState: .dirty
+        ))
+        let ambiguous = TaskLifecycleService.evaluate(TaskLifecycleFacts(
+            currentStatus: .readyForReview,
+            taskType: .coding,
+            hasBranch: true,
+            hasWorktree: true,
+            worktreeIsDirty: nil,
+            hasCommits: true,
+            appearsMergedIntoDefault: true,
+            latestTestStatus: .passed,
+            hasDiffReviewArtifact: true,
+            hasApprovedPlan: true,
+            hasPreflight: true,
+            cleanupSafetyState: .ambiguous
+        ))
+
+        XCTAssertEqual(dirty.recommendedStatus, .readyForReview)
+        XCTAssertEqual(dirty.recommendedAction, .investigate)
+        XCTAssertFalse(dirty.isAutomaticSafe)
+        XCTAssertTrue(dirty.requiredManualReview)
+        XCTAssertEqual(ambiguous.recommendedStatus, .readyForReview)
+        XCTAssertEqual(ambiguous.recommendedAction, .investigate)
+        XCTAssertFalse(ambiguous.isAutomaticSafe)
+        XCTAssertTrue(ambiguous.requiredManualReview)
+    }
+
+    @MainActor
+    func testLifecycleSyncAppliesSafeMergedStatusAndWritesEvent() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .readyForReview,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
+            createWorktree: true
+        )
+        try insertArtifact(
+            type: .preflight,
+            fileName: "preflight.md",
+            text: "Overall recommendation: archive\nMerged to default: yes\n",
+            fixture: fixture
+        )
+
+        let maybeResult = await fixture.store.syncSelectedTaskLifecycle()
+        let result = try XCTUnwrap(maybeResult)
+        let stored = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first)
+        let event = try XCTUnwrap(fixture.repository.taskEvents(taskId: fixture.task.id).first)
+
+        XCTAssertTrue(result.didApply)
+        XCTAssertEqual(result.appliedStatus, .done)
+        XCTAssertEqual(stored.status, .done)
+        XCTAssertEqual(event.source, .automatic)
+        XCTAssertEqual(event.kind, .statusChangedAutomatically)
+        XCTAssertEqual(event.previousStatus, .readyForReview)
+        XCTAssertEqual(event.newStatus, .done)
+        XCTAssertTrue(event.message.contains("Lifecycle sync"))
+    }
+
+    @MainActor
+    func testLifecycleSyncUnsafeRecommendationDoesNotPersistStatus() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .readyForReview,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
+            createMissingWorktreeReference: true
+        )
+        try insertArtifact(
+            type: .preflight,
+            fileName: "preflight.md",
+            text: "Overall recommendation: archive\nMerged to default: yes\n",
+            fixture: fixture
+        )
+
+        let maybeResult = await fixture.store.syncSelectedTaskLifecycle()
+        let result = try XCTUnwrap(maybeResult)
+        let stored = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first)
+
+        XCTAssertFalse(result.didApply)
+        XCTAssertFalse(result.evaluation.isAutomaticSafe)
+        XCTAssertEqual(stored.status, .readyForReview)
+        XCTAssertEqual(try fixture.repository.taskEvents(taskId: fixture.task.id), [])
+    }
+
+    @MainActor
+    func testLifecycleSyncArchivedTaskIsNotAutoMutated() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .writingProject,
+            taskStatus: .archived,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test")
+        )
+        try fixture.repository.upsert(run: RunRecord(
+            id: "failed-test",
+            projectId: fixture.project.id,
+            taskId: fixture.task.id,
+            runType: .unitTests,
+            executor: "local_runner",
+            status: .failed,
+            command: "printf test",
+            exitCode: 1
+        ))
+
+        let maybeResult = await fixture.store.syncSelectedTaskLifecycle()
+        let result = try XCTUnwrap(maybeResult)
+        let stored = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first)
+
+        XCTAssertFalse(result.didApply)
+        XCTAssertEqual(stored.status, .archived)
+        XCTAssertEqual(try fixture.repository.taskEvents(taskId: fixture.task.id), [])
+    }
+
+    @MainActor
+    func testLifecycleSyncFailedTestMovesTaskToNeedsFixes() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .writingProject,
+            taskStatus: .testing,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test")
+        )
+        try fixture.repository.upsert(run: RunRecord(
+            id: "failed-test",
+            projectId: fixture.project.id,
+            taskId: fixture.task.id,
+            runType: .unitTests,
+            executor: "local_runner",
+            status: .failed,
+            command: "printf test",
+            exitCode: 1
+        ))
+
+        let maybeResult = await fixture.store.syncSelectedTaskLifecycle()
+        let result = try XCTUnwrap(maybeResult)
+        let stored = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first)
+        let event = try XCTUnwrap(fixture.repository.taskEvents(taskId: fixture.task.id).first)
+
+        XCTAssertTrue(result.didApply)
+        XCTAssertEqual(result.appliedStatus, .needsFixes)
+        XCTAssertEqual(stored.status, .needsFixes)
+        XCTAssertEqual(event.source, .automatic)
+        XCTAssertEqual(event.previousStatus, .testing)
+        XCTAssertEqual(event.newStatus, .needsFixes)
+    }
+
+    @MainActor
+    func testLifecycleSyncMergedCleanTaskOnlyMovesToDoneWhenAutomaticSafe() async throws {
+        let safe = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .readyForReview,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
+            createWorktree: true
+        )
+        try insertArtifact(
+            type: .preflight,
+            fileName: "preflight.md",
+            text: "Overall recommendation: archive\nMerged to default: yes\n",
+            fixture: safe
+        )
+        let unsafe = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .readyForReview,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
+            createMissingWorktreeReference: true
+        )
+        try insertArtifact(
+            type: .preflight,
+            fileName: "preflight.md",
+            text: "Overall recommendation: archive\nMerged to default: yes\n",
+            fixture: unsafe
+        )
+
+        let maybeSafeResult = await safe.store.syncSelectedTaskLifecycle()
+        let safeResult = try XCTUnwrap(maybeSafeResult)
+        let maybeUnsafeResult = await unsafe.store.syncSelectedTaskLifecycle()
+        let unsafeResult = try XCTUnwrap(maybeUnsafeResult)
+
+        XCTAssertTrue(safeResult.evaluation.isAutomaticSafe)
+        XCTAssertEqual(safeResult.appliedStatus, .done)
+        XCTAssertFalse(unsafeResult.evaluation.isAutomaticSafe)
+        XCTAssertNil(unsafeResult.appliedStatus)
+        XCTAssertEqual(try unsafe.repository.tasks(projectId: unsafe.project.id).first?.status, .readyForReview)
+    }
+
+    @MainActor
+    func testLifecycleSyncRepeatedRunDoesNotCreateDuplicateEvents() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .readyForReview,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
+            createWorktree: true
+        )
+        try insertArtifact(
+            type: .preflight,
+            fileName: "preflight.md",
+            text: "Overall recommendation: archive\nMerged to default: yes\n",
+            fixture: fixture
+        )
+
+        let maybeFirst = await fixture.store.syncSelectedTaskLifecycle()
+        let first = try XCTUnwrap(maybeFirst)
+        let maybeSecond = await fixture.store.syncSelectedTaskLifecycle()
+        let second = try XCTUnwrap(maybeSecond)
+        let events = try fixture.repository.taskEvents(taskId: fixture.task.id)
+
+        XCTAssertTrue(first.didApply)
+        XCTAssertFalse(second.didApply)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.newStatus, .done)
+    }
+
+    @MainActor
+    func testManualStatusChangeStillAuditsAsManualAfterLifecycleSyncExists() throws {
+        let fixture = try makeLifecycleSyncFixture(projectType: .writingProject, taskStatus: .ready)
+
+        fixture.store.updateSelectedTaskStatus(.blocked)
+        let stored = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first)
+        let event = try XCTUnwrap(fixture.repository.taskEvents(taskId: fixture.task.id).first)
+
+        XCTAssertEqual(stored.status, .blocked)
+        XCTAssertEqual(event.source, .manual)
+        XCTAssertEqual(event.kind, .statusChangedManually)
+        XCTAssertEqual(event.previousStatus, .ready)
+        XCTAssertEqual(event.newStatus, .blocked)
+    }
+
     func testArchivedTaskHasNoActiveNextAction() {
         let archived = TaskStateRecommendationEvaluator.recommend(TaskStateRecommendationInput(
             status: .archived,
@@ -1022,4 +1354,87 @@ final class FactoryDesktopCoreTests: XCTestCase {
         try MigrationRunner(database: database, paths: paths).migrate()
         return (root, paths, FactoryRepository(database: database))
     }
+
+    @MainActor
+    private func makeLifecycleSyncFixture(
+        projectType: ProjectType,
+        taskStatus: TaskStatus,
+        commandConfiguration: ProjectCommandConfiguration = ProjectCommandConfiguration(),
+        createWorktree: Bool = false,
+        createMissingWorktreeReference: Bool = false
+    ) throws -> LifecycleSyncFixture {
+        let fixture = try makeRepositoryFixture()
+        let worktreeURL = fixture.root.appendingPathComponent("task-worktree", isDirectory: true)
+        let missingWorktreeURL = fixture.root.appendingPathComponent("missing-worktree", isDirectory: true)
+        if createWorktree {
+            try FileManager.default.createDirectory(at: worktreeURL, withIntermediateDirectories: true)
+        }
+        let taskWorktreePath: String?
+        if createWorktree {
+            taskWorktreePath = worktreeURL.path
+        } else if createMissingWorktreeReference {
+            taskWorktreePath = missingWorktreeURL.path
+        } else {
+            taskWorktreePath = nil
+        }
+        let project = Project(
+            id: "project",
+            name: "Demo",
+            type: projectType,
+            path: fixture.root.path,
+            commandConfiguration: commandConfiguration
+        )
+        let task = FactoryTask(
+            id: "task",
+            projectId: project.id,
+            title: "Task",
+            status: taskStatus,
+            localBranch: taskWorktreePath == nil ? nil : "local/task",
+            localWorktreePath: taskWorktreePath
+        )
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+        let store = AppStore(paths: fixture.paths)
+        return LifecycleSyncFixture(
+            root: fixture.root,
+            paths: fixture.paths,
+            repository: fixture.repository,
+            store: store,
+            project: project,
+            task: task
+        )
+    }
+
+    @discardableResult
+    private func insertArtifact(
+        type: ArtifactType,
+        fileName: String,
+        text: String,
+        fixture: LifecycleSyncFixture,
+        createdAt: Date = Date()
+    ) throws -> Artifact {
+        let directory = fixture.paths.runDirectory(project: fixture.project, task: fixture.task)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(fileName)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        let artifact = Artifact(
+            id: "\(type.rawValue)-\(UUID().uuidString)",
+            taskId: fixture.task.id,
+            type: type,
+            path: url.path,
+            description: type.displayName,
+            createdAt: createdAt
+        )
+        try fixture.repository.insert(artifact: artifact)
+        return artifact
+    }
+}
+
+private struct LifecycleSyncFixture {
+    var root: URL
+    var paths: FactoryPaths
+    var repository: FactoryRepository
+    var store: AppStore
+    var project: Project
+    var task: FactoryTask
 }

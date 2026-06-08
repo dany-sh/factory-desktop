@@ -493,6 +493,12 @@ struct TaskDetailView: View {
                     .font(.headline)
                 Spacer()
                 Button {
+                    Task { await store.syncSelectedTaskLifecycle() }
+                } label: {
+                    Label("Sync", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(store.isWorking)
+                Button {
                     Task { await store.reviewTaskState() }
                 } label: {
                     Label("Review", systemImage: "list.bullet.clipboard")

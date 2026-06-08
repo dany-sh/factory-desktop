@@ -1235,6 +1235,65 @@ public final class AppStore: ObservableObject {
         !action.isFoundationOnly
     }
 
+    @discardableResult
+    public func syncSelectedTaskLifecycle() async -> TaskLifecycleSyncResult? {
+        guard let repository, let project = selectedProject, let task = selectedTask else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return nil
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        do {
+            try reloadRunsAndArtifacts()
+            let facts = try await taskLifecycleFacts(project: project, task: task, repository: repository)
+            let evaluation = TaskLifecycleService.evaluate(facts)
+            let result = TaskLifecycleSyncResult(evaluation: evaluation, previousStatus: task.status)
+
+            guard task.status != .archived else {
+                statusMessage = "Lifecycle sync skipped: task is archived."
+                return result
+            }
+            guard evaluation.isAutomaticSafe else {
+                statusMessage = "Lifecycle sync skipped: \(evaluation.reason)"
+                return result
+            }
+            guard evaluation.recommendedStatus != task.status else {
+                statusMessage = "Lifecycle sync checked: status is already \(task.status.displayName)."
+                return result
+            }
+
+            var updated = task
+            let previousStatus = updated.status
+            updated.status = evaluation.recommendedStatus
+            updated.updatedAt = Date()
+            let event = TaskEvent(
+                taskId: updated.id,
+                kind: .statusChangedAutomatically,
+                source: .automatic,
+                message: "Lifecycle sync: \(evaluation.reason)",
+                previousStatus: previousStatus,
+                newStatus: updated.status
+            )
+            try repository.upsert(task: updated)
+            try repository.insert(taskEvent: event)
+            try reload()
+            selectedTaskID = updated.id
+            latestTaskStateReview = nil
+            statusMessage = "Lifecycle sync changed status to \(updated.status.displayName)."
+            return TaskLifecycleSyncResult(
+                evaluation: evaluation,
+                previousStatus: previousStatus,
+                appliedStatus: updated.status,
+                event: event
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
     public func reviewTaskState() async {
         guard let repository, let project = selectedProject, let task = selectedTask else {
             errorMessage = FactoryError.missingSelection.localizedDescription
@@ -1274,9 +1333,9 @@ public final class AppStore: ObservableObject {
             let hasImplementationChanges = taskWorktreeSummaries.contains { $0.exists && $0.hasImplementationChanges }
             let hasTestOutput = latestTestOutput != nil
             let hasPassingTestOutput = latestTestOutput.map { testOutputPassed($0) } ?? false
-            let hasDiffReview = artifactSummaries.contains {
-                ($0.type == .localDiffReview || $0.type == .finalReview) && $0.exists
-            }
+            let hasDiffReviewArtifact = artifactSummaries.contains { $0.type == .localDiffReview && $0.exists }
+            let hasFinalReviewArtifact = artifactSummaries.contains { $0.type == .finalReview && $0.exists }
+            let hasDiffReview = hasDiffReviewArtifact || hasFinalReviewArtifact
             let hasExistingWorktree = taskWorktreeSummaries.contains { $0.exists }
             let appearsMerged = task.status == .done || latestPreflightSuggestsArchive()
             if hasStalePreflight {
@@ -1289,24 +1348,44 @@ public final class AppStore: ObservableObject {
                 ? ["Canonical repo has dirty or risky Git state."]
                 : []
 
-            let input = TaskStateRecommendationInput(
-                taskType: task.type,
-                status: task.status,
-                hasExistingWorktree: hasExistingWorktree,
-                hasPreflight: hasPreflight,
+            let workflowSummaries = WorkflowCheckSummariesBuilder.build(
+                project: project,
+                runs: try repository.runs(taskId: task.id),
+                artifacts: try repository.artifacts(taskId: task.id)
+            )
+            let cleanupSafetyState = Self.lifecycleCleanupSafetyState(
                 hasRiskyPreflight: hasRiskyPreflight,
-                hasStalePreflight: hasStalePreflight,
+                hasExistingWorktree: hasExistingWorktree,
+                hasMissingWorktree: !missingWorktrees.isEmpty,
+                hasImplementationChanges: hasImplementationChanges,
+                projectType: project.type
+            )
+            let lifecycleEvaluation = TaskLifecycleService.evaluate(TaskLifecycleFacts(
+                currentStatus: task.status,
+                taskType: task.type,
+                hasBranch: task.localBranch != nil || task.codexBranch != nil,
+                hasWorktree: hasExistingWorktree,
+                worktreeIsDirty: hasExistingWorktree ? hasImplementationChanges : nil,
+                hasCommits: appearsMerged ? true : nil,
+                appearsMergedIntoDefault: appearsMerged,
+                latestBuildStatus: Self.workflowStatus(.build, in: workflowSummaries),
+                latestTestStatus: Self.latestTestStatus(in: workflowSummaries),
+                latestVisualQCStatus: Self.workflowStatus(.visualQC, in: workflowSummaries),
+                hasDiffReviewArtifact: hasDiffReviewArtifact,
+                hasFinalReviewArtifact: hasFinalReviewArtifact,
                 hasPlan: hasPlan,
                 hasPlanReview: hasPlanReview,
                 latestPlanDecision: latestDecision,
                 hasApprovedPlan: hasApprovedPlan,
-                hasImplementationChanges: hasImplementationChanges,
-                hasTestOutput: hasTestOutput,
-                hasPassingTestOutput: hasPassingTestOutput,
-                hasDiffReview: hasDiffReview,
-                appearsMerged: appearsMerged
+                hasPreflight: hasPreflight,
+                hasRiskyPreflight: hasRiskyPreflight,
+                hasStalePreflight: hasStalePreflight,
+                cleanupSafetyState: cleanupSafetyState
+            ))
+            let recommendation = (
+                lifecycleEvaluation.recommendedAction,
+                lifecycleEvaluation.reason
             )
-            let recommendation = TaskStateRecommendationEvaluator.recommend(input)
 
             var review = TaskStateReview(
                 projectId: project.id,
@@ -1576,6 +1655,96 @@ public final class AppStore: ObservableObject {
 
     private func latestExistingArtifact(type: ArtifactType) -> Artifact? {
         artifacts.first { $0.type == type.rawValue && FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private func taskLifecycleFacts(project: Project, task: FactoryTask, repository: FactoryRepository) async throws -> TaskLifecycleFacts {
+        let artifactSummaries = taskStateArtifactSummaries()
+        let taskWorktreeSummaries = await taskStateWorktreeSummaries(task: task)
+        let canonicalSummary = await canonicalWorktreeSummary(project: project)
+        let missingWorktrees = taskWorktreeSummaries.filter { !$0.exists }
+        let hasPlan = artifactSummaries.contains { $0.type == .plan && $0.exists }
+        let hasRawPlanReview = artifactSummaries.contains {
+            ($0.type == .localPlanReview || $0.type == .codexPlanReview) && $0.exists
+        }
+        let hasApprovedPlan = artifactSummaries.contains { $0.type == .approvedPlan && $0.exists }
+        let hasPlanReview = hasRawPlanReview || hasApprovedPlan
+        let latestDecision = hasApprovedPlan ? nil : latestPlanReviewDecision(from: artifactSummaries)
+        let hasPreflight = artifactSummaries.contains { $0.type == .preflight && $0.exists }
+        let latestPreflight = latestExistingArtifact(type: .preflight)
+        let latestTestOutput = latestExistingArtifact(type: .testOutput)
+        let hasStalePreflight = preflightIsStale(preflight: latestPreflight, taskWorktrees: taskWorktreeSummaries, latestTestOutput: latestTestOutput)
+        let canonicalDirty = canonicalSummary?.hasImplementationChanges == true
+        let hasRiskyPreflight = canonicalDirty
+        let hasImplementationChanges = taskWorktreeSummaries.contains { $0.exists && $0.hasImplementationChanges }
+        let hasDiffReviewArtifact = artifactSummaries.contains { $0.type == .localDiffReview && $0.exists }
+        let hasFinalReviewArtifact = artifactSummaries.contains { $0.type == .finalReview && $0.exists }
+        let hasExistingWorktree = taskWorktreeSummaries.contains { $0.exists }
+        let appearsMerged = task.status == .done || latestPreflightSuggestsArchive()
+        let workflowSummaries = WorkflowCheckSummariesBuilder.build(
+            project: project,
+            runs: try repository.runs(taskId: task.id),
+            artifacts: try repository.artifacts(taskId: task.id)
+        )
+        let cleanupSafetyState = Self.lifecycleCleanupSafetyState(
+            hasRiskyPreflight: hasRiskyPreflight,
+            hasExistingWorktree: hasExistingWorktree,
+            hasMissingWorktree: !missingWorktrees.isEmpty,
+            hasImplementationChanges: hasImplementationChanges,
+            projectType: project.type
+        )
+
+        return TaskLifecycleFacts(
+            currentStatus: task.status,
+            taskType: task.type,
+            hasBranch: task.localBranch != nil || task.codexBranch != nil,
+            hasWorktree: hasExistingWorktree,
+            worktreeIsDirty: hasExistingWorktree ? hasImplementationChanges : nil,
+            hasCommits: appearsMerged ? true : nil,
+            appearsMergedIntoDefault: appearsMerged,
+            latestBuildStatus: Self.workflowStatus(.build, in: workflowSummaries),
+            latestTestStatus: Self.latestTestStatus(in: workflowSummaries),
+            latestVisualQCStatus: Self.workflowStatus(.visualQC, in: workflowSummaries),
+            hasDiffReviewArtifact: hasDiffReviewArtifact,
+            hasFinalReviewArtifact: hasFinalReviewArtifact,
+            hasPlan: hasPlan,
+            hasPlanReview: hasPlanReview,
+            latestPlanDecision: latestDecision,
+            hasApprovedPlan: hasApprovedPlan,
+            hasPreflight: hasPreflight,
+            hasRiskyPreflight: hasRiskyPreflight,
+            hasStalePreflight: hasStalePreflight,
+            cleanupSafetyState: cleanupSafetyState
+        )
+    }
+
+    private static func workflowStatus(_ kind: WorkflowRunKind, in summaries: [WorkflowCheckSummary]) -> WorkflowCheckStatus? {
+        summaries.first { $0.kind == kind }?.status
+    }
+
+    private static func latestTestStatus(in summaries: [WorkflowCheckSummary]) -> WorkflowCheckStatus? {
+        let testStatuses = [WorkflowRunKind.unitTests, .integrationTests, .e2eTests]
+            .compactMap { workflowStatus($0, in: summaries) }
+            .filter { $0 != .notConfigured && $0 != .notRun }
+        if testStatuses.contains(.failed) { return .failed }
+        if testStatuses.contains(.running) { return .running }
+        if testStatuses.contains(.passed) { return .passed }
+        if testStatuses.contains(.cancelled) { return .cancelled }
+        if testStatuses.contains(.unknown) { return .unknown }
+        return nil
+    }
+
+    private static func lifecycleCleanupSafetyState(
+        hasRiskyPreflight: Bool,
+        hasExistingWorktree: Bool,
+        hasMissingWorktree: Bool,
+        hasImplementationChanges: Bool,
+        projectType: ProjectType
+    ) -> TaskLifecycleCleanupSafetyState {
+        if hasRiskyPreflight { return .blocked }
+        if hasMissingWorktree { return .missingWorktree }
+        if hasImplementationChanges { return .dirty }
+        if hasExistingWorktree || projectType != .codeRepo { return .safe }
+        return .unknown
     }
 
     private func hasExistingTaskWorktree(_ task: FactoryTask) -> Bool {
