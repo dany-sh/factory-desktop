@@ -1652,6 +1652,41 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(stored.commandConfiguration.command(for: .visualQC), "npm run visual-qc")
     }
 
+    func testTaskEventCanReferenceRunOnlyAfterRunExists() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Plan task")
+        let run = RunRecord(
+            id: "run-1",
+            projectId: project.id,
+            taskId: task.id,
+            executor: "local_ollama",
+            status: .running
+        )
+
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        XCTAssertThrowsError(try fixture.repository.insert(taskEvent: TaskEvent(
+            taskId: task.id,
+            kind: .statusChangedAutomatically,
+            source: .automatic,
+            message: "Planning started.",
+            newStatus: .planning,
+            runId: run.id
+        )))
+
+        try fixture.repository.upsert(run: run)
+        XCTAssertNoThrow(try fixture.repository.insert(taskEvent: TaskEvent(
+            taskId: task.id,
+            kind: .statusChangedAutomatically,
+            source: .automatic,
+            message: "Planning started.",
+            newStatus: .planning,
+            runId: run.id
+        )))
+    }
+
     func testLocalRunnerMissingCommandDoesNotCreateFakeRun() async throws {
         let fixture = try makeRepositoryFixture()
         let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)

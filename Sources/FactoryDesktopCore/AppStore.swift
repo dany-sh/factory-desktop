@@ -565,6 +565,7 @@ public final class AppStore: ObservableObject {
         let prompt = plannerPrompt(project: project, task: task)
         var run = RunRecord(
             id: runID,
+            projectId: project.id,
             taskId: task.id,
             executor: "local_ollama",
             model: selectedModel,
@@ -577,6 +578,7 @@ public final class AppStore: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try prompt.write(to: promptURL, atomically: true, encoding: .utf8)
+            try repository.upsert(run: run)
             try updateStatus(
                 for: &task,
                 to: .planning,
@@ -586,7 +588,6 @@ public final class AppStore: ObservableObject {
                 message: "Planning run started.",
                 repository: repository
             )
-            try repository.upsert(run: run)
             try reload()
             selectedTaskID = task.id
 
@@ -726,6 +727,7 @@ public final class AppStore: ObservableObject {
         )
         var run = RunRecord(
             id: runID,
+            projectId: project.id,
             taskId: task.id,
             executor: "codex_exec",
             model: nil,
@@ -741,6 +743,7 @@ public final class AppStore: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try prompt.write(to: promptURL, atomically: true, encoding: .utf8)
+            try repository.upsert(run: run)
             try updateStatus(
                 for: &task,
                 to: .planReview,
@@ -750,7 +753,6 @@ public final class AppStore: ObservableObject {
                 message: "Codex plan review started.",
                 repository: repository
             )
-            try repository.upsert(run: run)
             try reload()
             selectedTaskID = task.id
             statusMessage = "Codex plan review running..."
