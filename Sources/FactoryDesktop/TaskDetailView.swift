@@ -248,24 +248,24 @@ struct TaskDetailView: View {
         }
     }
 
+    @ViewBuilder
     private var worktreeSummaryLine: some View {
         let displays = store.selectedTaskWorktreeDisplays
-        return Group {
-            if displays.isEmpty {
-                Text("Task worktree: missing")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else if displays.contains(where: { $0.state == .missingPath }) {
-                Text("Missing Worktree")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.red)
-            } else {
-                Text(displays.map { "\($0.label): \($0.branch ?? "no branch") (\($0.state.displayName))" }.joined(separator: "  |  "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
+        let isCompletedTask = store.selectedTask?.status == .archived || store.selectedTask?.status == .done
+        if displays.isEmpty {
+            Text("Task worktree: missing")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if displays.contains(where: { $0.state == .missingPath }) {
+            Text(isCompletedTask ? "Archived Worktree Reference" : "Missing Worktree")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(isCompletedTask ? Color.secondary : Color.red)
+        } else {
+            Text(displays.map { "\($0.label): \($0.branch ?? "no branch") (\($0.state.displayName))" }.joined(separator: "  |  "))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
     }
 

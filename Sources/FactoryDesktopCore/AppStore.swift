@@ -175,6 +175,9 @@ public final class AppStore: ObservableObject {
 
     public var selectedTaskWorktreeWarning: String? {
         guard let project = selectedProject, let task = selectedTask else { return nil }
+        if task.status == .archived || task.status == .done {
+            return nil
+        }
         if let missing = TaskWorktreeDisplayMapper.displays(for: task).first(where: { $0.state == .missingPath }) {
             return "Missing Worktree: This task references a worktree path that no longer exists. \(missing.path ?? "")"
         }

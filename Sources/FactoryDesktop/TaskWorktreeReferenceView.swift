@@ -10,7 +10,7 @@ struct TaskWorktreeReferenceView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(display.state == .missingPath ? "Missing Worktree" : display.label)
+                    Text(titleText)
                         .font(.subheadline.weight(.semibold))
                     Text("\(display.executionMode) · \(display.state.displayName)")
                         .font(.caption.weight(.semibold))
@@ -26,7 +26,7 @@ struct TaskWorktreeReferenceView: View {
             if display.state == .missingPath {
                 Text("This task references a worktree path that no longer exists.")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(isCompletedTask ? Color.secondary : Color.red)
             }
             if display.state == .removedCleaned {
                 Text("This worktree was removed during cleanup.")
@@ -129,7 +129,7 @@ struct TaskWorktreeReferenceView: View {
     private var stateColor: Color {
         switch display.state {
         case .healthy: .green
-        case .missingPath: .red
+        case .missingPath: isCompletedTask ? .secondary : .red
         case .removedCleaned: .secondary
         case .dirtyRisk: .orange
         case .unknown: .secondary
@@ -151,5 +151,12 @@ struct TaskWorktreeReferenceView: View {
             return "No action required after cleanup"
         }
         return display.recommendedAction
+    }
+
+    private var titleText: String {
+        if display.state == .missingPath, isCompletedTask {
+            return "Archived Worktree Reference"
+        }
+        return display.state == .missingPath ? "Missing Worktree" : display.label
     }
 }

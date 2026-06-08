@@ -941,11 +941,21 @@ public final class GitService {
 
     private func preferredWorktreePath(project: Project, task: FactoryTask?) -> String {
         if let task {
-            if let localPath = task.localWorktreePath {
+            if let localPath = task.localWorktreePath,
+               Self.pathIsExistingDirectory(localPath) {
                 return localPath
             }
-            if let codexPath = task.codexWorktreePath {
+            if let codexPath = task.codexWorktreePath,
+               Self.pathIsExistingDirectory(codexPath) {
                 return codexPath
+            }
+            if task.status != .archived && task.status != .done {
+                if let localPath = task.localWorktreePath {
+                    return localPath
+                }
+                if let codexPath = task.codexWorktreePath {
+                    return codexPath
+                }
             }
         }
         return project.path
