@@ -22,6 +22,7 @@ public final class AppStore: ObservableObject {
     @Published public private(set) var latestCodexSessionRecommendation: CodexSessionResultRecommendation?
     @Published public private(set) var buildInfo: BuildInfo
     @Published public var selectedRunOutput: String = ""
+    @Published public var selectedWorkspaceScope: WorkspaceSelectionScope = .project
     @Published public var statusMessage: String = ""
     @Published public var errorMessage: String?
     @Published public var isWorking: Bool = false
@@ -123,6 +124,19 @@ public final class AppStore: ObservableObject {
             selectedTask: selectedTask,
             tasks: tasksForSelectedProject
         )
+    }
+
+    public var projectStatusSummary: ProjectStatusSummary {
+        ProjectWorkspacePresentation.projectStatusSummary(
+            project: selectedProject,
+            tasks: tasksForSelectedProject,
+            hygiene: projectHygieneSummary,
+            report: latestLifecycleReport
+        )
+    }
+
+    public var taskProjectStatusSummary: TaskProjectStatusSummary {
+        ProjectWorkspacePresentation.taskProjectStatusSummary(hygiene: projectHygieneSummary)
     }
 
     public var taskWorkflowHealth: TaskWorkflowHealth {
@@ -240,6 +254,7 @@ public final class AppStore: ObservableObject {
     public func selectProject(_ projectID: String?) {
         selectedProjectID = projectID
         selectedTaskID = tasks.first { $0.projectId == projectID }?.id
+        selectedWorkspaceScope = .project
         latestPreflightReport = nil
         latestLifecycleReport = nil
         latestTaskStateReview = nil
@@ -255,6 +270,7 @@ public final class AppStore: ObservableObject {
 
     public func selectTask(_ taskID: String?) {
         selectedTaskID = taskID
+        selectedWorkspaceScope = taskID == nil ? .project : .task
         selectedRunOutput = ""
         latestPreflightReport = nil
         latestLifecycleReport = nil
@@ -320,6 +336,18 @@ public final class AppStore: ObservableObject {
             buildCommand: "swift build",
             unitTestCommand: "swift test"
         )
+    }
+
+    public func showProjectWorkspace() {
+        selectedWorkspaceScope = .project
+    }
+
+    public func showTaskWorkspace() {
+        guard selectedTask != nil else {
+            selectedWorkspaceScope = .project
+            return
+        }
+        selectedWorkspaceScope = .task
     }
 
     public func createTask(title: String, type: TaskType, goal: String = "") async {

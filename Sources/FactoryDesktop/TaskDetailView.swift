@@ -9,7 +9,6 @@ struct TaskDetailView: View {
     @State private var selectedStage: TaskWorkspaceStage = .overview
     @State private var isTaskBriefExpanded = false
     @State private var showAllArtifacts = false
-    @State private var showingProjectHygiene = false
     @FocusState private var focusedField: TaskEditorField?
 
     var body: some View {
@@ -86,6 +85,12 @@ struct TaskDetailView: View {
                         .lineLimit(2)
                     HStack(spacing: 8) {
                         statusMenu(task: task)
+                        Button {
+                            store.showProjectWorkspace()
+                        } label: {
+                            StatusPill(text: "Project View")
+                        }
+                        .buttonStyle(.plain)
                         StatusPill(text: task.type.displayName)
                         StatusPill(text: task.priority.displayName)
                         Text(task.id.shortID)
@@ -273,9 +278,9 @@ struct TaskDetailView: View {
             taskStatePanel
             workflowHealthPanel
             recentEventsPanel
+            projectStatusPanel
             taskWorktreePanel
             preflightPanel
-            projectHygieneSummaryPanel
             DisclosureGroup("Task Brief", isExpanded: $isTaskBriefExpanded) {
                 taskForm(task: task)
             }
@@ -288,48 +293,41 @@ struct TaskDetailView: View {
         }
     }
 
-    private var projectHygieneSummaryPanel: some View {
-        let summary = store.projectHygieneSummary
+    private var projectStatusPanel: some View {
+        let summary = store.taskProjectStatusSummary
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Project Hygiene")
+                    Text("Project Status")
                         .font(.headline)
-                    Text("Repo hygiene covers project-wide cleanup and safety. Task lifecycle sync covers the selected task's status decision.")
+                    Text("Task view stays focused on task execution. Open the project workspace for repo-wide cleanup, archived references, branches, and artifact waste.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text(summary.severity.displayName)
+                Text(summary.hygieneSeverity.displayName)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(hygieneSeverityColor(summary.severity))
+                    .foregroundStyle(hygieneSeverityColor(summary.hygieneSeverity))
             }
 
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 10)], spacing: 10) {
-                InfoChip(label: "Total Items", value: "\(summary.totalCleanupItemCount)")
-                InfoChip(label: "Selected Task", value: "\(summary.selectedTaskRelevantItemCount)")
-                InfoChip(label: "Historical", value: "\(summary.historicalItemCount)")
-                InfoChip(label: "Artifact Waste", value: "\(summary.artifactWasteItemCount)")
+                InfoChip(label: "Project Cleanup", value: "\(summary.projectCleanupCount)")
+                InfoChip(label: "Blockers", value: "\(summary.blockerCount)")
+                InfoChip(label: "Preflight", value: store.projectStatusSummary.preflightStatus)
+                InfoChip(label: "Repo", value: store.projectStatusSummary.workingTreeState)
             }
 
-            if summary.selectedTaskBlockerCount > 0 {
-                Text("Selected task blocker: \(summary.selectedTaskBlockerCount) item\(summary.selectedTaskBlockerCount == 1 ? "" : "s") need review in this task workspace.")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.red)
-            } else if summary.totalCleanupItemCount > summary.selectedTaskRelevantItemCount {
-                Text("Project-wide cleanup exists, but unrelated archived task references are kept out of this task workspace.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Text(summary.message)
+                .font(summary.hasProjectIssue ? .subheadline.weight(.semibold) : .caption)
+                .foregroundStyle(summary.blockerCount > 0 ? .red : .secondary)
 
             HStack {
                 Button {
-                    showingProjectHygiene = true
+                    store.showProjectWorkspace()
                 } label: {
-                    Label("Open Project Hygiene", systemImage: "wrench.and.screwdriver")
+                    Label("Open Project Workspace", systemImage: "folder")
                 }
                 .buttonStyle(.bordered)
-                .disabled(store.latestLifecycleReport == nil)
 
                 Button {
                     Task { await store.refreshLifecycleScan() }
@@ -346,14 +344,6 @@ struct TaskDetailView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator.opacity(0.6))
         )
-        .sheet(isPresented: $showingProjectHygiene) {
-            ScrollView {
-                LifecycleCleanupView()
-                    .environmentObject(store)
-            }
-            .frame(minWidth: 760, minHeight: 680)
-            .padding()
-        }
     }
 
     private func hygieneSeverityColor(_ severity: HygieneSeverity) -> Color {

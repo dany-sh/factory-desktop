@@ -1204,6 +1204,73 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(summary.presentationGroups.first { $0.scope == .archivedTask }?.severity, .warning)
     }
 
+    func testTaskProjectStatusSummaryOnlyExposesCompactProjectWarning() {
+        let hygiene = ProjectHygieneSummary(
+            severity: .warning,
+            totalCleanupItemCount: 7,
+            selectedTaskRelevantItemCount: 2,
+            selectedTaskBlockerCount: 1,
+            historicalItemCount: 3,
+            artifactWasteItemCount: 1,
+            presentationGroups: [
+                CleanupPresentationGroup(
+                    id: "archived",
+                    title: "Archived Task References",
+                    scope: .archivedTask,
+                    severity: .warning,
+                    count: 3,
+                    collapsedByDefault: true
+                )
+            ]
+        )
+
+        let summary = ProjectWorkspacePresentation.taskProjectStatusSummary(hygiene: hygiene)
+
+        XCTAssertEqual(summary.blockerCount, 1)
+        XCTAssertEqual(summary.projectCleanupCount, 5)
+        XCTAssertTrue(summary.hasProjectIssue)
+        XCTAssertFalse(summary.message.contains("Archived Task References"))
+    }
+
+    func testProjectStatusSummaryKeepsProjectHygieneAvailableForProjectWorkspace() {
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: "/tmp/demo", defaultBranch: "main")
+        let tasks = [
+            FactoryTask(id: "active-task", projectId: "project", title: "Active"),
+            FactoryTask(id: "done-task", projectId: "project", title: "Done", status: .done)
+        ]
+        let hygiene = ProjectHygieneSummary(
+            severity: .blocked,
+            totalCleanupItemCount: 4,
+            selectedTaskRelevantItemCount: 1,
+            selectedTaskBlockerCount: 1,
+            historicalItemCount: 2,
+            artifactWasteItemCount: 1,
+            presentationGroups: []
+        )
+        var report = hygieneReport()
+        report.canonicalRepoPath = project.path
+        report.currentBranch = "feature/project-view"
+        report.currentHEAD = "abc1234"
+        report.workingTreeClean = false
+        report.defaultAheadOfOrigin = 1
+        report.defaultBehindOrigin = 0
+        report.preflightGate = LifecyclePreflightGate(level: .yellow, checks: [])
+        report.hygieneEvents = ["Lifecycle scan complete."]
+
+        let summary = ProjectWorkspacePresentation.projectStatusSummary(
+            project: project,
+            tasks: tasks,
+            hygiene: hygiene,
+            report: report
+        )
+
+        XCTAssertEqual(summary.activeTaskCount, 1)
+        XCTAssertEqual(summary.archivedTaskCount, 1)
+        XCTAssertEqual(summary.cleanupItemCount, 4)
+        XCTAssertEqual(summary.preflightStatus, "Warnings require confirmation")
+        XCTAssertEqual(summary.workingTreeState, "dirty")
+    }
+
     func testTaskWorktreeDisplayMapsSingleWorktreeToTaskWorktree() {
         let task = FactoryTask(
             projectId: "project",

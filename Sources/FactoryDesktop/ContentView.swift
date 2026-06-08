@@ -51,8 +51,14 @@ struct ContentView: View {
             )
             .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
         } content: {
-            TaskDetailView()
-                .navigationSplitViewColumnWidth(min: 460, ideal: 680)
+            Group {
+                if store.selectedWorkspaceScope == .project {
+                    ProjectDashboardView()
+                } else {
+                    TaskDetailView()
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 460, ideal: 680)
         } detail: {
             InspectorView()
                 .navigationSplitViewColumnWidth(min: 300, ideal: 360, max: 440)

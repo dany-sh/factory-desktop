@@ -13,15 +13,20 @@ struct InspectorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 projectCard
-                codexCard
-                worktreeCard
-                actionCard
-                taskStateCard
-                lifecycleSyncCard
-                preflightCard
-                lifecycleCard
-                gitCard
-                artifactsCard
+                if store.selectedWorkspaceScope == .project {
+                    projectWorkspaceCard
+                    lifecycleCard
+                } else {
+                    codexCard
+                    worktreeCard
+                    actionCard
+                    taskStateCard
+                    lifecycleSyncCard
+                    preflightCard
+                    compactProjectStatusCard
+                    gitCard
+                    artifactsCard
+                }
             }
             .padding(18)
         }
@@ -504,6 +509,46 @@ struct InspectorView: View {
 
     private var lifecycleCard: some View {
         LifecycleCleanupView()
+    }
+
+    private var projectWorkspaceCard: some View {
+        let summary = store.projectStatusSummary
+        return InspectorCard(title: "Project Workspace") {
+            Text("You are viewing project-wide state. Open a task from the dashboard or sidebar to return to task-specific execution details.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                TaskStateMetric(label: "Active", value: "\(summary.activeTaskCount)")
+                TaskStateMetric(label: "Archived", value: "\(summary.archivedTaskCount)")
+                TaskStateMetric(label: "Cleanup", value: "\(summary.cleanupItemCount)")
+            }
+            Button {
+                Task { await store.refreshGitStatus() }
+            } label: {
+                Label("Refresh Git Status", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private var compactProjectStatusCard: some View {
+        let summary = store.taskProjectStatusSummary
+        return InspectorCard(title: "Project Status") {
+            Text(summary.message)
+                .font(.caption)
+                .foregroundStyle(summary.blockerCount > 0 ? .red : .secondary)
+            HStack(spacing: 12) {
+                TaskStateMetric(label: "Cleanup", value: "\(summary.projectCleanupCount)")
+                TaskStateMetric(label: "Blockers", value: "\(summary.blockerCount)")
+                TaskStateMetric(label: "Preflight", value: store.projectStatusSummary.preflightStatus)
+            }
+            Button {
+                store.showProjectWorkspace()
+            } label: {
+                Label("Open Project Workspace", systemImage: "folder")
+            }
+            .buttonStyle(.bordered)
+        }
     }
 
     @ViewBuilder
