@@ -546,6 +546,8 @@ struct TaskDetailView: View {
                 Text("Review Task State to summarize artifacts, worktrees, preflight, tests, diff review, and the next action.")
                     .foregroundStyle(.secondary)
             }
+
+            lifecycleSyncDetails
         }
         .padding()
         .background(.background, in: RoundedRectangle(cornerRadius: 16))
@@ -553,6 +555,64 @@ struct TaskDetailView: View {
             RoundedRectangle(cornerRadius: 16)
                 .stroke(.separator.opacity(0.6))
         )
+    }
+
+    @ViewBuilder
+    private var lifecycleSyncDetails: some View {
+        if let result = store.latestLifecycleSyncResult {
+            let details = TaskLifecycleSyncDetails.make(from: result)
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 10) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 116), spacing: 8)], alignment: .leading, spacing: 8) {
+                        ForEach(details.rows) { row in
+                            LifecycleFactChip(row: row)
+                        }
+                    }
+
+                    if let transition = details.transition {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Automatic Transition")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Text("\(transition.fromStatus.displayName) -> \(transition.toStatus.displayName)")
+                                .font(.subheadline.weight(.semibold))
+                            Text(transition.reason)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if !details.blockingReasons.isEmpty {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Sync Did Not Apply")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            ForEach(details.blockingReasons, id: \.self) { reason in
+                                Text(reason)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    } else {
+                        Text(details.evaluationReason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.top, 8)
+            } label: {
+                HStack(spacing: 8) {
+                    Label("Lifecycle Facts", systemImage: result.evaluation.isAutomaticSafe ? "checkmark.shield" : "exclamationmark.triangle")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text(result.didApply ? "Applied" : (result.evaluation.isAutomaticSafe ? "Safe" : "Manual review"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(result.evaluation.isAutomaticSafe ? .green : .orange)
+                }
+            }
+        } else {
+            Text("Sync lifecycle to inspect Git-backed lifecycle facts.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var planPanel: some View {
@@ -1215,6 +1275,44 @@ private struct InfoChip: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct LifecycleFactChip: View {
+    var row: TaskLifecycleFactDisplayRow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(row.label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(row.value)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(row.tone.color.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(row.tone.color.opacity(0.28))
+        )
+    }
+}
+
+private extension TaskLifecycleFactTone {
+    var color: Color {
+        switch self {
+        case .neutral:
+            return .secondary
+        case .ok:
+            return .green
+        case .warning:
+            return .orange
+        case .danger:
+            return .red
+        }
     }
 }
 

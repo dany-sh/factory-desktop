@@ -8,6 +8,16 @@ public enum TaskLifecycleGitFactSource: String, CaseIterable, Codable, Identifia
     case localAndCodexWorktrees = "local_and_codex_worktrees"
 
     public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .none: "None"
+        case .repository: "Repository"
+        case .localWorktree: "Local worktree"
+        case .codexWorktree: "Codex worktree"
+        case .localAndCodexWorktrees: "Local + Codex"
+        }
+    }
 }
 
 public struct TaskLifecycleGitFacts: Equatable, Codable {

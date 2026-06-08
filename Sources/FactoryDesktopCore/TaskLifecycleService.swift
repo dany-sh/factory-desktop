@@ -33,6 +33,7 @@ public struct TaskLifecycleFacts: Equatable, Codable {
     public var defaultBranchResolved: Bool?
     public var gitFactSource: TaskLifecycleGitFactSource
     public var isGitStateAmbiguous: Bool
+    public var gitAmbiguityReasons: [String]
     public var latestBuildStatus: WorkflowCheckStatus?
     public var latestTestStatus: WorkflowCheckStatus?
     public var latestVisualQCStatus: WorkflowCheckStatus?
@@ -59,6 +60,7 @@ public struct TaskLifecycleFacts: Equatable, Codable {
         defaultBranchResolved: Bool? = nil,
         gitFactSource: TaskLifecycleGitFactSource = .none,
         isGitStateAmbiguous: Bool = false,
+        gitAmbiguityReasons: [String] = [],
         latestBuildStatus: WorkflowCheckStatus? = nil,
         latestTestStatus: WorkflowCheckStatus? = nil,
         latestVisualQCStatus: WorkflowCheckStatus? = nil,
@@ -84,6 +86,7 @@ public struct TaskLifecycleFacts: Equatable, Codable {
         self.defaultBranchResolved = defaultBranchResolved
         self.gitFactSource = gitFactSource
         self.isGitStateAmbiguous = isGitStateAmbiguous
+        self.gitAmbiguityReasons = gitAmbiguityReasons
         self.latestBuildStatus = latestBuildStatus
         self.latestTestStatus = latestTestStatus
         self.latestVisualQCStatus = latestVisualQCStatus
@@ -128,17 +131,20 @@ public struct TaskLifecycleEvaluation: Equatable, Codable {
 
 public struct TaskLifecycleSyncResult: Equatable, Codable {
     public var evaluation: TaskLifecycleEvaluation
+    public var facts: TaskLifecycleFacts
     public var previousStatus: TaskStatus
     public var appliedStatus: TaskStatus?
     public var event: TaskEvent?
 
     public init(
         evaluation: TaskLifecycleEvaluation,
+        facts: TaskLifecycleFacts,
         previousStatus: TaskStatus,
         appliedStatus: TaskStatus? = nil,
         event: TaskEvent? = nil
     ) {
         self.evaluation = evaluation
+        self.facts = facts
         self.previousStatus = previousStatus
         self.appliedStatus = appliedStatus
         self.event = event
@@ -146,6 +152,152 @@ public struct TaskLifecycleSyncResult: Equatable, Codable {
 
     public var didApply: Bool {
         appliedStatus != nil
+    }
+}
+
+public enum TaskLifecycleFactTone: String, Codable, CaseIterable, Identifiable {
+    case neutral
+    case ok
+    case warning
+    case danger
+
+    public var id: String { rawValue }
+}
+
+public struct TaskLifecycleFactDisplayRow: Equatable, Codable, Identifiable {
+    public var id: String
+    public var label: String
+    public var value: String
+    public var tone: TaskLifecycleFactTone
+
+    public init(id: String, label: String, value: String, tone: TaskLifecycleFactTone = .neutral) {
+        self.id = id
+        self.label = label
+        self.value = value
+        self.tone = tone
+    }
+}
+
+public struct TaskLifecycleTransitionDisplay: Equatable, Codable {
+    public var fromStatus: TaskStatus
+    public var toStatus: TaskStatus
+    public var reason: String
+    public var isAutomaticSafe: Bool
+
+    public init(fromStatus: TaskStatus, toStatus: TaskStatus, reason: String, isAutomaticSafe: Bool) {
+        self.fromStatus = fromStatus
+        self.toStatus = toStatus
+        self.reason = reason
+        self.isAutomaticSafe = isAutomaticSafe
+    }
+}
+
+public struct TaskLifecycleSyncDetails: Equatable, Codable {
+    public var rows: [TaskLifecycleFactDisplayRow]
+    public var blockingReasons: [String]
+    public var transition: TaskLifecycleTransitionDisplay?
+    public var evaluationReason: String
+    public var didApply: Bool
+    public var requiredManualReview: Bool
+
+    public init(
+        rows: [TaskLifecycleFactDisplayRow],
+        blockingReasons: [String],
+        transition: TaskLifecycleTransitionDisplay?,
+        evaluationReason: String,
+        didApply: Bool,
+        requiredManualReview: Bool
+    ) {
+        self.rows = rows
+        self.blockingReasons = blockingReasons
+        self.transition = transition
+        self.evaluationReason = evaluationReason
+        self.didApply = didApply
+        self.requiredManualReview = requiredManualReview
+    }
+
+    public static func make(from result: TaskLifecycleSyncResult) -> TaskLifecycleSyncDetails {
+        let facts = result.facts
+        let rows = [
+            TaskLifecycleFactDisplayRow(id: "source", label: "Source", value: facts.gitFactSource.displayName),
+            TaskLifecycleFactDisplayRow(id: "branch", label: "Branch", value: yesNo(facts.hasBranch), tone: facts.hasBranch ? .ok : .danger),
+            TaskLifecycleFactDisplayRow(id: "worktree", label: "Worktree", value: yesNo(facts.hasWorktree), tone: facts.hasWorktree ? .ok : .danger),
+            TaskLifecycleFactDisplayRow(id: "dirty", label: "Dirty", value: dirtyValue(facts.worktreeIsDirty), tone: dirtyTone(facts.worktreeIsDirty, hasWorktree: facts.hasWorktree)),
+            TaskLifecycleFactDisplayRow(id: "unmerged", label: "Unmerged", value: optionalYesNo(facts.hasUnmergedCommitsComparedToDefault), tone: facts.hasUnmergedCommitsComparedToDefault == true ? .warning : .neutral),
+            TaskLifecycleFactDisplayRow(id: "merged", label: "Merged", value: optionalYesNo(facts.appearsMergedIntoDefault), tone: facts.appearsMergedIntoDefault == true ? .ok : .neutral),
+            TaskLifecycleFactDisplayRow(id: "default", label: "Default", value: optionalYesNo(facts.defaultBranchResolved), tone: facts.defaultBranchResolved == false ? .danger : .neutral),
+            TaskLifecycleFactDisplayRow(id: "ambiguous", label: "Ambiguous", value: yesNo(facts.isGitStateAmbiguous), tone: facts.isGitStateAmbiguous ? .danger : .ok)
+        ]
+
+        let transition = result.evaluation.isAutomaticSafe && result.evaluation.recommendedStatus != result.previousStatus
+            ? TaskLifecycleTransitionDisplay(
+                fromStatus: result.previousStatus,
+                toStatus: result.evaluation.recommendedStatus,
+                reason: result.evaluation.reason,
+                isAutomaticSafe: result.evaluation.isAutomaticSafe
+            )
+            : nil
+
+        return TaskLifecycleSyncDetails(
+            rows: rows,
+            blockingReasons: blockingReasons(for: result),
+            transition: transition,
+            evaluationReason: result.evaluation.reason,
+            didApply: result.didApply,
+            requiredManualReview: result.evaluation.requiredManualReview
+        )
+    }
+
+    private static func blockingReasons(for result: TaskLifecycleSyncResult) -> [String] {
+        guard !result.didApply else { return [] }
+        let facts = result.facts
+        var reasons: [String] = []
+        if facts.worktreeIsDirty == true {
+            reasons.append("Dirty worktree blocks automatic sync.")
+        }
+        if !facts.hasBranch {
+            reasons.append("Task branch is missing.")
+        }
+        if !facts.hasWorktree {
+            reasons.append("Worktree path is missing.")
+        }
+        if facts.worktreeIsDirty == nil, facts.hasWorktree {
+            reasons.append("Worktree dirty state is unknown.")
+        }
+        if facts.defaultBranchResolved == false {
+            reasons.append("Default branch could not be resolved.")
+        }
+        if facts.isGitStateAmbiguous {
+            reasons.append(contentsOf: facts.gitAmbiguityReasons.isEmpty ? ["Git lifecycle facts are ambiguous."] : facts.gitAmbiguityReasons)
+        }
+        if result.evaluation.requiredManualReview {
+            reasons.append("Manual review required.")
+        }
+        if !result.evaluation.isAutomaticSafe, reasons.isEmpty {
+            reasons.append(result.evaluation.reason)
+        }
+        return Array(NSOrderedSet(array: reasons)).compactMap { $0 as? String }
+    }
+
+    private static func yesNo(_ value: Bool) -> String {
+        value ? "yes" : "no"
+    }
+
+    private static func optionalYesNo(_ value: Bool?) -> String {
+        guard let value else { return "unknown" }
+        return yesNo(value)
+    }
+
+    private static func dirtyValue(_ value: Bool?) -> String {
+        guard let value else { return "unknown" }
+        return value ? "yes" : "no"
+    }
+
+    private static func dirtyTone(_ value: Bool?, hasWorktree: Bool) -> TaskLifecycleFactTone {
+        if value == true { return .danger }
+        if value == nil, hasWorktree { return .warning }
+        if value == false { return .ok }
+        return .neutral
     }
 }
 

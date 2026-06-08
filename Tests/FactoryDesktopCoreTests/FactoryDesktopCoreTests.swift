@@ -700,6 +700,85 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertTrue(ambiguous.requiredManualReview)
     }
 
+    func testLifecycleSyncDetailsShowsSafeAutomaticTransition() {
+        let facts = TaskLifecycleFacts(
+            currentStatus: .readyForReview,
+            hasBranch: true,
+            hasWorktree: true,
+            worktreeIsDirty: false,
+            hasCommits: true,
+            appearsMergedIntoDefault: true,
+            defaultBranchResolved: true,
+            gitFactSource: .localWorktree,
+            cleanupSafetyState: .safe
+        )
+        let evaluation = TaskLifecycleService.evaluate(facts)
+        let details = TaskLifecycleSyncDetails.make(from: TaskLifecycleSyncResult(
+            evaluation: evaluation,
+            facts: facts,
+            previousStatus: .readyForReview
+        ))
+
+        XCTAssertEqual(details.transition?.fromStatus, .readyForReview)
+        XCTAssertEqual(details.transition?.toStatus, .done)
+        XCTAssertEqual(details.rows.first { $0.id == "source" }?.value, "Local worktree")
+        XCTAssertEqual(details.rows.first { $0.id == "merged" }?.value, "yes")
+        XCTAssertEqual(details.blockingReasons, [])
+    }
+
+    func testLifecycleSyncDetailsDisplaysDirtyAndMissingBlockers() {
+        let facts = TaskLifecycleFacts(
+            currentStatus: .readyForReview,
+            hasBranch: false,
+            hasWorktree: false,
+            worktreeIsDirty: true,
+            hasCommits: true,
+            appearsMergedIntoDefault: true,
+            defaultBranchResolved: true,
+            gitFactSource: .repository,
+            cleanupSafetyState: .dirty
+        )
+        let evaluation = TaskLifecycleService.evaluate(facts)
+        let details = TaskLifecycleSyncDetails.make(from: TaskLifecycleSyncResult(
+            evaluation: evaluation,
+            facts: facts,
+            previousStatus: .readyForReview
+        ))
+
+        XCTAssertNil(details.transition)
+        XCTAssertTrue(details.blockingReasons.contains("Dirty worktree blocks automatic sync."))
+        XCTAssertTrue(details.blockingReasons.contains("Task branch is missing."))
+        XCTAssertTrue(details.blockingReasons.contains("Worktree path is missing."))
+        XCTAssertEqual(details.rows.first { $0.id == "dirty" }?.value, "yes")
+    }
+
+    func testLifecycleSyncDetailsDisplaysAmbiguityReasonsThroughStableModel() {
+        let facts = TaskLifecycleFacts(
+            currentStatus: .readyForReview,
+            hasBranch: true,
+            hasWorktree: true,
+            worktreeIsDirty: false,
+            hasCommits: true,
+            appearsMergedIntoDefault: true,
+            defaultBranchResolved: true,
+            gitFactSource: .localAndCodexWorktrees,
+            isGitStateAmbiguous: true,
+            gitAmbiguityReasons: ["Local and Codex branch Git facts disagree."],
+            cleanupSafetyState: .ambiguous
+        )
+        let evaluation = TaskLifecycleService.evaluate(facts)
+        let details = TaskLifecycleSyncDetails.make(from: TaskLifecycleSyncResult(
+            evaluation: evaluation,
+            facts: facts,
+            previousStatus: .readyForReview
+        ))
+
+        XCTAssertEqual(details.rows.first { $0.id == "source" }?.value, "Local + Codex")
+        XCTAssertEqual(details.rows.first { $0.id == "ambiguous" }?.value, "yes")
+        XCTAssertTrue(details.blockingReasons.contains("Local and Codex branch Git facts disagree."))
+        XCTAssertTrue(details.blockingReasons.contains("Manual review required."))
+    }
+
     @MainActor
     func testLifecycleSyncAppliesSafeMergedStatusAndWritesEvent() async throws {
         let fixture = try makeLifecycleSyncFixture(

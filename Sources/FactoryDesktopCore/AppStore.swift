@@ -15,6 +15,7 @@ public final class AppStore: ObservableObject {
     @Published public var latestPreflightReport: PreflightReport?
     @Published public var latestLifecycleReport: RepoHygieneReport?
     @Published public private(set) var latestTaskStateReview: TaskStateReview?
+    @Published public private(set) var latestLifecycleSyncResult: TaskLifecycleSyncResult?
     @Published public private(set) var selectedCodexProjectLink: CodexProjectLink?
     @Published public private(set) var selectedTaskCodexSessionLink: CodexSessionLink?
     @Published public private(set) var codexSessionLinks: [CodexSessionLink] = []
@@ -230,6 +231,7 @@ public final class AppStore: ObservableObject {
         latestPreflightReport = nil
         latestLifecycleReport = nil
         latestTaskStateReview = nil
+        latestLifecycleSyncResult = nil
         Task { await refreshGitStatus() }
         do {
             try reloadRunsAndArtifacts()
@@ -244,6 +246,7 @@ public final class AppStore: ObservableObject {
         latestPreflightReport = nil
         latestLifecycleReport = nil
         latestTaskStateReview = nil
+        latestLifecycleSyncResult = nil
         Task { await refreshGitStatus() }
         do {
             try reloadRunsAndArtifacts()
@@ -1430,7 +1433,8 @@ public final class AppStore: ObservableObject {
             try reloadRunsAndArtifacts()
             let facts = try await taskLifecycleFacts(project: project, task: task, repository: repository)
             let evaluation = TaskLifecycleService.evaluate(facts)
-            let result = TaskLifecycleSyncResult(evaluation: evaluation, previousStatus: task.status)
+            let result = TaskLifecycleSyncResult(evaluation: evaluation, facts: facts, previousStatus: task.status)
+            latestLifecycleSyncResult = result
 
             guard task.status != .archived else {
                 statusMessage = "Lifecycle sync skipped: task is archived."
@@ -1463,12 +1467,15 @@ public final class AppStore: ObservableObject {
             selectedTaskID = updated.id
             latestTaskStateReview = nil
             statusMessage = "Lifecycle sync changed status to \(updated.status.displayName)."
-            return TaskLifecycleSyncResult(
+            let appliedResult = TaskLifecycleSyncResult(
                 evaluation: evaluation,
+                facts: facts,
                 previousStatus: previousStatus,
                 appliedStatus: updated.status,
                 event: event
             )
+            latestLifecycleSyncResult = appliedResult
+            return appliedResult
         } catch {
             errorMessage = error.localizedDescription
             return nil
@@ -2034,6 +2041,7 @@ public final class AppStore: ObservableObject {
             defaultBranchResolved: gitFacts?.defaultBranchResolved,
             gitFactSource: gitFacts?.source ?? .none,
             isGitStateAmbiguous: gitFacts?.isAmbiguous ?? false,
+            gitAmbiguityReasons: gitFacts?.ambiguityReasons ?? [],
             latestBuildStatus: Self.workflowStatus(.build, in: workflowSummaries),
             latestTestStatus: Self.latestTestStatus(in: workflowSummaries),
             latestVisualQCStatus: Self.workflowStatus(.visualQC, in: workflowSummaries),
