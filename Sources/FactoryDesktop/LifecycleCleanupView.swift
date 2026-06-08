@@ -9,6 +9,7 @@ struct LifecycleCleanupView: View {
             header
             if let report = store.latestLifecycleReport {
                 currentRepoStatus(report)
+                taskLifecycleSyncSection
                 preflightChecks(report.preflightGate)
                 lifecycleGroup("Active Worktrees", items: activeWorktrees(report))
                 lifecycleGroup("Dirty / Risky Worktrees", items: riskyWorktrees(report))
@@ -66,6 +67,35 @@ struct LifecycleCleanupView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.red)
                     .textSelection(.enabled)
+            }
+        }
+    }
+
+    private var taskLifecycleSyncSection: some View {
+        LifecycleSection(title: "Task Lifecycle Sync") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Repo hygiene covers cleanup and safety for the repository. Lifecycle sync covers the selected task's status decision and Git-backed facts.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if store.selectedTask != nil {
+                    Button {
+                        Task { await store.syncSelectedTaskLifecycle() }
+                    } label: {
+                        Label("Sync lifecycle", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(store.selectedTask == nil || store.isWorking)
+
+                    LifecycleSyncSummaryView(
+                        result: store.latestLifecycleSyncResult,
+                        emptyMessage: "Run lifecycle sync to inspect task-specific Git facts."
+                    )
+                } else {
+                    Text("Select a task to compare repo hygiene with task lifecycle facts.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
