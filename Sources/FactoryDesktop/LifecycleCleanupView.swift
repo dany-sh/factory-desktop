@@ -8,16 +8,11 @@ struct LifecycleCleanupView: View {
         VStack(alignment: .leading, spacing: 14) {
             header
             if let report = store.latestLifecycleReport {
+                let summary = store.projectHygieneSummary
                 currentRepoStatus(report)
                 taskLifecycleSyncSection
                 preflightChecks(report.preflightGate)
-                lifecycleGroup("Active Worktrees", items: activeWorktrees(report))
-                lifecycleGroup("Dirty / Risky Worktrees", items: riskyWorktrees(report))
-                lifecycleGroup("Branch Lifecycle", items: branchLifecycle(report))
-                lifecycleGroup("Branches Ready To Delete", items: readyToDelete(report))
-                lifecycleGroup("Duplicate Equivalent Branches", items: duplicateBranches(report))
-                lifecycleGroup("Backup Branches", items: backupBranches(report))
-                artifactWaste(report)
+                presentationGroups(summary)
                 hygieneEvents(report)
             } else {
                 Text("Run a lifecycle scan to inspect repo hygiene, Factory worktrees, branch cleanup candidates, and tracked artifact waste.")
@@ -35,9 +30,9 @@ struct LifecycleCleanupView: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
-                Text("Lifecycle & Cleanup")
+                Text("Project Hygiene")
                     .font(.headline)
-                Text(store.latestLifecycleReport?.preflightGate.level.displayName ?? "No scan yet")
+                Text(store.latestLifecycleReport.map { "Repo hygiene: \($0.preflightGate.level.displayName)" } ?? "No scan yet")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(gateColor(store.latestLifecycleReport?.preflightGate.level))
             }
@@ -72,7 +67,7 @@ struct LifecycleCleanupView: View {
     }
 
     private var taskLifecycleSyncSection: some View {
-        LifecycleSection(title: "Task Lifecycle Sync") {
+        LifecycleSection(title: "Selected Task Lifecycle Sync") {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Repo hygiene covers cleanup and safety for the repository. Lifecycle sync covers the selected task's status decision and Git-backed facts.")
                     .font(.caption)
@@ -124,55 +119,15 @@ struct LifecycleCleanupView: View {
         }
     }
 
-    private func lifecycleGroup(_ title: String, items: [LifecycleItem]) -> some View {
-        LifecycleSection(title: title) {
-            if items.isEmpty {
-                Text("None.")
+    private func presentationGroups(_ summary: ProjectHygieneSummary) -> some View {
+        LifecycleSection(title: "Cleanup Groups") {
+            if summary.presentationGroups.isEmpty {
+                Text("No lifecycle cleanup or artifact waste items in the latest scan.")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(items.prefix(10)) { item in
-                    LifecycleItemRow(item: item)
+                ForEach(summary.presentationGroups) { group in
+                    CleanupPresentationGroupView(group: group)
                         .environmentObject(store)
-                    if item.id != items.prefix(10).last?.id {
-                        Divider()
-                    }
-                }
-                if items.count > 10 {
-                    Text("\(items.count - 10) more")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-
-    private func artifactWaste(_ report: RepoHygieneReport) -> some View {
-        LifecycleSection(title: "Artifact / Run Log Waste") {
-            if report.artifactWasteItems.isEmpty {
-                Text("No tracked artifacts for this project yet.")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(report.artifactWasteItems.prefix(8)) { item in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(item.classification.displayName)
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Text(item.recommendation.displayName)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                        Text(item.path)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                        Text("Age \(item.ageDays.map { "\($0)d" } ?? "unknown") · size \(item.sizeBytes.map(ByteCountFormatter.string) ?? "unknown") · linked \(item.isLinkedToActiveTaskOrRun ? "yes" : "no")")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 4)
                 }
             }
         }
@@ -188,30 +143,6 @@ struct LifecycleCleanupView: View {
         }
     }
 
-    private func activeWorktrees(_ report: RepoHygieneReport) -> [LifecycleItem] {
-        report.lifecycleItems.filter { $0.kind == .worktree && [.healthy, .active].contains($0.classification) }
-    }
-
-    private func riskyWorktrees(_ report: RepoHygieneReport) -> [LifecycleItem] {
-        report.lifecycleItems.filter { $0.kind == .worktree && [.dirtyRisk, .unknownRisk, .orphanedMetadata, .missingPath, .removedCleaned].contains($0.classification) }
-    }
-
-    private func branchLifecycle(_ report: RepoHygieneReport) -> [LifecycleItem] {
-        report.lifecycleItems.filter { $0.kind == .branch }
-    }
-
-    private func readyToDelete(_ report: RepoHygieneReport) -> [LifecycleItem] {
-        report.lifecycleItems.filter { [.alreadyMerged, .duplicateEquivalent].contains($0.classification) }
-    }
-
-    private func duplicateBranches(_ report: RepoHygieneReport) -> [LifecycleItem] {
-        report.lifecycleItems.filter { $0.classification == .duplicateEquivalent }
-    }
-
-    private func backupBranches(_ report: RepoHygieneReport) -> [LifecycleItem] {
-        report.lifecycleItems.filter { $0.classification == .backupProtected }
-    }
-
     private func gateColor(_ level: LifecycleGateLevel?) -> Color {
         switch level {
         case .green: .green
@@ -219,6 +150,106 @@ struct LifecycleCleanupView: View {
         case .red: .red
         case nil: .secondary
         }
+    }
+}
+
+private struct CleanupPresentationGroupView: View {
+    @EnvironmentObject private var store: AppStore
+    var group: CleanupPresentationGroup
+    @State private var isExpanded: Bool
+
+    init(group: CleanupPresentationGroup) {
+        self.group = group
+        _isExpanded = State(initialValue: !group.collapsedByDefault)
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                if !group.lifecycleItems.isEmpty {
+                    ForEach(group.lifecycleItems.prefix(12)) { item in
+                        LifecycleItemRow(item: item)
+                            .environmentObject(store)
+                        if item.id != group.lifecycleItems.prefix(12).last?.id {
+                            Divider()
+                        }
+                    }
+                    if group.lifecycleItems.count > 12 {
+                        Text("\(group.lifecycleItems.count - 12) more")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if !group.artifactGroups.isEmpty {
+                    ForEach(group.artifactGroups) { artifactGroup in
+                        ArtifactWasteGroupRow(group: artifactGroup)
+                    }
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(group.title)
+                        .font(.subheadline.weight(.semibold))
+                    Text("\(group.scope.displayName) · \(group.count) item\(group.count == 1 ? "" : "s")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(group.severity.displayName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(severityColor)
+            }
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var severityColor: Color {
+        switch group.severity {
+        case .safe: .green
+        case .warning: .orange
+        case .blocked: .red
+        case .informational: .secondary
+        }
+    }
+}
+
+private struct ArtifactWasteGroupRow: View {
+    var group: ArtifactWasteGroup
+    @State private var isExpanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(group.items.prefix(10)) { item in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.path)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Text("Age \(item.ageDays.map { "\($0)d" } ?? "unknown") · size \(item.sizeBytes.map(ByteCountFormatter.string) ?? "unknown") · linked \(item.isLinkedToActiveTaskOrRun ? "yes" : "no")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.top, 6)
+        } label: {
+            HStack {
+                Text(group.title)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(group.artifactType) x\(group.count)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
