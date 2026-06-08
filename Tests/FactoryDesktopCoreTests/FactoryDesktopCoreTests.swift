@@ -479,6 +479,32 @@ final class FactoryDesktopCoreTests: XCTestCase {
     func testTaskStatePrimaryActionDisplayUsesTaskWorktreeLanguage() {
         XCTAssertEqual(TaskStateRecommendedAction.createWorktree.displayName, "Create Task Worktree")
         XCTAssertEqual(TaskStateRecommendedAction.commitAndMerge.displayName, "Ready to Commit")
+        XCTAssertEqual(TaskStateRecommendedAction.noActionRequired.displayName, "No Action Required")
+    }
+
+    func testArchivedTaskHasNoActiveNextAction() {
+        let archived = TaskStateRecommendationEvaluator.recommend(TaskStateRecommendationInput(
+            status: .archived,
+            hasRiskyPreflight: true,
+            hasImplementationChanges: true
+        ))
+        let done = TaskStateRecommendationEvaluator.recommend(TaskStateRecommendationInput(
+            status: .done,
+            hasImplementationChanges: true,
+            hasTestOutput: true
+        ))
+
+        XCTAssertEqual(archived.0, .noActionRequired)
+        XCTAssertEqual(archived.1, "Task is archived.")
+        XCTAssertEqual(done.0, .noActionRequired)
+    }
+
+    func testWorkflowHealthUsesPassiveNextActionForArchivedTaskWithoutReview() {
+        let task = FactoryTask(projectId: "project", title: "Archived", status: .archived)
+
+        let health = TaskWorkflowHealthBuilder.build(task: task, review: nil, artifacts: [], gitSnapshot: GitSnapshot())
+
+        XCTAssertEqual(health.nextAction, "Archived")
     }
 
     func testArtifactGroupingPromotesApprovedPlanAndCurrentArtifacts() {
@@ -596,6 +622,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
 
         XCTAssertEqual(display.state, .removedCleaned)
         XCTAssertFalse(display.canOpen)
+        XCTAssertEqual(display.recommendedAction, "No action required after cleanup")
     }
 
     func testCleanupHelperMarksLinkedTaskWorktreeReferenceCleaned() {
@@ -629,6 +656,33 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertTrue(display.repairActions.contains(.recreateWorktreeFromBranch))
         XCTAssertTrue(display.repairActions.contains(.relinkExistingWorktree))
         XCTAssertTrue(display.repairActions.contains(.archiveTask))
+    }
+
+    func testArchiveActionHiddenForArchivedTaskRecoveryActions() {
+        let actions = WorktreeRepairAction.visibleActions(for: .removedCleaned, taskStatus: .archived)
+
+        XCTAssertFalse(actions.contains(.archiveTask))
+        XCTAssertTrue(actions.contains(.refreshLifecycleScan))
+    }
+
+    func testRemovedCleanedWorktreeRecoveryActionsArePassiveByDefault() {
+        let actions = WorktreeRepairAction.visibleActions(for: .removedCleaned, taskStatus: .approved)
+
+        XCTAssertFalse(actions.contains(.removeStaleWorktreeReference))
+        XCTAssertFalse(actions.contains(.markWorktreeCleaned))
+        XCTAssertTrue(actions.contains(.refreshLifecycleScan))
+        XCTAssertTrue(actions.contains(.archiveTask))
+    }
+
+    func testMissingPathStillBlocksUnsafeOpenAction() throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("factory-missing-blocks-\(UUID().uuidString)", isDirectory: true)
+        let task = FactoryTask(projectId: "project", title: "Task", localBranch: "factory/task", localWorktreePath: missing.path)
+
+        let display = try XCTUnwrap(TaskWorktreeDisplayMapper.displays(for: task).first)
+
+        XCTAssertEqual(display.state, .missingPath)
+        XCTAssertFalse(display.canOpen)
     }
 
     func testTaskWorktreeDisplayMapsSecondWorktreeToAlternateWorktree() {

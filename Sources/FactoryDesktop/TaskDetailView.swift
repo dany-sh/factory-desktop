@@ -214,7 +214,9 @@ struct TaskDetailView: View {
             Text("Next Action")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            if let review = store.latestTaskStateReview {
+            if let task = store.selectedTask, task.status == .archived || task.status == .done {
+                completedTaskNextAction(task)
+            } else if let review = store.latestTaskStateReview {
                 primaryActionButton(review.recommendedAction)
             } else {
                 Button {
@@ -227,6 +229,17 @@ struct TaskDetailView: View {
             }
         }
         .frame(minWidth: 210, alignment: .leading)
+    }
+
+    private func completedTaskNextAction(_ task: FactoryTask) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(task.status == .archived ? "Archived" : "No action required")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Button("Reopen Task") {}
+                .disabled(true)
+                .help("Foundation-only placeholder.")
+        }
     }
 
     private var worktreeSummaryLine: some View {
@@ -939,6 +952,15 @@ struct TaskDetailView: View {
         case .archive:
             Text("Archive")
                 .font(.headline)
+        case .noActionRequired:
+            VStack(alignment: .leading, spacing: 6) {
+                Text(store.selectedTask?.status == .archived ? "Archived" : "No action required")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                Button("Reopen Task") {}
+                    .disabled(true)
+                    .help("Foundation-only placeholder.")
+            }
         case .investigate:
             actionButton(action.displayName, systemImage: "list.bullet.clipboard", prominent: true) {
                 Task { await store.reviewTaskState() }

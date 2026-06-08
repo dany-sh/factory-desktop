@@ -82,6 +82,8 @@ struct InspectorView: View {
             VStack(alignment: .leading, spacing: 8) {
                 if let review = store.latestTaskStateReview {
                     recommendedActionButton(review.recommendedAction)
+                } else if let task = store.selectedTask, task.status == .archived || task.status == .done {
+                    completedTaskActionSummary(task)
                 } else {
                     Button {
                         Task { await store.reviewTaskState() }
@@ -93,7 +95,7 @@ struct InspectorView: View {
                     .disabled(store.selectedTask == nil || store.isWorking)
                 }
 
-                if store.latestTaskStateReview != nil {
+                if store.latestTaskStateReview != nil, store.selectedTask?.status != .archived, store.selectedTask?.status != .done {
                     Button {
                         Task { await store.reviewTaskState() }
                     } label: {
@@ -132,6 +134,17 @@ struct InspectorView: View {
             .disabled(commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.selectedTask?.status != .readyForReview || store.isWorking || selectedCodeWorktreeUnavailable)
         }
         .buttonStyle(.bordered)
+    }
+
+    private func completedTaskActionSummary(_ task: FactoryTask) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(task.status == .archived ? "Archived" : "No action required")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Button("Reopen Task") {}
+                .disabled(true)
+                .help("Foundation-only placeholder.")
+        }
     }
 
     @ViewBuilder
@@ -399,6 +412,15 @@ struct InspectorView: View {
             Text("Primary next action: Archive")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
+        case .noActionRequired:
+            VStack(alignment: .leading, spacing: 6) {
+                Text(store.selectedTask?.status == .archived ? "Archived" : "No action required")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Button("Reopen Task") {}
+                    .disabled(true)
+                    .help("Foundation-only placeholder.")
+            }
         case .investigate:
             primaryButton(action.displayName, systemImage: "list.bullet.clipboard") {
                 Task { await store.reviewTaskState() }

@@ -161,6 +161,7 @@ public enum TaskStateRecommendedAction: String, Codable, CaseIterable, Identifia
     case reviewDiff
     case commitAndMerge
     case archive
+    case noActionRequired = "no_action_required"
     case investigate
 
     public var id: String { rawValue }
@@ -180,6 +181,7 @@ public enum TaskStateRecommendedAction: String, Codable, CaseIterable, Identifia
         case .reviewDiff: "Review Diff"
         case .commitAndMerge: "Ready to Commit"
         case .archive: "Archive"
+        case .noActionRequired: "No Action Required"
         case .investigate: "Investigate"
         }
     }
@@ -239,6 +241,12 @@ public struct TaskStateRecommendationInput: Equatable {
 
 public enum TaskStateRecommendationEvaluator {
     public static func recommend(_ input: TaskStateRecommendationInput) -> (TaskStateRecommendedAction, String) {
+        if input.status == .archived {
+            return (.noActionRequired, "Task is archived.")
+        }
+        if input.status == .done || input.appearsMerged {
+            return (.noActionRequired, "Task is complete. No action required.")
+        }
         if input.taskType == .coding && !input.hasExistingWorktree {
             return (.createWorktree, "No task worktree exists yet.")
         }
@@ -283,9 +291,6 @@ public enum TaskStateRecommendationEvaluator {
         }
         if input.hasApprovedPlan && !input.hasImplementationChanges {
             return (.buildLocally, "Plan is approved and no implementation changes exist yet.")
-        }
-        if input.status == .done || input.appearsMerged {
-            return (.archive, "Task appears complete and can be archived.")
         }
         return (.investigate, "Task state is unclear.")
     }

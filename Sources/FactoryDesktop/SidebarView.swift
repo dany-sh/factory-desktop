@@ -40,21 +40,35 @@ struct SidebarView: View {
                     }
                 }
 
-                Section("Tasks") {
+                Section("Active Tasks") {
                     if store.selectedProject == nil {
                         Text("Register or select a project first.")
                             .foregroundStyle(.secondary)
-                    } else if store.tasksForSelectedProject.isEmpty {
-                        Text("No tasks yet.")
+                    } else if activeTasks.isEmpty {
+                        Text(archivedTasks.isEmpty ? "No tasks yet." : "No active tasks.")
                             .foregroundStyle(.secondary)
                     }
-                    ForEach(store.tasksForSelectedProject) { task in
+                    ForEach(activeTasks) { task in
                         SidebarRow(
                             title: task.title,
                             subtitle: "\(task.status.displayName) · \(task.type.displayName)",
                             isSelected: store.selectedTaskID == task.id
                         ) {
                             store.selectTask(task.id)
+                        }
+                    }
+                }
+
+                if !archivedTasks.isEmpty {
+                    Section("Archived Tasks") {
+                        ForEach(archivedTasks) { task in
+                            SidebarRow(
+                                title: task.title,
+                                subtitle: "\(task.status.displayName) · \(task.type.displayName)",
+                                isSelected: store.selectedTaskID == task.id
+                            ) {
+                                store.selectTask(task.id)
+                            }
                         }
                     }
                 }
@@ -111,6 +125,18 @@ struct SidebarView: View {
                     .padding([.horizontal, .bottom])
             }
         }
+    }
+
+    private var activeTasks: [FactoryTask] {
+        store.tasksForSelectedProject.filter { !isArchivedLike($0) }
+    }
+
+    private var archivedTasks: [FactoryTask] {
+        store.tasksForSelectedProject.filter(isArchivedLike)
+    }
+
+    private func isArchivedLike(_ task: FactoryTask) -> Bool {
+        task.status == .archived || task.status == .done
     }
 }
 

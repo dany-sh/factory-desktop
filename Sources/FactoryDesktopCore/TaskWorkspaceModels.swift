@@ -117,6 +117,29 @@ public enum WorktreeRepairAction: String, CaseIterable, Codable, Identifiable {
             .archiveTask
         ]
     }
+
+    public static func visibleActions(
+        for state: StoredWorktreeReferenceState,
+        taskStatus: TaskStatus?,
+        actions: [WorktreeRepairAction] = WorktreeRepairAction.p0Actions
+    ) -> [WorktreeRepairAction] {
+        let isCompleted = taskStatus == .archived || taskStatus == .done
+        return actions.filter { action in
+            if action == .archiveTask, taskStatus == .archived {
+                return false
+            }
+            if isCompleted {
+                return action != .archiveTask
+            }
+            if state == .removedCleaned {
+                return action == .refreshLifecycleScan ||
+                    action == .recreateWorktreeFromBranch ||
+                    action == .relinkExistingWorktree ||
+                    action == .archiveTask
+            }
+            return true
+        }
+    }
 }
 
 public enum TaskWorktreeDisplayMapper {
@@ -173,7 +196,7 @@ public enum TaskWorktreeDisplayMapper {
         switch state {
         case .healthy: "Continue work"
         case .missingPath: "Remove stale reference or relink/recreate the worktree"
-        case .removedCleaned: "Recreate, relink, or archive the task"
+        case .removedCleaned: "No action required after cleanup"
         case .dirtyRisk: "Review diff"
         case .unknown: "Refresh lifecycle scan"
         }
@@ -231,8 +254,22 @@ public enum TaskWorkflowHealthBuilder {
             implementation: implementationState(review: review, gitSnapshot: gitSnapshot),
             tests: testsState(review: review, latestTest: latestTest),
             diffReview: review?.hasDiffReview == true ? "done" : "missing",
-            nextAction: review?.recommendedAction.displayName ?? "Review Task State"
+            nextAction: nextActionState(task: task, review: review)
         )
+    }
+
+    private static func nextActionState(task: FactoryTask?, review: TaskStateReview?) -> String {
+        if let review {
+            return review.recommendedAction.displayName
+        }
+        switch task?.status {
+        case .archived:
+            return "Archived"
+        case .done:
+            return "No action required"
+        default:
+            return "Review Task State"
+        }
     }
 
     private static func worktreeState(hasUsableWorktree: Bool, hasMissingWorktree: Bool, hasRemovedWorktree: Bool, review: TaskStateReview?) -> String {
