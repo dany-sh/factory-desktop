@@ -15,6 +15,7 @@ struct InspectorView: View {
                 actionCard
                 taskStateCard
                 preflightCard
+                lifecycleCard
                 gitCard
                 artifactsCard
             }
@@ -66,11 +67,7 @@ struct InspectorView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(store.selectedTaskWorktreeDisplays) { display in
-                        InfoRow(label: display.label, value: display.path ?? "Not created")
-                        InfoRow(label: "Task branch", value: display.branch ?? "Not created")
-                        Text(display.executionMode)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                        TaskWorktreeReferenceView(display: display)
                     }
                 }
             } else {
@@ -132,7 +129,7 @@ struct InspectorView: View {
             } label: {
                 Label("Commit Selected Worktree", systemImage: "checkmark.circle")
             }
-            .disabled(commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.selectedTask?.status != .readyForReview || store.isWorking)
+            .disabled(commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.selectedTask?.status != .readyForReview || store.isWorking || selectedCodeWorktreeUnavailable)
         }
         .buttonStyle(.bordered)
     }
@@ -174,17 +171,21 @@ struct InspectorView: View {
                     primaryButton("Run Tests", systemImage: "checkmark.seal") {
                         Task { await store.runFirstTestCommand() }
                     }
+                    .disabled(selectedCodeWorktreeUnavailable)
                 } else {
                     primaryButton("Build Locally", systemImage: "hammer") {
                         store.buildLocallyPlaceholder()
                     }
+                    .disabled(selectedCodeWorktreeUnavailable)
                 }
                 secondaryButton("Generate Codex Build Handoff", systemImage: "paperplane") {
                     store.generateCodexHandoff()
                 }
+                .disabled(selectedCodeWorktreeUnavailable)
                 secondaryButton("Run Tests", systemImage: "checkmark.seal") {
                     Task { await store.runFirstTestCommand() }
                 }
+                .disabled(selectedCodeWorktreeUnavailable)
             case .needsFixes:
                 primaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
                     Task { await store.planLocally() }
@@ -196,18 +197,22 @@ struct InspectorView: View {
                 primaryButton("Run Tests", systemImage: "checkmark.seal") {
                     Task { await store.runFirstTestCommand() }
                 }
+                .disabled(selectedCodeWorktreeUnavailable)
                 if !store.gitSnapshot.changedFiles.isEmpty {
                     secondaryButton("Review Diff Locally", systemImage: "doc.text.magnifyingglass") {
                         Task { await store.reviewDiffLocally() }
                     }
+                    .disabled(selectedCodeWorktreeUnavailable)
                 }
             case .readyForReview:
                 primaryButton("Review Diff Locally", systemImage: "doc.text.magnifyingglass") {
                     Task { await store.reviewDiffLocally() }
                 }
+                .disabled(selectedCodeWorktreeUnavailable)
                 secondaryButton("Generate Codex Diff Review Handoff", systemImage: "paperplane") {
                     store.askCodexToReviewDiff()
                 }
+                .disabled(selectedCodeWorktreeUnavailable)
                 secondaryButton("Generate Review Note", systemImage: "doc.badge.clock") {
                     store.generateReviewNote()
                 }
@@ -218,6 +223,7 @@ struct InspectorView: View {
                 primaryButton("Run Tests", systemImage: "checkmark.seal") {
                     Task { await store.runFirstTestCommand() }
                 }
+                .disabled(selectedCodeWorktreeUnavailable)
                 secondaryButton("Generate Review Note", systemImage: "doc.badge.clock") {
                     store.generateReviewNote()
                 }
@@ -261,7 +267,7 @@ struct InspectorView: View {
         } label: {
             Label("Open VS Code", systemImage: "curlybraces.square")
         }
-        .disabled(store.selectedTask == nil)
+        .disabled(store.selectedTask == nil || selectedCodeWorktreeUnavailable)
 
         Button {
             store.generateCodexHandoff()
@@ -273,7 +279,11 @@ struct InspectorView: View {
 
     private var canSendToCodexBuild: Bool {
         guard let status = store.selectedTask?.status else { return false }
-        return !store.isWorking && status == .approved
+        return !store.isWorking && status == .approved && !selectedCodeWorktreeUnavailable
+    }
+
+    private var selectedCodeWorktreeUnavailable: Bool {
+        store.selectedProject?.type == .codeRepo && !store.selectedTaskCanUseWorktree
     }
 
     private var taskStateCard: some View {
@@ -334,6 +344,10 @@ struct InspectorView: View {
         }
     }
 
+    private var lifecycleCard: some View {
+        LifecycleCleanupView()
+    }
+
     @ViewBuilder
     private func recommendedActionButton(_ action: TaskStateRecommendedAction) -> some View {
         switch action {
@@ -366,14 +380,17 @@ struct InspectorView: View {
             primaryButton(action.displayName, systemImage: "hammer") {
                 store.buildLocallyPlaceholder()
             }
+            .disabled(selectedCodeWorktreeUnavailable)
         case .runTests:
             primaryButton(action.displayName, systemImage: "checkmark.seal") {
                 Task { await store.runFirstTestCommand() }
             }
+            .disabled(selectedCodeWorktreeUnavailable)
         case .reviewDiff:
             primaryButton(action.displayName, systemImage: "doc.text.magnifyingglass") {
                 Task { await store.reviewDiffLocally() }
             }
+            .disabled(selectedCodeWorktreeUnavailable)
         case .commitAndMerge:
             Text("Primary next action: Commit and Merge")
                 .font(.subheadline.weight(.semibold))

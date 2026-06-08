@@ -137,6 +137,20 @@ public final class FactoryRepository {
         return rows.map(run(from:))
     }
 
+    public func runs(projectId: String) throws -> [RunRecord] {
+        let rows = try database.query(
+            """
+            SELECT r.id, r.project_id, r.task_id, r.run_type, r.executor, r.model, r.status, r.command, r.exit_code, r.prompt_path, r.output_path, r.summary, r.started_at, r.ended_at
+            FROM runs r
+            LEFT JOIN tasks t ON r.task_id = t.id
+            WHERE r.project_id = ? OR t.project_id = ?
+            ORDER BY r.started_at DESC;
+            """,
+            binds: [.text(projectId), .text(projectId)]
+        )
+        return rows.map(run(from:))
+    }
+
     public func upsert(run: RunRecord) throws {
         try database.execute(
             """
@@ -185,6 +199,20 @@ public final class FactoryRepository {
             ORDER BY created_at DESC;
             """,
             binds: [.text(taskId)]
+        )
+        return rows.map(artifact(from:))
+    }
+
+    public func artifacts(projectId: String) throws -> [Artifact] {
+        let rows = try database.query(
+            """
+            SELECT a.id, a.task_id, a.run_id, a.type, a.path, a.description, a.created_at
+            FROM artifacts a
+            INNER JOIN tasks t ON a.task_id = t.id
+            WHERE t.project_id = ?
+            ORDER BY a.created_at DESC;
+            """,
+            binds: [.text(projectId)]
         )
         return rows.map(artifact(from:))
     }

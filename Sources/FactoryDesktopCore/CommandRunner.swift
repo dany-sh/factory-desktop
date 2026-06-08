@@ -182,11 +182,9 @@ public final class CommandRunner {
         case "commit":
             return manuallyApproved
         case "branch":
-            return arguments.count == 1 || arguments.dropFirst().allSatisfy { ["--show-current", "--list", "-a"].contains($0) || !$0.hasPrefix("-") }
+            return isAllowedGitBranch(arguments)
         case "worktree":
-            guard arguments.count >= 1 else { return false }
-            if arguments.count == 1 { return true }
-            return ["add", "list"].contains(arguments[1])
+            return isAllowedGitWorktree(arguments)
         case "switch":
             let blocked = ["--discard-changes", "--force", "-f"]
             return !arguments.dropFirst().contains(where: { blocked.contains($0) })
@@ -204,6 +202,36 @@ public final class CommandRunner {
         let allowedOptions = Set(["--short", "--verify", "--abbrev-ref", "--show-toplevel", "--git-dir", "--is-inside-work-tree"])
         return arguments.dropFirst().allSatisfy { argument in
             allowedOptions.contains(argument) || isSafeGitRevision(argument)
+        }
+    }
+
+    private func isAllowedGitBranch(_ arguments: [String]) -> Bool {
+        guard arguments.first == "branch" else { return false }
+        if arguments.count == 1 { return true }
+        return arguments.dropFirst().allSatisfy { argument in
+            argument == "--show-current" ||
+                argument == "--list" ||
+                argument == "-a" ||
+                argument == "--merged" ||
+                argument == "--no-color" ||
+                argument.hasPrefix("--format=") ||
+                isSafeGitRevision(argument)
+        }
+    }
+
+    private func isAllowedGitWorktree(_ arguments: [String]) -> Bool {
+        guard arguments.first == "worktree" else { return false }
+        if arguments.count == 1 { return true }
+        guard arguments.count >= 2 else { return false }
+        switch arguments[1] {
+        case "add":
+            return true
+        case "list":
+            return arguments.dropFirst(2).allSatisfy { $0 == "--porcelain" }
+        case "prune":
+            return arguments.count == 3 && arguments[2] == "--dry-run"
+        default:
+            return false
         }
     }
 

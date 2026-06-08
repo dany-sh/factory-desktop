@@ -91,6 +91,10 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["rev-parse", "--verify", "origin/trunk"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["rev-list", "--left-right", "--count", "trunk...origin/trunk"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["merge-base", "--is-ancestor", "abc123", "def456"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["branch", "--format=%(refname:short)|%(objectname:short)"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["branch", "--merged", "main", "--no-color"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["worktree", "list", "--porcelain"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["worktree", "prune", "--dry-run"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "npm", arguments: ["run", "lint"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "read-only", "-o", "/tmp/review.md", "-"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["commit", "-m", "safe"], manuallyApproved: true)))
@@ -98,11 +102,92 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["reset", "--hard"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["commit", "-m", "needs approval"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["worktree", "remove", "/tmp/nope"])))
+        XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["worktree", "prune"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["merge-base", "abc123", "def456"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["checkout", "--", "."])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "rm", arguments: ["-rf", "/tmp/nope"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "workspace-write", "-"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "read-only", "--add-dir", "/tmp/other", "-"])))
+    }
+
+    func testLifecycleParsersReadBranchesAndWorktrees() {
+        let worktrees = LifecycleParser.parseWorktreePorcelain(
+            """
+            worktree /repo
+            HEAD abc123
+            branch refs/heads/main
+
+            worktree /repo/.factory/worktrees/task
+            HEAD def456
+            branch refs/heads/codex/task
+            """,
+            prunablePaths: ["/repo/.factory/worktrees/task"]
+        )
+        let branches = LifecycleParser.parseBranchFormat("main|abc123\ncodex/task|def456\n")
+        let merged = LifecycleParser.parseMergedBranches("* main\n  codex/task\n")
+
+        XCTAssertEqual(worktrees.count, 2)
+        XCTAssertEqual(worktrees.last?.branch, "codex/task")
+        XCTAssertTrue(worktrees.last?.isPrunable == true)
+        XCTAssertEqual(branches.map(\.name), ["main", "codex/task"])
+        XCTAssertEqual(merged, Set(["main", "codex/task"]))
+    }
+
+    func testMergeSafetyHelperMarksDuplicateEquivalentBeforeMerge() {
+        XCTAssertEqual(MergeSafetyHelper.assess(cherryPickLog: "", diffStat: "", defaultIsAncestorOfBranch: true), .duplicateEquivalent)
+        XCTAssertEqual(MergeSafetyHelper.assess(cherryPickLog: "> abc work", diffStat: "Sources/App.swift | 2 +", defaultIsAncestorOfBranch: true), .fastForwardPossible)
+        XCTAssertEqual(MergeSafetyHelper.assess(cherryPickLog: "> abc work", diffStat: "Sources/App.swift | 2 +", defaultIsAncestorOfBranch: false), .manualReviewRequired)
+    }
+
+    func testLifecycleGateBlocksDirtyCanonicalRepoAndGitEnvironmentOverrides() {
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: "/tmp/demo", defaultBranch: "main")
+        let gate = LifecycleClassifier.gate(
+            project: project,
+            selectedTask: nil,
+            currentBranch: "feature",
+            workingTreeClean: false,
+            defaultAheadOfOrigin: 1,
+            worktrees: [GitWorktreeRecord(path: "/tmp/other", branch: "main", isClean: true)],
+            branches: [],
+            staleMetadata: ["/tmp/stale"],
+            runnerEnvironment: RunnerGitEnvironment(environment: ["GIT_DIR": "/tmp/git-dir"])
+        )
+
+        XCTAssertEqual(gate.level, .red)
+        XCTAssertTrue(gate.checks.contains { $0.id == "canonical-dirty" })
+        XCTAssertTrue(gate.checks.contains { $0.id == "runner-git-env" })
+        XCTAssertTrue(gate.checks.contains { $0.id == "stale-metadata" })
+    }
+
+    func testLifecycleClassifierProtectsBackupAndDuplicateBranches() {
+        let backup = GitBranchRecord(name: "backup/main-before-cleanup", isBackupProtected: true)
+        let duplicate = GitBranchRecord(name: "codex/demo", isDuplicateEquivalent: true, isActiveFactoryBranch: true)
+
+        let backupItem = LifecycleClassifier.classifyBranch(backup, defaultBranch: "main", checkedOutBranches: [])
+        let duplicateItem = LifecycleClassifier.classifyBranch(duplicate, defaultBranch: "main", checkedOutBranches: [])
+
+        XCTAssertEqual(backupItem.classification, .backupProtected)
+        XCTAssertTrue(backupItem.blockedActions.contains { $0.action == .deleteMergedBranch })
+        XCTAssertEqual(duplicateItem.classification, .duplicateEquivalent)
+        XCTAssertEqual(duplicateItem.recommendation, .deleteDuplicateBranch)
+    }
+
+    func testLifecycleClassifierMarksStoredMissingWorktreeReference() {
+        let task = FactoryTask(id: "task", projectId: "project", title: "Task", localBranch: "factory/task", localWorktreePath: "/tmp/missing")
+        let display = TaskWorktreeDisplay(
+            id: "local",
+            label: "Task Worktree",
+            branch: "factory/task",
+            path: "/tmp/missing",
+            executionMode: "Local",
+            state: .missingPath
+        )
+
+        let item = LifecycleClassifier.classifyStoredTaskWorktreeReference(task: task, display: display)
+
+        XCTAssertEqual(item.classification, .missingPath)
+        XCTAssertEqual(item.state, .blocked)
+        XCTAssertTrue(item.blockedActions.contains { $0.action == .inspectDiff })
     }
 
     func testPreflightPorcelainParserReadsCleanBranch() {
@@ -425,6 +510,32 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertFalse(groups.current.contains { $0.id == "handoff" })
     }
 
+    func testArtifactWasteFoundationClassifiesTrackedOldAndActiveArtifacts() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("factory-artifact-waste-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let oldURL = root.appendingPathComponent("old.log")
+        try "old".write(to: oldURL, atomically: true, encoding: .utf8)
+
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: root.path)
+        let activeTask = FactoryTask(id: "active-task", projectId: project.id, title: "Active")
+        let oldArtifact = Artifact(id: "old", taskId: "done-task", type: .implementationLog, path: oldURL.path, createdAt: now.addingTimeInterval(-40 * 24 * 60 * 60))
+        let activeArtifact = Artifact(id: "active", taskId: activeTask.id, type: .plan, path: oldURL.path, createdAt: now)
+
+        let waste = LifecycleClassifier.artifactWasteItems(
+            project: project,
+            tasks: [activeTask],
+            runs: [],
+            artifacts: [oldArtifact, activeArtifact],
+            now: now
+        )
+
+        XCTAssertEqual(waste.first { $0.id == "old" }?.classification, .safeToArchive)
+        XCTAssertEqual(waste.first { $0.id == "active" }?.classification, .active)
+        XCTAssertEqual(waste.first { $0.id == "old" }?.sizeBytes, 3)
+    }
+
     func testTaskWorktreeDisplayMapsSingleWorktreeToTaskWorktree() {
         let task = FactoryTask(
             projectId: "project",
@@ -438,6 +549,86 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(displays.count, 1)
         XCTAssertEqual(displays.first?.label, "Task Worktree")
         XCTAssertEqual(displays.first?.executionMode, "Local")
+    }
+
+    func testTaskWorktreeDisplayClassifiesExistingPathAsHealthy() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("factory-existing-worktree-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let task = FactoryTask(projectId: "project", title: "Task", localBranch: "factory/task", localWorktreePath: root.path)
+
+        let display = try XCTUnwrap(TaskWorktreeDisplayMapper.displays(for: task).first)
+
+        XCTAssertEqual(display.state, .healthy)
+        XCTAssertTrue(display.canOpen)
+        XCTAssertEqual(display.recommendedAction, "Continue work")
+    }
+
+    func testTaskWorktreeDisplayClassifiesMissingPathAsMissingPathAndDisablesOpen() throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("factory-missing-worktree-\(UUID().uuidString)", isDirectory: true)
+        let task = FactoryTask(projectId: "project", title: "Task", localBranch: "factory/task", localWorktreePath: missing.path)
+
+        let display = try XCTUnwrap(TaskWorktreeDisplayMapper.displays(for: task).first)
+
+        XCTAssertEqual(display.state, .missingPath)
+        XCTAssertFalse(display.canOpen)
+        XCTAssertEqual(display.recommendedAction, "Remove stale reference or relink/recreate the worktree")
+    }
+
+    func testClearedWorktreeReferenceIsMarkedRemovedCleaned() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
+        var task = FactoryTask(
+            id: "task",
+            projectId: "project",
+            title: "Task",
+            localBranch: "factory/task",
+            localWorktreePath: "/tmp/deleted-worktree"
+        )
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+        task.localWorktreePath = nil
+        try fixture.repository.upsert(task: task)
+
+        let stored = try XCTUnwrap(fixture.repository.tasks().first { $0.id == "task" })
+        let display = try XCTUnwrap(TaskWorktreeDisplayMapper.displays(for: stored).first)
+
+        XCTAssertEqual(display.state, .removedCleaned)
+        XCTAssertFalse(display.canOpen)
+    }
+
+    func testCleanupHelperMarksLinkedTaskWorktreeReferenceCleaned() {
+        var task = FactoryTask(
+            projectId: "project",
+            title: "Task",
+            localBranch: "factory/task",
+            codexBranch: "codex/task",
+            localWorktreePath: "/tmp/local-worktree",
+            codexWorktreePath: "/tmp/codex-worktree"
+        )
+
+        XCTAssertTrue(task.markWorktreeReferenceCleaned(path: "/tmp/local-worktree"))
+
+        XCTAssertNil(task.localWorktreePath)
+        XCTAssertEqual(task.localBranch, "factory/task")
+        XCTAssertEqual(task.codexWorktreePath, "/tmp/codex-worktree")
+    }
+
+    func testRepairActionMetadataExistsForMissingWorktrees() throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("factory-missing-worktree-\(UUID().uuidString)", isDirectory: true)
+        let task = FactoryTask(projectId: "project", title: "Task", localBranch: "factory/task", localWorktreePath: missing.path)
+
+        let display = try XCTUnwrap(TaskWorktreeDisplayMapper.displays(for: task).first)
+
+        XCTAssertEqual(display.repairActions, WorktreeRepairAction.p0Actions)
+        XCTAssertTrue(display.repairActions.contains(.refreshLifecycleScan))
+        XCTAssertTrue(display.repairActions.contains(.removeStaleWorktreeReference))
+        XCTAssertTrue(display.repairActions.contains(.markWorktreeCleaned))
+        XCTAssertTrue(display.repairActions.contains(.recreateWorktreeFromBranch))
+        XCTAssertTrue(display.repairActions.contains(.relinkExistingWorktree))
+        XCTAssertTrue(display.repairActions.contains(.archiveTask))
     }
 
     func testTaskWorktreeDisplayMapsSecondWorktreeToAlternateWorktree() {
@@ -455,7 +646,10 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(displays.map(\.label), ["Primary Task Worktree", "Alternate Worktree"])
     }
 
-    func testWorkflowHealthSummarizesTaskStateReview() {
+    func testWorkflowHealthSummarizesTaskStateReview() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("factory-health-worktree-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let review = TaskStateReview(
             projectId: "project",
             taskId: "task",
@@ -476,7 +670,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
             blockingIssues: [],
             recommendedAction: .reviewDiff
         )
-        let task = FactoryTask(projectId: "project", title: "Task", localWorktreePath: "/tmp/task")
+        let task = FactoryTask(projectId: "project", title: "Task", localWorktreePath: root.path)
 
         let health = TaskWorkflowHealthBuilder.build(task: task, review: review, artifacts: [], gitSnapshot: GitSnapshot())
 

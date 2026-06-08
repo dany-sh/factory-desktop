@@ -1,18 +1,121 @@
 import Foundation
 
+public extension FactoryTask {
+    mutating func markWorktreeReferenceCleaned(path removedPath: String) -> Bool {
+        var changed = false
+        if localWorktreePath == removedPath {
+            localWorktreePath = nil
+            changed = true
+        }
+        if codexWorktreePath == removedPath {
+            codexWorktreePath = nil
+            changed = true
+        }
+        if changed {
+            updatedAt = Date()
+        }
+        return changed
+    }
+}
+
 public struct TaskWorktreeDisplay: Equatable, Identifiable {
     public var id: String
     public var label: String
     public var branch: String?
     public var path: String?
     public var executionMode: String
+    public var state: StoredWorktreeReferenceState
+    public var recommendedAction: String
+    public var repairActions: [WorktreeRepairAction]
 
-    public init(id: String, label: String, branch: String?, path: String?, executionMode: String) {
+    public init(
+        id: String,
+        label: String,
+        branch: String?,
+        path: String?,
+        executionMode: String,
+        state: StoredWorktreeReferenceState = .unknown,
+        recommendedAction: String = "Refresh lifecycle scan",
+        repairActions: [WorktreeRepairAction] = WorktreeRepairAction.p0Actions
+    ) {
         self.id = id
         self.label = label
         self.branch = branch
         self.path = path
         self.executionMode = executionMode
+        self.state = state
+        self.recommendedAction = recommendedAction
+        self.repairActions = repairActions
+    }
+
+    public var pathExists: Bool {
+        state == .healthy || state == .dirtyRisk
+    }
+
+    public var canOpen: Bool {
+        pathExists
+    }
+}
+
+public enum StoredWorktreeReferenceState: String, CaseIterable, Codable, Identifiable {
+    case healthy
+    case missingPath = "missing_path"
+    case removedCleaned = "removed_cleaned"
+    case dirtyRisk = "dirty_risk"
+    case unknown
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .healthy: "Healthy"
+        case .missingPath: "Missing Path"
+        case .removedCleaned: "Removed / Cleaned"
+        case .dirtyRisk: "Dirty Risk"
+        case .unknown: "Unknown"
+        }
+    }
+}
+
+public enum WorktreeRepairAction: String, CaseIterable, Codable, Identifiable {
+    case refreshLifecycleScan = "refresh_lifecycle_scan"
+    case removeStaleWorktreeReference = "remove_stale_worktree_reference"
+    case markWorktreeCleaned = "mark_worktree_cleaned"
+    case recreateWorktreeFromBranch = "recreate_worktree_from_branch"
+    case relinkExistingWorktree = "relink_existing_worktree"
+    case archiveTask = "archive_task"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .refreshLifecycleScan: "Refresh lifecycle scan"
+        case .removeStaleWorktreeReference: "Remove stale worktree reference"
+        case .markWorktreeCleaned: "Mark worktree cleaned"
+        case .recreateWorktreeFromBranch: "Recreate worktree from branch"
+        case .relinkExistingWorktree: "Relink existing worktree"
+        case .archiveTask: "Archive task"
+        }
+    }
+
+    public var isFoundationOnly: Bool {
+        switch self {
+        case .refreshLifecycleScan, .removeStaleWorktreeReference, .markWorktreeCleaned, .archiveTask:
+            return false
+        case .recreateWorktreeFromBranch, .relinkExistingWorktree:
+            return true
+        }
+    }
+
+    public static var p0Actions: [WorktreeRepairAction] {
+        [
+            .refreshLifecycleScan,
+            .removeStaleWorktreeReference,
+            .markWorktreeCleaned,
+            .recreateWorktreeFromBranch,
+            .relinkExistingWorktree,
+            .archiveTask
+        ]
     }
 }
 
@@ -24,14 +127,18 @@ public enum TaskWorktreeDisplayMapper {
                 label: "Task Worktree",
                 branch: task.localBranch,
                 path: task.localWorktreePath,
-                executionMode: "Local"
+                executionMode: "Local",
+                state: state(for: task.localWorktreePath, branch: task.localBranch),
+                recommendedAction: recommendedAction(for: state(for: task.localWorktreePath, branch: task.localBranch))
             ),
             TaskWorktreeDisplay(
                 id: "codex",
                 label: "Task Worktree",
                 branch: task.codexBranch,
                 path: task.codexWorktreePath,
-                executionMode: "Codex"
+                executionMode: "Codex",
+                state: state(for: task.codexWorktreePath, branch: task.codexBranch),
+                recommendedAction: recommendedAction(for: state(for: task.codexWorktreePath, branch: task.codexBranch))
             )
         ].filter { $0.branch != nil || $0.path != nil }
 
@@ -43,8 +150,32 @@ public enum TaskWorktreeDisplayMapper {
                 label: index == 0 ? "Primary Task Worktree" : "Alternate Worktree",
                 branch: display.branch,
                 path: display.path,
-                executionMode: display.executionMode
+                executionMode: display.executionMode,
+                state: display.state,
+                recommendedAction: display.recommendedAction,
+                repairActions: display.repairActions
             )
+        }
+    }
+
+    public static func state(for path: String?, branch: String?, fileManager: FileManager = .default) -> StoredWorktreeReferenceState {
+        guard let path, !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return branch == nil ? .unknown : .removedCleaned
+        }
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: path, isDirectory: &isDirectory) {
+            return isDirectory.boolValue ? .healthy : .unknown
+        }
+        return .missingPath
+    }
+
+    private static func recommendedAction(for state: StoredWorktreeReferenceState) -> String {
+        switch state {
+        case .healthy: "Continue work"
+        case .missingPath: "Remove stale reference or relink/recreate the worktree"
+        case .removedCleaned: "Recreate, relink, or archive the task"
+        case .dirtyRisk: "Review diff"
+        case .unknown: "Refresh lifecycle scan"
         }
     }
 }
@@ -85,13 +216,16 @@ public enum TaskWorkflowHealthBuilder {
         gitSnapshot: GitSnapshot
     ) -> TaskWorkflowHealth {
         let groups = ArtifactGrouping.group(artifacts)
-        let hasWorktree = task.map { !TaskWorktreeDisplayMapper.displays(for: $0).isEmpty } ?? false
+        let displays = task.map { TaskWorktreeDisplayMapper.displays(for: $0) } ?? []
+        let hasUsableWorktree = displays.contains { $0.canOpen }
+        let hasMissingWorktree = displays.contains { $0.state == .missingPath }
+        let hasRemovedWorktree = displays.contains { $0.state == .removedCleaned }
         let hasApprovedPlan = artifacts.contains { $0.artifactType == .approvedPlan }
         let hasPlan = artifacts.contains { $0.artifactType == .plan }
         let latestTest = groups.current.first { $0.artifactType == .testOutput }
 
         return TaskWorkflowHealth(
-            worktree: worktreeState(hasWorktree: hasWorktree, review: review),
+            worktree: worktreeState(hasUsableWorktree: hasUsableWorktree, hasMissingWorktree: hasMissingWorktree, hasRemovedWorktree: hasRemovedWorktree, review: review),
             preflight: preflightState(review: review, artifacts: artifacts),
             plan: planState(hasPlan: hasPlan, hasApprovedPlan: hasApprovedPlan, review: review),
             implementation: implementationState(review: review, gitSnapshot: gitSnapshot),
@@ -101,8 +235,10 @@ public enum TaskWorkflowHealthBuilder {
         )
     }
 
-    private static func worktreeState(hasWorktree: Bool, review: TaskStateReview?) -> String {
-        guard hasWorktree else { return "missing" }
+    private static func worktreeState(hasUsableWorktree: Bool, hasMissingWorktree: Bool, hasRemovedWorktree: Bool, review: TaskStateReview?) -> String {
+        if hasMissingWorktree { return "missing path" }
+        if hasRemovedWorktree { return "cleaned" }
+        guard hasUsableWorktree else { return "missing" }
         if review?.hasImplementationChanges == true { return "dirty" }
         return "clean"
     }

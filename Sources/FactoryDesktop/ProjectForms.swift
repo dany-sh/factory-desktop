@@ -122,8 +122,13 @@ struct NewTaskView: View {
                 }
                 Spacer()
                 Button("Create Task") {
-                    store.createTask(title: title, type: type, goal: goal)
-                    dismiss()
+                    Task {
+                        store.errorMessage = nil
+                        await store.createTask(title: title, type: type, goal: goal)
+                        if store.errorMessage == nil {
+                            dismiss()
+                        }
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

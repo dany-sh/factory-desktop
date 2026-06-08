@@ -41,6 +41,9 @@ public final class LocalRunnerService {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let logURL = directory.appendingPathComponent("\(runID.shortID)-\(kind.rawValue)-output.txt")
         let workingDirectory = URL(fileURLWithPath: task?.localWorktreePath ?? task?.codexWorktreePath ?? project.path)
+        guard GitService.pathIsExistingDirectory(workingDirectory.path) else {
+            throw FactoryError.missingWorktreePath(workingDirectory.path)
+        }
         var run = RunRecord(
             id: runID,
             projectId: project.id,

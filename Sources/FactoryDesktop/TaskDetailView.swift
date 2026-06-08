@@ -236,14 +236,22 @@ struct TaskDetailView: View {
                 Text("Task worktree: missing")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } else if displays.contains(where: { $0.state == .missingPath }) {
+                Text("Missing Worktree")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.red)
             } else {
-                Text(displays.map { "\($0.label): \($0.branch ?? "no branch")" }.joined(separator: "  |  "))
+                Text(displays.map { "\($0.label): \($0.branch ?? "no branch") (\($0.state.displayName))" }.joined(separator: "  |  "))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
         }
+    }
+
+    private var selectedCodeWorktreeUnavailable: Bool {
+        store.selectedProject?.type == .codeRepo && !store.selectedTaskCanUseWorktree
     }
 
     private func overviewSection(task: FactoryTask) -> some View {
@@ -253,6 +261,7 @@ struct TaskDetailView: View {
             recentEventsPanel
             taskWorktreePanel
             preflightPanel
+            LifecycleCleanupView()
             DisclosureGroup("Task Brief", isExpanded: $isTaskBriefExpanded) {
                 taskForm(task: task)
             }
@@ -361,23 +370,7 @@ struct TaskDetailView: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(store.selectedTaskWorktreeDisplays) { display in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(display.label)
-                                .font(.subheadline.weight(.semibold))
-                            Text(display.executionMode)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                        Text("Task branch: \(display.branch ?? "not created")")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(display.path ?? "No path")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                    .padding(.vertical, 4)
+                    TaskWorktreeReferenceView(display: display)
                 }
             }
         }
@@ -713,27 +706,27 @@ struct TaskDetailView: View {
                 actionButton("Build", systemImage: "hammer", prominent: store.latestTaskStateReview?.recommendedAction == .buildLocally && !hasChanges) {
                     Task { await store.runWorkflowCommand(.build) }
                 }
-                .disabled(store.isWorking)
+                .disabled(store.isWorking || selectedCodeWorktreeUnavailable)
                 actionButton("Unit Tests", systemImage: "checkmark.seal", prominent: store.latestTaskStateReview?.recommendedAction == .runTests || hasChanges) {
                     Task { await store.runWorkflowCommand(.unitTests) }
                 }
-                .disabled(store.isWorking)
+                .disabled(store.isWorking || selectedCodeWorktreeUnavailable)
                 actionButton("Integration Tests", systemImage: "checklist", prominent: false) {
                     Task { await store.runWorkflowCommand(.integrationTests) }
                 }
-                .disabled(store.isWorking)
+                .disabled(store.isWorking || selectedCodeWorktreeUnavailable)
                 actionButton("E2E Tests", systemImage: "rectangle.connected.to.line.below", prominent: false) {
                     Task { await store.runWorkflowCommand(.e2eTests) }
                 }
-                .disabled(store.isWorking)
+                .disabled(store.isWorking || selectedCodeWorktreeUnavailable)
                 actionButton("Visual QC", systemImage: "eye", prominent: false) {
                     Task { await store.runWorkflowCommand(.visualQC) }
                 }
-                .disabled(store.isWorking)
+                .disabled(store.isWorking || selectedCodeWorktreeUnavailable)
                 actionButton("Generate Codex Build Handoff", systemImage: "paperplane") {
                     store.generateCodexHandoff()
                 }
-                .disabled(store.isWorking || store.selectedTask == nil)
+                .disabled(store.isWorking || store.selectedTask == nil || selectedCodeWorktreeUnavailable)
             }
         }
     }
@@ -791,11 +784,11 @@ struct TaskDetailView: View {
                 actionButton("Review Diff Locally", systemImage: "doc.text.magnifyingglass", prominent: store.latestTaskStateReview?.recommendedAction == .reviewDiff) {
                     Task { await store.reviewDiffLocally() }
                 }
-                .disabled(store.isWorking || store.gitSnapshot.changedFiles.isEmpty)
+                .disabled(store.isWorking || store.gitSnapshot.changedFiles.isEmpty || selectedCodeWorktreeUnavailable)
                 actionButton("Generate Codex Diff Review Handoff", systemImage: "paperplane") {
                     store.askCodexToReviewDiff()
                 }
-                .disabled(store.isWorking || store.gitSnapshot.changedFiles.isEmpty)
+                .disabled(store.isWorking || store.gitSnapshot.changedFiles.isEmpty || selectedCodeWorktreeUnavailable)
                 actionButton("Generate Commit Note", systemImage: "doc.badge.clock") {
                     store.generateReviewNote()
                 }
@@ -929,14 +922,17 @@ struct TaskDetailView: View {
             actionButton("Build", systemImage: "hammer", prominent: true) {
                 Task { await store.runWorkflowCommand(.build) }
             }
+            .disabled(selectedCodeWorktreeUnavailable)
         case .runTests:
             actionButton(action.displayName, systemImage: "checkmark.seal", prominent: true) {
                 Task { await store.runWorkflowCommand(.unitTests) }
             }
+            .disabled(selectedCodeWorktreeUnavailable)
         case .reviewDiff:
             actionButton(action.displayName, systemImage: "doc.text.magnifyingglass", prominent: true) {
                 Task { await store.reviewDiffLocally() }
             }
+            .disabled(selectedCodeWorktreeUnavailable)
         case .commitAndMerge:
             Text("Ready to Commit")
                 .font(.headline)

@@ -13,6 +13,7 @@ public final class AppStore: ObservableObject {
     @Published public var selectedModel: String = ModelPolicy.plannerDefault
     @Published public var gitSnapshot: GitSnapshot = GitSnapshot()
     @Published public var latestPreflightReport: PreflightReport?
+    @Published public var latestLifecycleReport: RepoHygieneReport?
     @Published public private(set) var latestTaskStateReview: TaskStateReview?
     @Published public private(set) var buildInfo: BuildInfo
     @Published public var selectedRunOutput: String = ""
@@ -131,6 +132,14 @@ public final class AppStore: ObservableObject {
         selectedTask.map(TaskWorktreeDisplayMapper.displays(for:)) ?? []
     }
 
+    public var selectedTaskHasMissingWorktreeReference: Bool {
+        selectedTaskWorktreeDisplays.contains { $0.state == .missingPath }
+    }
+
+    public var selectedTaskCanUseWorktree: Bool {
+        selectedTaskWorktreeDisplays.contains { $0.canOpen } && !selectedTaskHasMissingWorktreeReference
+    }
+
     public var canPlanSelectedTaskLocally: Bool {
         guard let project = selectedProject, let task = selectedTask else { return false }
         return project.type != .codeRepo || hasExistingTaskWorktree(task)
@@ -138,6 +147,9 @@ public final class AppStore: ObservableObject {
 
     public var selectedTaskWorktreeWarning: String? {
         guard let project = selectedProject, let task = selectedTask else { return nil }
+        if let missing = TaskWorktreeDisplayMapper.displays(for: task).first(where: { $0.state == .missingPath }) {
+            return "Missing Worktree: This task references a worktree path that no longer exists. \(missing.path ?? "")"
+        }
         guard project.type == .codeRepo, !hasExistingTaskWorktree(task) else { return nil }
         return "Create a task worktree before planning this code task."
     }
@@ -193,6 +205,7 @@ public final class AppStore: ObservableObject {
         selectedProjectID = projectID
         selectedTaskID = tasks.first { $0.projectId == projectID }?.id
         latestPreflightReport = nil
+        latestLifecycleReport = nil
         latestTaskStateReview = nil
         Task { await refreshGitStatus() }
         do {
@@ -206,6 +219,7 @@ public final class AppStore: ObservableObject {
         selectedTaskID = taskID
         selectedRunOutput = ""
         latestPreflightReport = nil
+        latestLifecycleReport = nil
         latestTaskStateReview = nil
         Task { await refreshGitStatus() }
         do {
@@ -268,11 +282,16 @@ public final class AppStore: ObservableObject {
         )
     }
 
-    public func createTask(title: String, type: TaskType, goal: String = "") {
+    public func createTask(title: String, type: TaskType, goal: String = "") async {
+        guard let repository, let project = selectedProject else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        if project.type == .codeRepo {
+            guard await ensureLifecycleGateAllowsStart(project: project, selectedTask: nil) else { return }
+        }
+
         perform {
-            guard let repository = self.repository, let project = self.selectedProject else {
-                throw FactoryError.missingSelection
-            }
             let task = FactoryTask(
                 projectId: project.id,
                 title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled task" : title,
@@ -364,11 +383,36 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    public func refreshLifecycleScan() async {
+        guard let project = selectedProject, let repository, let gitService else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let projectTasks = tasks.filter { $0.projectId == project.id }
+            let projectRuns = try repository.runs(projectId: project.id)
+            let projectArtifacts = try repository.artifacts(projectId: project.id)
+            latestLifecycleReport = await gitService.lifecycleReport(
+                project: project,
+                selectedTask: selectedTask,
+                tasks: projectTasks,
+                runs: projectRuns,
+                artifacts: projectArtifacts
+            )
+            statusMessage = "Lifecycle scan refreshed."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     public func createWorktree(flavor: WorktreeFlavor) async {
         guard let project = selectedProject, var task = selectedTask, let repository, let gitService else {
             errorMessage = FactoryError.missingSelection.localizedDescription
             return
         }
+        guard await ensureLifecycleGateAllowsStart(project: project, selectedTask: task) else { return }
         isWorking = true
         defer { isWorking = false }
         do {
@@ -433,6 +477,7 @@ public final class AppStore: ObservableObject {
             errorMessage = FactoryError.missingSelection.localizedDescription
             return
         }
+        guard await ensureLifecycleGateAllowsStart(project: project, selectedTask: task) else { return }
         guard project.type != .codeRepo || hasExistingTaskWorktree(task) else {
             errorMessage = "Create a task worktree before planning this code task."
             statusMessage = "Create Task Worktree is the next safe action for this code task."
@@ -589,6 +634,10 @@ public final class AppStore: ObservableObject {
             return
         }
 
+        if project.type == .codeRepo, let missingPath = firstMissingSelectedWorktreePath(task) {
+            handleMissingWorktreePath(missingPath)
+            return
+        }
         let worktree = task.localWorktreePath ?? task.codexWorktreePath ?? project.path
         let runID = UUID().uuidString
         let directory = paths.runDirectory(project: project, task: task)
@@ -774,6 +823,10 @@ public final class AppStore: ObservableObject {
             guard task.status == .approved else {
                 throw FactoryError.commandFailed("Approve the plan before building locally.")
             }
+            if project.type == .codeRepo, let missingPath = self.firstMissingSelectedWorktreePath(task) {
+                self.handleMissingWorktreePath(missingPath)
+                return
+            }
             let directory = self.paths.runDirectory(project: project, task: task)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let url = directory.appendingPathComponent("implementation-log.md")
@@ -812,6 +865,10 @@ public final class AppStore: ObservableObject {
             guard let repository = self.repository, let project = self.selectedProject, let task = self.selectedTask else {
                 throw FactoryError.missingSelection
             }
+            if project.type == .codeRepo, let missingPath = self.firstMissingSelectedWorktreePath(task) {
+                self.handleMissingWorktreePath(missingPath)
+                return
+            }
             let url = try self.handoffService.codexHandoff(project: project, task: task, gitSnapshot: self.gitSnapshot)
             let artifact = Artifact(taskId: task.id, type: .implementationLog, path: url.path, description: "Codex implementation handoff")
             try repository.insert(artifact: artifact)
@@ -835,6 +892,10 @@ public final class AppStore: ObservableObject {
             errorMessage = "Create an alternate worktree first."
             return
         }
+        guard GitService.pathIsExistingDirectory(path) else {
+            handleMissingWorktreePath(path)
+            return
+        }
         do {
             _ = try await gitService.openTerminal(path: path)
             statusMessage = "Opened Terminal in the alternate worktree. Run `codex` and use the generated handoff."
@@ -855,6 +916,10 @@ public final class AppStore: ObservableObject {
                 path = codex
             } else {
                 errorMessage = "Create a task worktree before opening a code project."
+                return
+            }
+            guard GitService.pathIsExistingDirectory(path) else {
+                handleMissingWorktreePath(path)
                 return
             }
         } else {
@@ -882,6 +947,14 @@ public final class AppStore: ObservableObject {
         guard project.commandConfiguration.command(for: kind) != nil else {
             statusMessage = "\(kind.displayName) is not configured."
             selectedRunOutput = ""
+            return
+        }
+        if project.type == .codeRepo, let missingPath = firstMissingSelectedWorktreePath(task) {
+            handleMissingWorktreePath(missingPath)
+            return
+        }
+        if project.type == .codeRepo, !hasExistingTaskWorktree(task) {
+            statusMessage = "Missing Worktree: create, relink, or repair a task worktree before running \(kind.displayName)."
             return
         }
 
@@ -981,6 +1054,14 @@ public final class AppStore: ObservableObject {
             errorMessage = FactoryError.missingSelection.localizedDescription
             return
         }
+        if project.type == .codeRepo, let missingPath = firstMissingSelectedWorktreePath(task) {
+            handleMissingWorktreePath(missingPath)
+            return
+        }
+        if project.type == .codeRepo, !hasExistingTaskWorktree(task) {
+            statusMessage = "Missing Worktree: create, relink, or repair a task worktree before reviewing a diff."
+            return
+        }
         isWorking = true
         defer { isWorking = false }
         do {
@@ -1053,6 +1134,10 @@ public final class AppStore: ObservableObject {
             guard !self.gitSnapshot.changedFiles.isEmpty else {
                 throw FactoryError.commandFailed("Refresh git status and ensure changed files exist before generating a diff review handoff.")
             }
+            if project.type == .codeRepo, let missingPath = self.firstMissingSelectedWorktreePath(task) {
+                self.handleMissingWorktreePath(missingPath)
+                return
+            }
             let url = try self.handoffService.codexDiffReviewHandoff(
                 project: project,
                 task: task,
@@ -1112,6 +1197,10 @@ public final class AppStore: ObservableObject {
             errorMessage = "Create a task worktree before committing."
             return
         }
+        guard GitService.pathIsExistingDirectory(path) else {
+            handleMissingWorktreePath(path)
+            return
+        }
         let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedMessage.isEmpty else {
             errorMessage = "Enter a commit message first."
@@ -1127,6 +1216,23 @@ public final class AppStore: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    public func performWorktreeRepairAction(_ action: WorktreeRepairAction, displayID: String) {
+        switch action {
+        case .refreshLifecycleScan:
+            Task { await refreshLifecycleScan() }
+        case .removeStaleWorktreeReference, .markWorktreeCleaned:
+            clearStoredWorktreePath(displayID: displayID, action: action)
+        case .archiveTask:
+            updateSelectedTaskStatus(.archived)
+        case .recreateWorktreeFromBranch, .relinkExistingWorktree:
+            statusMessage = "\(action.displayName) is a P0 placeholder. No worktree was created, relinked, or deleted."
+        }
+    }
+
+    public func canPerformWorktreeRepairAction(_ action: WorktreeRepairAction) -> Bool {
+        !action.isFoundationOnly
     }
 
     public func reviewTaskState() async {
@@ -1150,6 +1256,7 @@ public final class AppStore: ObservableObject {
                 .filter { !$0.exists }
                 .map { "Missing \($0.label.lowercased()) path: \($0.path)" }
             var warningIssues = missingArtifacts + missingWorktrees
+            try auditMissingWorktreeReferences(task: task, summaries: taskWorktreeSummaries, repository: repository)
 
             let hasPlan = artifactSummaries.contains { $0.type == .plan && $0.exists }
             let hasRawPlanReview = artifactSummaries.contains {
@@ -1362,6 +1469,109 @@ public final class AppStore: ObservableObject {
 
     private func latestArtifact(type: ArtifactType) -> Artifact? {
         artifacts.first { $0.type == type.rawValue }
+    }
+
+    private func clearStoredWorktreePath(displayID: String, action: WorktreeRepairAction) {
+        perform {
+            guard let repository = self.repository, var task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            let previousPath: String?
+            switch displayID {
+            case "local":
+                previousPath = task.localWorktreePath
+                task.localWorktreePath = nil
+            case "codex":
+                previousPath = task.codexWorktreePath
+                task.codexWorktreePath = nil
+            default:
+                self.statusMessage = "Unknown worktree reference."
+                return
+            }
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
+            try repository.insert(taskEvent: TaskEvent(
+                taskId: task.id,
+                kind: .statusChangedAutomatically,
+                source: .automatic,
+                message: "\(action.displayName): cleared stale \(displayID) worktree path \(previousPath ?? "missing"). Branch metadata was preserved."
+            ))
+            try self.reload()
+            self.selectedTaskID = task.id
+            self.latestLifecycleReport = nil
+            self.statusMessage = "\(action.displayName) completed. Branch metadata was preserved."
+        }
+    }
+
+    private func handleMissingWorktreePath(_ path: String) {
+        statusMessage = "Missing Worktree: This task references a worktree path that no longer exists."
+        selectedRunOutput = """
+        Missing Worktree
+
+        This task references a worktree path that no longer exists.
+
+        \(path)
+
+        Use the Task Worktree repair actions to remove the stale reference, mark it cleaned, recreate from branch, relink an existing worktree, or archive the task.
+        """
+        if let repository, let task = selectedTask {
+            try? repository.insert(taskEvent: TaskEvent(
+                taskId: task.id,
+                kind: .statusChangedAutomatically,
+                source: .automatic,
+                message: "Lifecycle hygiene detected missing worktree reference: \(path)."
+            ))
+            try? reloadRunsAndArtifacts()
+        }
+    }
+
+    private func firstMissingSelectedWorktreePath(_ task: FactoryTask) -> String? {
+        TaskWorktreeDisplayMapper.displays(for: task)
+            .first { $0.state == .missingPath }?
+            .path
+    }
+
+    private func auditMissingWorktreeReferences(task: FactoryTask, summaries: [TaskWorktreeSummary], repository: FactoryRepository) throws {
+        for summary in summaries where !summary.exists {
+            try repository.insert(taskEvent: TaskEvent(
+                taskId: task.id,
+                kind: .statusChangedAutomatically,
+                source: .automatic,
+                message: "Lifecycle hygiene detected missing worktree reference: \(summary.path)."
+            ))
+        }
+    }
+
+    private func ensureLifecycleGateAllowsStart(project: Project, selectedTask: FactoryTask?) async -> Bool {
+        guard project.type == .codeRepo else { return true }
+        guard let repository, let gitService else { return true }
+        do {
+            let projectTasks = tasks.filter { $0.projectId == project.id }
+            let projectRuns = try repository.runs(projectId: project.id)
+            let projectArtifacts = try repository.artifacts(projectId: project.id)
+            let report = await gitService.lifecycleReport(
+                project: project,
+                selectedTask: selectedTask,
+                tasks: projectTasks,
+                runs: projectRuns,
+                artifacts: projectArtifacts
+            )
+            latestLifecycleReport = report
+            switch report.preflightGate.level {
+            case .green:
+                return true
+            case .yellow:
+                statusMessage = "Lifecycle scan has warnings; proceeding with caution."
+                return true
+            case .red:
+                errorMessage = "Lifecycle preflight blocked this action. Open Lifecycle & Cleanup and fix red checks first."
+                statusMessage = "Blocked by Lifecycle & Cleanup preflight."
+                return false
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
     }
 
     private func latestExistingArtifact(type: ArtifactType) -> Artifact? {

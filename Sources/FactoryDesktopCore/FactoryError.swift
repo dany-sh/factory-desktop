@@ -11,6 +11,7 @@ public enum FactoryError: LocalizedError {
     case invalidProjectPath(String)
     case notCodeProject
     case missingSelection
+    case missingWorktreePath(String)
     case unsafeMainBranch(String)
     case ollamaFailed(String)
 
@@ -26,6 +27,7 @@ public enum FactoryError: LocalizedError {
         case .invalidProjectPath(let path): "Invalid project path: \(path)"
         case .notCodeProject: "Worktrees are only available for code projects."
         case .missingSelection: "Select a project and task first."
+        case .missingWorktreePath(let path): "Missing Worktree: This task references a worktree path that no longer exists. \(path)"
         case .unsafeMainBranch(let branch): "Refusing to operate directly on protected branch \(branch)."
         case .ollamaFailed(let message): "Ollama request failed: \(message)"
         }
