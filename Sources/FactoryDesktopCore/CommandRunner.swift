@@ -113,6 +113,8 @@ public final class CommandRunner {
         let arguments = request.arguments
 
         switch executable {
+        case "which":
+            return arguments == ["codex"]
         case "git":
             return isAllowedGit(arguments, manuallyApproved: request.manuallyApproved)
         case "xcodebuild":
@@ -144,13 +146,23 @@ public final class CommandRunner {
     }
 
     private func isAllowedCodex(_ arguments: [String]) -> Bool {
-        guard arguments.first == "exec" else { return false }
-        guard optionValue(in: arguments, short: "-s", long: "--sandbox") == "read-only" else { return false }
-        guard optionValue(in: arguments, short: "-C", long: "--cd") != nil else { return false }
         guard !arguments.contains("--dangerously-bypass-approvals-and-sandbox") else { return false }
         guard !arguments.contains("--dangerously-bypass-hook-trust") else { return false }
         guard !arguments.contains("--add-dir") else { return false }
-        return true
+        switch arguments.first {
+        case "--version":
+            return arguments.count == 1
+        case "app":
+            return arguments.count == 2 && isSafeAbsolutePath(arguments[1])
+        case "resume":
+            return arguments.count == 2 && isSafeCodexSessionID(arguments[1])
+        case "exec":
+            guard optionValue(in: arguments, short: "-s", long: "--sandbox") == "read-only" else { return false }
+            guard optionValue(in: arguments, short: "-C", long: "--cd").map(isSafeAbsolutePath) == true else { return false }
+            return true
+        default:
+            return false
+        }
     }
 
     private func optionValue(in arguments: [String], short: String, long: String) -> String? {
@@ -254,5 +266,18 @@ public final class CommandRunner {
         guard !argument.hasPrefix("-") else { return false }
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.~^:")
         return argument.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private func isSafeCodexSessionID(_ argument: String) -> Bool {
+        guard !argument.isEmpty else { return false }
+        guard !argument.hasPrefix("-") else { return false }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")
+        return argument.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private func isSafeAbsolutePath(_ path: String) -> Bool {
+        guard path.hasPrefix("/") else { return false }
+        guard !path.contains("\u{0}") else { return false }
+        return true
     }
 }

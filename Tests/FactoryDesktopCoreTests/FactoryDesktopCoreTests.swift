@@ -73,6 +73,41 @@ final class FactoryDesktopCoreTests: XCTestCase {
         ])
     }
 
+    func testCodexLinkModelsRoundTripThroughCodable() throws {
+        let projectLink = CodexProjectLink(
+            id: "link",
+            projectId: "project",
+            workspacePath: "/tmp/project",
+            preferredMode: .worktree,
+            preferredModel: "gpt-5",
+            preferredReasoning: "high",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let sessionLink = CodexSessionLink(
+            id: "session-link",
+            projectId: "project",
+            taskId: "task",
+            codexSessionId: "session-123",
+            workspacePath: "/tmp/project",
+            mode: .local,
+            branchName: "codex/task",
+            worktreePath: "/tmp/worktree",
+            status: .active,
+            lastSeenAt: Date(timeIntervalSince1970: 1_700_000_002),
+            lastSummary: "Attached.",
+            transcriptPath: "/tmp/transcript.log",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_003)
+        )
+
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        XCTAssertEqual(try decoder.decode(CodexProjectLink.self, from: encoder.encode(projectLink)), projectLink)
+        XCTAssertEqual(try decoder.decode(CodexSessionLink.self, from: encoder.encode(sessionLink)), sessionLink)
+    }
+
     func testRunDirectoryUsesFullTaskID() {
         let paths = FactoryPaths(root: URL(fileURLWithPath: "/tmp/factory-test-root"))
         let project = Project(id: "project-1", name: "Demo Project", type: .codeRepo, path: "/tmp/demo")
@@ -97,6 +132,10 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["worktree", "prune", "--dry-run"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "npm", arguments: ["run", "lint"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "read-only", "-o", "/tmp/review.md", "-"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "which", arguments: ["codex"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "codex", arguments: ["--version"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "codex", arguments: ["app", "/tmp/repo"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "codex", arguments: ["resume", "session-123_ABC"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["commit", "-m", "safe"], manuallyApproved: true)))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "sudo", arguments: ["true"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["reset", "--hard"])))
@@ -108,6 +147,47 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "rm", arguments: ["-rf", "/tmp/nope"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "workspace-write", "-"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "read-only", "--add-dir", "/tmp/other", "-"])))
+        XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["resume", "../bad"])))
+        XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["app", "relative/path"])))
+    }
+
+    func testCodexCLICommandConstructionDoesNotAllowShellFragments() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("factory-desktop-codex-cli-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let service = CodexCLIService(commandRunner: CommandRunner())
+
+        let open = try service.commandRequest(for: .openApp(workspacePath: root.path))
+        XCTAssertEqual(open.executable, "codex")
+        XCTAssertEqual(open.arguments, ["app", root.path])
+
+        let resume = try service.commandRequest(for: .resume(sessionId: "session-123"))
+        XCTAssertEqual(resume.arguments, ["resume", "session-123"])
+
+        let exec = try service.commandRequest(for: .execResume(
+            sessionId: "session-123",
+            workspacePath: root.path,
+            instruction: "Summarize state."
+        ))
+        XCTAssertEqual(exec.executable, "codex")
+        XCTAssertTrue(exec.arguments.contains("-s"))
+        XCTAssertTrue(exec.arguments.contains("read-only"))
+        XCTAssertFalse(exec.arguments.contains(";"))
+
+        XCTAssertThrowsError(try service.commandRequest(for: .resume(sessionId: "session; rm -rf /")))
+        XCTAssertThrowsError(try service.commandRequest(for: .openApp(workspacePath: "relative;bad")))
+    }
+
+    func testCodexCLIAvailabilityHandlesMissingCLI() async {
+        let service = CodexCLIService { request in
+            CommandResult(command: request.displayString, exitCode: 1, output: "")
+        }
+
+        let availability = await service.availability()
+
+        XCTAssertFalse(availability.isAvailable)
+        XCTAssertNil(availability.version)
+        XCTAssertEqual(availability.message, "codex CLI was not found.")
     }
 
     func testLifecycleParsersReadBranchesAndWorktrees() {
@@ -1385,9 +1465,109 @@ final class FactoryDesktopCoreTests: XCTestCase {
         try MigrationRunner(database: database, paths: paths).migrate()
 
         let rows = try database.query(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'tasks', 'runs', 'artifacts', 'task_events', 'schema_migrations');"
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'tasks', 'runs', 'artifacts', 'task_events', 'schema_migrations', 'codex_project_links', 'codex_session_links');"
         )
-        XCTAssertEqual(Set(rows.compactMap { $0["name"] ?? nil }), Set(["projects", "tasks", "runs", "artifacts", "task_events", "schema_migrations"]))
+        XCTAssertEqual(Set(rows.compactMap { $0["name"] ?? nil }), Set([
+            "projects",
+            "tasks",
+            "runs",
+            "artifacts",
+            "task_events",
+            "schema_migrations",
+            "codex_project_links",
+            "codex_session_links"
+        ]))
+    }
+
+    func testRepositoryPersistsCodexProjectLink() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
+        try fixture.repository.upsert(project: project)
+
+        var link = CodexProjectLink(
+            id: "project-link",
+            projectId: project.id,
+            workspacePath: fixture.root.path,
+            preferredMode: .local,
+            preferredModel: "gpt-5"
+        )
+        try fixture.repository.upsert(codexProjectLink: link)
+        let initial = try XCTUnwrap(fixture.repository.codexProjectLink(projectId: project.id))
+        XCTAssertEqual(initial.id, link.id)
+        XCTAssertEqual(initial.projectId, link.projectId)
+        XCTAssertEqual(initial.workspacePath, link.workspacePath)
+        XCTAssertEqual(initial.preferredMode, link.preferredMode)
+        XCTAssertEqual(initial.preferredModel, link.preferredModel)
+
+        link.workspacePath = fixture.root.appendingPathComponent("worktree").path
+        link.preferredMode = .worktree
+        link.updatedAt = Date(timeIntervalSince1970: 1_700_000_010)
+        try fixture.repository.upsert(codexProjectLink: link)
+        let stored = try XCTUnwrap(fixture.repository.codexProjectLink(projectId: project.id))
+
+        XCTAssertEqual(stored.id, "project-link")
+        XCTAssertEqual(stored.workspacePath, link.workspacePath)
+        XCTAssertEqual(stored.preferredMode, .worktree)
+
+        try fixture.repository.deleteCodexProjectLink(projectId: project.id)
+        XCTAssertNil(try fixture.repository.codexProjectLink(projectId: project.id))
+    }
+
+    func testRepositoryPersistsAndQueriesCodexSessionLinks() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
+        let firstTask = FactoryTask(id: "task-1", projectId: project.id, title: "First")
+        let secondTask = FactoryTask(id: "task-2", projectId: project.id, title: "Second")
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: firstTask)
+        try fixture.repository.upsert(task: secondTask)
+
+        let first = CodexSessionLink(
+            id: "link-1",
+            projectId: project.id,
+            taskId: firstTask.id,
+            codexSessionId: "session-1",
+            workspacePath: fixture.root.path,
+            mode: .local,
+            status: .active,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let second = CodexSessionLink(
+            id: "link-2",
+            projectId: project.id,
+            taskId: secondTask.id,
+            codexSessionId: "session-2",
+            workspacePath: fixture.root.path,
+            mode: .worktree,
+            status: .paused,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_001),
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+
+        try fixture.repository.upsert(codexSessionLink: first)
+        try fixture.repository.upsert(codexSessionLink: second)
+
+        XCTAssertEqual(try fixture.repository.codexSessionLinks(projectId: project.id).map(\.codexSessionId), ["session-2", "session-1"])
+        XCTAssertEqual(try fixture.repository.codexSessionLinks(taskId: firstTask.id), [first])
+        XCTAssertEqual(try fixture.repository.latestCodexSessionLink(taskId: firstTask.id)?.codexSessionId, "session-1")
+
+        let transcript = fixture.root.appendingPathComponent("session.log").path
+        try fixture.repository.updateCodexSessionLink(
+            id: first.id,
+            status: .completed,
+            lastSeenAt: Date(timeIntervalSince1970: 1_700_000_020),
+            lastSummary: "Checked.",
+            transcriptPath: transcript
+        )
+        let updated = try XCTUnwrap(fixture.repository.latestCodexSessionLink(taskId: firstTask.id))
+        XCTAssertEqual(updated.status, .completed)
+        XCTAssertEqual(updated.lastSummary, "Checked.")
+        XCTAssertEqual(updated.transcriptPath, transcript)
+
+        try fixture.repository.detachCodexSessionLinkFromTask(id: first.id)
+        XCTAssertNil(try fixture.repository.latestCodexSessionLink(taskId: firstTask.id))
+        XCTAssertTrue(try fixture.repository.codexSessionLinks(projectId: project.id).contains { $0.id == first.id && $0.taskId == nil && $0.status == .paused })
     }
 
     func testRepositoryPersistsManualStatusChangeEvent() throws {
@@ -1420,6 +1600,33 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(events.first?.kind, .statusChangedManually)
         XCTAssertEqual(events.first?.previousStatus, .backlog)
         XCTAssertEqual(events.first?.newStatus, .readyForReview)
+    }
+
+    @MainActor
+    func testAttachingCodexSessionDoesNotMutateTaskStatus() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
+        let task = FactoryTask(
+            id: "task",
+            projectId: project.id,
+            title: "Attach Codex",
+            status: .approved,
+            localWorktreePath: fixture.root.path
+        )
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        let store = AppStore(paths: fixture.paths)
+        store.selectedProjectID = project.id
+        store.selectedTaskID = task.id
+        store.attachCodexSessionToSelectedTask(sessionId: "session-123")
+
+        let storedTask = try XCTUnwrap(fixture.repository.tasks(projectId: project.id).first)
+        let storedSession = try XCTUnwrap(fixture.repository.latestCodexSessionLink(taskId: task.id))
+
+        XCTAssertEqual(storedTask.status, .approved)
+        XCTAssertEqual(storedSession.codexSessionId, "session-123")
+        XCTAssertEqual(storedSession.status, .active)
     }
 
     private func XCTAssertTaskStateRecommendation(

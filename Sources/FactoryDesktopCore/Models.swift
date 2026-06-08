@@ -257,6 +257,124 @@ public enum WorkflowRunKind: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+public enum CodexExecutionMode: String, CaseIterable, Codable, Identifiable, Sendable {
+    case local
+    case worktree
+    case cloud
+    case unknown
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .local: "Local"
+        case .worktree: "Worktree"
+        case .cloud: "Cloud"
+        case .unknown: "Unknown"
+        }
+    }
+}
+
+public enum CodexSessionStatus: String, CaseIterable, Codable, Identifiable, Sendable {
+    case unknown
+    case active
+    case paused
+    case completed
+    case failed
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .unknown: "Unknown"
+        case .active: "Active"
+        case .paused: "Paused"
+        case .completed: "Completed"
+        case .failed: "Failed"
+        }
+    }
+}
+
+public struct CodexProjectLink: Identifiable, Equatable, Codable, Sendable {
+    public var id: String
+    public var projectId: String
+    public var workspacePath: String
+    public var preferredMode: CodexExecutionMode
+    public var preferredModel: String?
+    public var preferredReasoning: String?
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(
+        id: String = UUID().uuidString,
+        projectId: String,
+        workspacePath: String,
+        preferredMode: CodexExecutionMode = .unknown,
+        preferredModel: String? = nil,
+        preferredReasoning: String? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.projectId = projectId
+        self.workspacePath = workspacePath
+        self.preferredMode = preferredMode
+        self.preferredModel = preferredModel
+        self.preferredReasoning = preferredReasoning
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct CodexSessionLink: Identifiable, Equatable, Codable, Sendable {
+    public var id: String
+    public var projectId: String
+    public var taskId: String?
+    public var codexSessionId: String
+    public var workspacePath: String
+    public var mode: CodexExecutionMode
+    public var branchName: String?
+    public var worktreePath: String?
+    public var status: CodexSessionStatus
+    public var lastSeenAt: Date?
+    public var lastSummary: String?
+    public var transcriptPath: String?
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(
+        id: String = UUID().uuidString,
+        projectId: String,
+        taskId: String? = nil,
+        codexSessionId: String,
+        workspacePath: String,
+        mode: CodexExecutionMode = .unknown,
+        branchName: String? = nil,
+        worktreePath: String? = nil,
+        status: CodexSessionStatus = .unknown,
+        lastSeenAt: Date? = nil,
+        lastSummary: String? = nil,
+        transcriptPath: String? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.projectId = projectId
+        self.taskId = taskId
+        self.codexSessionId = codexSessionId
+        self.workspacePath = workspacePath
+        self.mode = mode
+        self.branchName = branchName
+        self.worktreePath = worktreePath
+        self.status = status
+        self.lastSeenAt = lastSeenAt
+        self.lastSummary = lastSummary
+        self.transcriptPath = transcriptPath
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
 public struct ProjectCommandConfiguration: Equatable, Codable {
     public var build: String?
     public var unitTests: String?

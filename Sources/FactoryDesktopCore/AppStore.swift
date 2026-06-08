@@ -15,6 +15,9 @@ public final class AppStore: ObservableObject {
     @Published public var latestPreflightReport: PreflightReport?
     @Published public var latestLifecycleReport: RepoHygieneReport?
     @Published public private(set) var latestTaskStateReview: TaskStateReview?
+    @Published public private(set) var selectedCodexProjectLink: CodexProjectLink?
+    @Published public private(set) var selectedTaskCodexSessionLink: CodexSessionLink?
+    @Published public private(set) var codexSessionLinks: [CodexSessionLink] = []
     @Published public private(set) var buildInfo: BuildInfo
     @Published public var selectedRunOutput: String = ""
     @Published public var statusMessage: String = ""
@@ -26,6 +29,7 @@ public final class AppStore: ObservableObject {
     private var database: SQLiteDatabase?
     private var repository: FactoryRepository?
     private var commandRunner: CommandRunner
+    private var codexCLIService: CodexCLIService
     private var gitService: GitService?
     private var ollamaClient: OllamaClient
     private var handoffService: HandoffService
@@ -158,6 +162,7 @@ public final class AppStore: ObservableObject {
         self.paths = paths
         self.buildInfo = BuildInfoService.current(launchTimestamp: Date())
         self.commandRunner = CommandRunner()
+        self.codexCLIService = CodexCLIService(commandRunner: commandRunner)
         self.ollamaClient = OllamaClient()
         self.handoffService = HandoffService(paths: paths)
 
@@ -185,6 +190,7 @@ public final class AppStore: ObservableObject {
         if let selectedProjectID, selectedTaskID == nil {
             selectedTaskID = tasks.first { $0.projectId == selectedProjectID }?.id
         }
+        try reloadCodexLinks()
         try reloadRunsAndArtifacts()
     }
 
@@ -198,6 +204,23 @@ public final class AppStore: ObservableObject {
             runs = []
             artifacts = []
             taskEvents = []
+        }
+        try reloadCodexLinks()
+    }
+
+    private func reloadCodexLinks() throws {
+        guard let repository else { return }
+        if let project = selectedProject {
+            selectedCodexProjectLink = try repository.codexProjectLink(projectId: project.id)
+            codexSessionLinks = try repository.codexSessionLinks(projectId: project.id)
+        } else {
+            selectedCodexProjectLink = nil
+            codexSessionLinks = []
+        }
+        if let task = selectedTask {
+            selectedTaskCodexSessionLink = try repository.latestCodexSessionLink(taskId: task.id)
+        } else {
+            selectedTaskCodexSessionLink = nil
         }
     }
 
@@ -935,6 +958,164 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    public func linkCodexProject(workspacePath: String) {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject else {
+                throw FactoryError.missingSelection
+            }
+            let trimmed = workspacePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            let path = trimmed.isEmpty ? project.path : trimmed
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw FactoryError.invalidProjectPath(path)
+            }
+            let existing = try repository.codexProjectLink(projectId: project.id)
+            let mode: CodexExecutionMode = path == project.path ? .local : .worktree
+            let link = CodexProjectLink(
+                id: existing?.id ?? UUID().uuidString,
+                projectId: project.id,
+                workspacePath: URL(fileURLWithPath: path).standardizedFileURL.path,
+                preferredMode: mode,
+                preferredModel: existing?.preferredModel,
+                preferredReasoning: existing?.preferredReasoning,
+                createdAt: existing?.createdAt ?? Date(),
+                updatedAt: Date()
+            )
+            try repository.upsert(codexProjectLink: link)
+            try self.reloadCodexLinks()
+            self.statusMessage = "Linked Codex project workspace."
+        }
+    }
+
+    public func unlinkCodexProject() {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject else {
+                throw FactoryError.missingSelection
+            }
+            try repository.deleteCodexProjectLink(projectId: project.id)
+            try self.reloadCodexLinks()
+            self.statusMessage = "Unlinked Codex project workspace."
+        }
+    }
+
+    public func attachCodexSessionToSelectedTask(sessionId: String) {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject, let task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            let trimmed = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw FactoryError.commandFailed("Enter a Codex session ID first.")
+            }
+            _ = try self.codexCLIService.commandRequest(for: .resume(sessionId: trimmed))
+            let workspacePath = self.codexWorkspacePath(project: project, task: task)
+            let link = CodexSessionLink(
+                projectId: project.id,
+                taskId: task.id,
+                codexSessionId: trimmed,
+                workspacePath: workspacePath,
+                mode: self.codexMode(workspacePath: workspacePath, project: project),
+                branchName: task.codexBranch ?? task.localBranch,
+                worktreePath: task.codexWorktreePath ?? task.localWorktreePath,
+                status: .active,
+                lastSeenAt: Date(),
+                lastSummary: "Session attached in Factory Desktop."
+            )
+            try repository.upsert(codexSessionLink: link)
+            try self.reloadCodexLinks()
+            self.statusMessage = "Attached Codex session \(trimmed.shortID)."
+        }
+    }
+
+    public func detachCodexSessionFromSelectedTask() {
+        perform {
+            guard let repository = self.repository, let link = self.selectedTaskCodexSessionLink else {
+                throw FactoryError.missingSelection
+            }
+            try repository.detachCodexSessionLinkFromTask(id: link.id)
+            try self.reloadCodexLinks()
+            self.statusMessage = "Detached Codex session \(link.codexSessionId.shortID)."
+        }
+    }
+
+    public func openSelectedProjectInCodex() async {
+        guard let project = selectedProject else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        let workspacePath = selectedCodexProjectLink?.workspacePath ?? project.path
+        await runCodexCommand(
+            summary: "Open Codex project",
+            commandText: "codex app \(workspacePath)",
+            transcriptPrefix: "codex-open-project",
+            sessionLink: selectedTaskCodexSessionLink
+        ) {
+            try await self.codexCLIService.openApp(workspacePath: workspacePath)
+        }
+    }
+
+    public func resumeSelectedTaskCodexSession() async {
+        guard let link = selectedTaskCodexSessionLink else {
+            errorMessage = "Attach a Codex session before resuming."
+            return
+        }
+        await runCodexCommand(
+            summary: "Resume Codex session",
+            commandText: "codex resume \(link.codexSessionId)",
+            transcriptPrefix: "codex-resume-session",
+            sessionLink: link
+        ) {
+            try await self.codexCLIService.resume(sessionId: link.codexSessionId)
+        }
+    }
+
+    public func refreshSelectedTaskCodexSessionState() async {
+        guard let repository, let link = selectedTaskCodexSessionLink else {
+            errorMessage = "Attach a Codex session before refreshing."
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+        let availability = await codexCLIService.availability()
+        do {
+            let status: CodexSessionStatus = availability.isAvailable ? link.status : .failed
+            try repository.updateCodexSessionLink(
+                id: link.id,
+                status: status,
+                lastSeenAt: Date(),
+                lastSummary: availability.message,
+                transcriptPath: link.transcriptPath
+            )
+            try reloadCodexLinks()
+            statusMessage = availability.message
+            if !availability.isAvailable {
+                errorMessage = availability.message
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func runSelectedTaskCodexSessionCheck() async {
+        guard let link = selectedTaskCodexSessionLink else {
+            errorMessage = "Attach a Codex session before running a session check."
+            return
+        }
+        await runCodexCommand(
+            summary: "Codex session state check",
+            commandText: "codex exec resume \(link.codexSessionId)",
+            transcriptPrefix: "codex-session-check",
+            sessionLink: link,
+            completedStatusOnSuccess: .completed
+        ) {
+            try await self.codexCLIService.execResume(
+                sessionId: link.codexSessionId,
+                workspacePath: link.workspacePath,
+                instruction: "Resume this session in read-only mode and summarize current state, blockers, and next recommended Factory Desktop action. Do not edit files."
+            )
+        }
+    }
+
     public func runFirstTestCommand() async {
         await runWorkflowCommand(.unitTests)
     }
@@ -1454,6 +1635,148 @@ public final class AppStore: ObservableObject {
             try FileManager.default.copyItem(at: self.paths.database, to: destination)
             self.statusMessage = "Backed up database to \(destination.path)."
         }
+    }
+
+    private func runCodexCommand(
+        summary: String,
+        commandText: String,
+        transcriptPrefix: String,
+        sessionLink: CodexSessionLink?,
+        completedStatusOnSuccess: CodexSessionStatus = .active,
+        operation: @escaping () async throws -> CommandResult
+    ) async {
+        guard let repository, let project = selectedProject else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+
+        let task = selectedTask
+        isWorking = true
+        defer { isWorking = false }
+
+        let startedAt = Date()
+        let directory: URL
+        if let task {
+            directory = paths.runDirectory(project: project, task: task)
+        } else {
+            directory = paths.runs
+                .appendingPathComponent(Slug.make(project.name), isDirectory: true)
+                .appendingPathComponent("project", isDirectory: true)
+        }
+        let transcriptURL = directory.appendingPathComponent("\(transcriptPrefix)-\(UUID().uuidString.shortID).log")
+        var run: RunRecord?
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            if let task {
+                let created = RunRecord(
+                    projectId: project.id,
+                    taskId: task.id,
+                    executor: "codex_cli",
+                    status: .running,
+                    command: commandText,
+                    outputPath: transcriptURL.path,
+                    summary: summary,
+                    startedAt: startedAt
+                )
+                try repository.upsert(run: created)
+                run = created
+                try reloadRunsAndArtifacts()
+            }
+
+            let result = try await operation()
+            let endedAt = Date()
+            let log = codexLogText(
+                command: result.command,
+                startedAt: startedAt,
+                endedAt: endedAt,
+                exitCode: Int(result.exitCode),
+                output: result.output
+            )
+            try log.write(to: transcriptURL, atomically: true, encoding: .utf8)
+
+            if var run {
+                run.status = result.succeeded ? .succeeded : .failed
+                run.exitCode = Int(result.exitCode)
+                run.summary = result.succeeded ? "\(summary) completed" : "\(summary) failed"
+                run.endedAt = endedAt
+                try repository.upsert(run: run)
+            }
+
+            if let sessionLink {
+                try repository.updateCodexSessionLink(
+                    id: sessionLink.id,
+                    status: result.succeeded ? completedStatusOnSuccess : .failed,
+                    lastSeenAt: endedAt,
+                    lastSummary: result.succeeded ? "\(summary) completed." : "\(summary) failed.",
+                    transcriptPath: transcriptURL.path
+                )
+            }
+
+            try reloadRunsAndArtifacts()
+            selectedRunOutput = log
+            statusMessage = result.succeeded ? "\(summary) completed." : "\(summary) failed."
+            if !result.succeeded {
+                errorMessage = result.output.isEmpty ? "\(summary) failed." : result.output
+            }
+        } catch {
+            let endedAt = Date()
+            let log = codexLogText(
+                command: commandText,
+                startedAt: startedAt,
+                endedAt: endedAt,
+                exitCode: nil,
+                output: error.localizedDescription
+            )
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try? log.write(to: transcriptURL, atomically: true, encoding: .utf8)
+            if var run {
+                run.status = .failed
+                run.summary = "\(summary) failed"
+                run.endedAt = endedAt
+                try? repository.upsert(run: run)
+            }
+            if let sessionLink {
+                try? repository.updateCodexSessionLink(
+                    id: sessionLink.id,
+                    status: .failed,
+                    lastSeenAt: endedAt,
+                    lastSummary: error.localizedDescription,
+                    transcriptPath: transcriptURL.path
+                )
+            }
+            try? reloadRunsAndArtifacts()
+            selectedRunOutput = log
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func codexWorkspacePath(project: Project, task: FactoryTask?) -> String {
+        selectedCodexProjectLink?.workspacePath
+            ?? task?.codexWorktreePath
+            ?? task?.localWorktreePath
+            ?? project.path
+    }
+
+    private func codexMode(workspacePath: String, project: Project) -> CodexExecutionMode {
+        if workspacePath == project.path {
+            return .local
+        }
+        if workspacePath.contains("/.factory/worktrees/") {
+            return .worktree
+        }
+        return .unknown
+    }
+
+    private func codexLogText(command: String, startedAt: Date, endedAt: Date, exitCode: Int?, output: String) -> String {
+        """
+        Command: \(command)
+        Started: \(DateCoding.string(from: startedAt))
+        Ended: \(DateCoding.string(from: endedAt))
+        Exit code: \(exitCode.map(String.init) ?? "unavailable")
+
+        \(output)
+        """
     }
 
     private func perform(_ body: () throws -> Void) {

@@ -51,6 +51,50 @@ public final class FactoryRepository {
         try database.execute("DELETE FROM projects WHERE id = ?;", binds: [.text(id)])
     }
 
+    public func upsert(codexProjectLink link: CodexProjectLink) throws {
+        try database.execute(
+            """
+            INSERT INTO codex_project_links (
+              id, project_id, workspace_path, preferred_mode, preferred_model, preferred_reasoning, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+              workspace_path = excluded.workspace_path,
+              preferred_mode = excluded.preferred_mode,
+              preferred_model = excluded.preferred_model,
+              preferred_reasoning = excluded.preferred_reasoning,
+              updated_at = excluded.updated_at;
+            """,
+            binds: [
+                .text(link.id),
+                .text(link.projectId),
+                .text(link.workspacePath),
+                .text(link.preferredMode.rawValue),
+                .text(link.preferredModel),
+                .text(link.preferredReasoning),
+                .text(DateCoding.string(from: link.createdAt)),
+                .text(DateCoding.string(from: link.updatedAt))
+            ]
+        )
+    }
+
+    public func codexProjectLink(projectId: String) throws -> CodexProjectLink? {
+        let rows = try database.query(
+            """
+            SELECT id, project_id, workspace_path, preferred_mode, preferred_model, preferred_reasoning, created_at, updated_at
+            FROM codex_project_links
+            WHERE project_id = ?
+            LIMIT 1;
+            """,
+            binds: [.text(projectId)]
+        )
+        return rows.first.map(codexProjectLink(from:))
+    }
+
+    public func deleteCodexProjectLink(projectId: String) throws {
+        try database.execute("DELETE FROM codex_project_links WHERE project_id = ?;", binds: [.text(projectId)])
+    }
+
     public func tasks(projectId: String? = nil) throws -> [FactoryTask] {
         let rows: [[String: String?]]
         if let projectId {
@@ -122,6 +166,119 @@ public final class FactoryRepository {
 
     public func deleteTask(id: String) throws {
         try database.execute("DELETE FROM tasks WHERE id = ?;", binds: [.text(id)])
+    }
+
+    public func upsert(codexSessionLink link: CodexSessionLink) throws {
+        try database.execute(
+            """
+            INSERT INTO codex_session_links (
+              id, project_id, task_id, codex_session_id, workspace_path, mode, branch_name, worktree_path,
+              status, last_seen_at, last_summary, transcript_path, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(codex_session_id) DO UPDATE SET
+              project_id = excluded.project_id,
+              task_id = excluded.task_id,
+              workspace_path = excluded.workspace_path,
+              mode = excluded.mode,
+              branch_name = excluded.branch_name,
+              worktree_path = excluded.worktree_path,
+              status = excluded.status,
+              last_seen_at = excluded.last_seen_at,
+              last_summary = excluded.last_summary,
+              transcript_path = excluded.transcript_path,
+              updated_at = excluded.updated_at;
+            """,
+            binds: [
+                .text(link.id),
+                .text(link.projectId),
+                .text(link.taskId),
+                .text(link.codexSessionId),
+                .text(link.workspacePath),
+                .text(link.mode.rawValue),
+                .text(link.branchName),
+                .text(link.worktreePath),
+                .text(link.status.rawValue),
+                .text(link.lastSeenAt.map(DateCoding.string(from:))),
+                .text(link.lastSummary),
+                .text(link.transcriptPath),
+                .text(DateCoding.string(from: link.createdAt)),
+                .text(DateCoding.string(from: link.updatedAt))
+            ]
+        )
+    }
+
+    public func codexSessionLinks(projectId: String) throws -> [CodexSessionLink] {
+        let rows = try database.query(
+            """
+            SELECT id, project_id, task_id, codex_session_id, workspace_path, mode, branch_name, worktree_path,
+                   status, last_seen_at, last_summary, transcript_path, created_at, updated_at
+            FROM codex_session_links
+            WHERE project_id = ?
+            ORDER BY updated_at DESC, created_at DESC;
+            """,
+            binds: [.text(projectId)]
+        )
+        return rows.map(codexSessionLink(from:))
+    }
+
+    public func codexSessionLinks(taskId: String) throws -> [CodexSessionLink] {
+        let rows = try database.query(
+            """
+            SELECT id, project_id, task_id, codex_session_id, workspace_path, mode, branch_name, worktree_path,
+                   status, last_seen_at, last_summary, transcript_path, created_at, updated_at
+            FROM codex_session_links
+            WHERE task_id = ?
+            ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, updated_at DESC, created_at DESC;
+            """,
+            binds: [.text(taskId)]
+        )
+        return rows.map(codexSessionLink(from:))
+    }
+
+    public func latestCodexSessionLink(taskId: String) throws -> CodexSessionLink? {
+        try codexSessionLinks(taskId: taskId).first
+    }
+
+    public func updateCodexSessionLink(
+        id: String,
+        status: CodexSessionStatus,
+        lastSeenAt: Date?,
+        lastSummary: String?,
+        transcriptPath: String?
+    ) throws {
+        try database.execute(
+            """
+            UPDATE codex_session_links
+            SET status = ?,
+                last_seen_at = ?,
+                last_summary = ?,
+                transcript_path = ?,
+                updated_at = ?
+            WHERE id = ?;
+            """,
+            binds: [
+                .text(status.rawValue),
+                .text(lastSeenAt.map(DateCoding.string(from:))),
+                .text(lastSummary),
+                .text(transcriptPath),
+                .text(DateCoding.string(from: Date())),
+                .text(id)
+            ]
+        )
+    }
+
+    public func detachCodexSessionLinkFromTask(id: String) throws {
+        try database.execute(
+            """
+            UPDATE codex_session_links
+            SET task_id = NULL,
+                status = 'paused',
+                updated_at = ?
+            WHERE id = ?;
+            """,
+            binds: [.text(DateCoding.string(from: Date())), .text(id)]
+        )
     }
 
     public func runs(taskId: String) throws -> [RunRecord] {
@@ -292,6 +449,19 @@ public final class FactoryRepository {
         )
     }
 
+    private func codexProjectLink(from row: [String: String?]) -> CodexProjectLink {
+        CodexProjectLink(
+            id: row.required("id"),
+            projectId: row.required("project_id"),
+            workspacePath: row.required("workspace_path"),
+            preferredMode: CodexExecutionMode(rawValue: row.optional("preferred_mode") ?? "") ?? .unknown,
+            preferredModel: row.optional("preferred_model"),
+            preferredReasoning: row.optional("preferred_reasoning"),
+            createdAt: DateCoding.date(from: row.required("created_at")),
+            updatedAt: DateCoding.date(from: row.required("updated_at"))
+        )
+    }
+
     private func task(from row: [String: String?]) -> FactoryTask {
         FactoryTask(
             id: row.required("id"),
@@ -329,6 +499,25 @@ public final class FactoryRepository {
             summary: row.optional("summary") ?? "",
             startedAt: DateCoding.date(from: row.required("started_at")),
             endedAt: endedAt
+        )
+    }
+
+    private func codexSessionLink(from row: [String: String?]) -> CodexSessionLink {
+        CodexSessionLink(
+            id: row.required("id"),
+            projectId: row.required("project_id"),
+            taskId: row.optional("task_id"),
+            codexSessionId: row.required("codex_session_id"),
+            workspacePath: row.required("workspace_path"),
+            mode: CodexExecutionMode(rawValue: row.optional("mode") ?? "") ?? .unknown,
+            branchName: row.optional("branch_name"),
+            worktreePath: row.optional("worktree_path"),
+            status: CodexSessionStatus(rawValue: row.optional("status") ?? "") ?? .unknown,
+            lastSeenAt: row.optional("last_seen_at").map(DateCoding.date(from:)),
+            lastSummary: row.optional("last_summary"),
+            transcriptPath: row.optional("transcript_path"),
+            createdAt: DateCoding.date(from: row.required("created_at")),
+            updatedAt: DateCoding.date(from: row.required("updated_at"))
         )
     }
 

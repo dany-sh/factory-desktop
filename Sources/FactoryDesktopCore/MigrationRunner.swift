@@ -193,6 +193,45 @@ public final class MigrationRunner {
             ), '')
             WHERE project_id IS NULL OR project_id = '';
             """
+        ),
+        Migration(
+            version: 4,
+            name: "codex_project_session_links",
+            sql: """
+            CREATE TABLE IF NOT EXISTS codex_project_links (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL UNIQUE,
+              workspace_path TEXT NOT NULL,
+              preferred_mode TEXT NOT NULL DEFAULT 'unknown',
+              preferred_model TEXT,
+              preferred_reasoning TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS codex_session_links (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              task_id TEXT,
+              codex_session_id TEXT NOT NULL UNIQUE,
+              workspace_path TEXT NOT NULL,
+              mode TEXT NOT NULL DEFAULT 'unknown',
+              branch_name TEXT,
+              worktree_path TEXT,
+              status TEXT NOT NULL DEFAULT 'unknown',
+              last_seen_at TEXT,
+              last_summary TEXT,
+              transcript_path TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_codex_session_links_project_id ON codex_session_links(project_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_codex_session_links_task_id ON codex_session_links(task_id, updated_at DESC);
+            """
         )
     ]
 }
