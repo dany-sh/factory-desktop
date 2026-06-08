@@ -19,6 +19,7 @@ public final class AppStore: ObservableObject {
     @Published public private(set) var selectedCodexProjectLink: CodexProjectLink?
     @Published public private(set) var selectedTaskCodexSessionLink: CodexSessionLink?
     @Published public private(set) var codexSessionLinks: [CodexSessionLink] = []
+    @Published public private(set) var latestCodexSessionRecommendation: CodexSessionResultRecommendation?
     @Published public private(set) var buildInfo: BuildInfo
     @Published public var selectedRunOutput: String = ""
     @Published public var statusMessage: String = ""
@@ -159,11 +160,14 @@ public final class AppStore: ObservableObject {
         return "Create a task worktree before planning this code task."
     }
 
-    public init(paths: FactoryPaths = FactoryPaths()) {
+    public init(
+        paths: FactoryPaths = FactoryPaths(),
+        codexCLIService: CodexCLIService? = nil
+    ) {
         self.paths = paths
         self.buildInfo = BuildInfoService.current(launchTimestamp: Date())
         self.commandRunner = CommandRunner()
-        self.codexCLIService = CodexCLIService(commandRunner: commandRunner)
+        self.codexCLIService = codexCLIService ?? CodexCLIService(commandRunner: commandRunner)
         self.ollamaClient = OllamaClient()
         self.handoffService = HandoffService(paths: paths)
 
@@ -232,6 +236,7 @@ public final class AppStore: ObservableObject {
         latestLifecycleReport = nil
         latestTaskStateReview = nil
         latestLifecycleSyncResult = nil
+        latestCodexSessionRecommendation = nil
         Task { await refreshGitStatus() }
         do {
             try reloadRunsAndArtifacts()
@@ -247,6 +252,7 @@ public final class AppStore: ObservableObject {
         latestLifecycleReport = nil
         latestTaskStateReview = nil
         latestLifecycleSyncResult = nil
+        latestCodexSessionRecommendation = nil
         Task { await refreshGitStatus() }
         do {
             try reloadRunsAndArtifacts()
@@ -1048,10 +1054,12 @@ public final class AppStore: ObservableObject {
         }
         let workspacePath = selectedCodexProjectLink?.workspacePath ?? project.path
         await runCodexCommand(
+            kind: .openProject,
             summary: "Open Codex project",
             commandText: "codex app \(workspacePath)",
             transcriptPrefix: "codex-open-project",
-            sessionLink: selectedTaskCodexSessionLink
+            sessionLink: selectedTaskCodexSessionLink,
+            successfulStatus: .active
         ) {
             try await self.codexCLIService.openApp(workspacePath: workspacePath)
         }
@@ -1063,10 +1071,12 @@ public final class AppStore: ObservableObject {
             return
         }
         await runCodexCommand(
+            kind: .resumeSession,
             summary: "Resume Codex session",
             commandText: "codex resume \(link.codexSessionId)",
             transcriptPrefix: "codex-resume-session",
-            sessionLink: link
+            sessionLink: link,
+            successfulStatus: .active
         ) {
             try await self.codexCLIService.resume(sessionId: link.codexSessionId)
         }
@@ -1105,11 +1115,12 @@ public final class AppStore: ObservableObject {
             return
         }
         await runCodexCommand(
+            kind: .sessionCheck,
             summary: "Codex session state check",
             commandText: "codex exec resume \(link.codexSessionId)",
             transcriptPrefix: "codex-session-check",
             sessionLink: link,
-            completedStatusOnSuccess: .completed
+            successfulStatus: .completed
         ) {
             try await self.codexCLIService.execResume(
                 sessionId: link.codexSessionId,
@@ -1645,11 +1656,12 @@ public final class AppStore: ObservableObject {
     }
 
     private func runCodexCommand(
+        kind: CodexSessionCommandKind,
         summary: String,
         commandText: String,
         transcriptPrefix: String,
         sessionLink: CodexSessionLink?,
-        completedStatusOnSuccess: CodexSessionStatus = .active,
+        successfulStatus: CodexSessionStatus,
         operation: @escaping () async throws -> CommandResult
     ) async {
         guard let repository, let project = selectedProject else {
@@ -1683,7 +1695,7 @@ public final class AppStore: ObservableObject {
                     status: .running,
                     command: commandText,
                     outputPath: transcriptURL.path,
-                    summary: summary,
+                    summary: "\(kind.displayName): \(summary)",
                     startedAt: startedAt
                 )
                 try repository.upsert(run: created)
@@ -1694,18 +1706,25 @@ public final class AppStore: ObservableObject {
             let result = try await operation()
             let endedAt = Date()
             let log = codexLogText(
+                kind: kind,
                 command: result.command,
                 startedAt: startedAt,
                 endedAt: endedAt,
                 exitCode: Int(result.exitCode),
-                output: result.output
+                standardOutput: result.standardOutput,
+                standardError: result.standardError
             )
             try log.write(to: transcriptURL, atomically: true, encoding: .utf8)
+            let importedStatus = CodexSessionResultImporter.status(for: result, successfulStatus: successfulStatus)
+            let importedSummary = CodexSessionResultImporter.shortSummary(
+                from: result,
+                fallback: result.succeeded ? "\(summary) completed." : "\(summary) failed."
+            )
 
             if var run {
-                run.status = result.succeeded ? .succeeded : .failed
+                run.status = importedStatus == .failed ? .failed : .succeeded
                 run.exitCode = Int(result.exitCode)
-                run.summary = result.succeeded ? "\(summary) completed" : "\(summary) failed"
+                run.summary = "\(kind.displayName): \(importedSummary)"
                 run.endedAt = endedAt
                 try repository.upsert(run: run)
             }
@@ -1713,27 +1732,36 @@ public final class AppStore: ObservableObject {
             if let sessionLink {
                 try repository.updateCodexSessionLink(
                     id: sessionLink.id,
-                    status: result.succeeded ? completedStatusOnSuccess : .failed,
+                    status: importedStatus,
                     lastSeenAt: endedAt,
-                    lastSummary: result.succeeded ? "\(summary) completed." : "\(summary) failed.",
+                    lastSummary: importedSummary,
                     transcriptPath: transcriptURL.path
                 )
             }
 
             try reloadRunsAndArtifacts()
             selectedRunOutput = log
-            statusMessage = result.succeeded ? "\(summary) completed." : "\(summary) failed."
-            if !result.succeeded {
+            if result.succeeded, importedStatus != .failed {
+                await refreshCodexLifecycleBridge(project: project, task: task, result: result)
+            }
+            statusMessage = importedStatus == .failed ? "\(summary) failed." : "\(summary) completed."
+            if importedStatus == .failed {
+                latestCodexSessionRecommendation = CodexSessionResultRecommendation(
+                    action: .needsManualReview,
+                    reason: "\(summary) failed. Review the Codex transcript before continuing."
+                )
                 errorMessage = result.output.isEmpty ? "\(summary) failed." : result.output
             }
         } catch {
             let endedAt = Date()
             let log = codexLogText(
+                kind: kind,
                 command: commandText,
                 startedAt: startedAt,
                 endedAt: endedAt,
                 exitCode: nil,
-                output: error.localizedDescription
+                standardOutput: "",
+                standardError: error.localizedDescription
             )
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try? log.write(to: transcriptURL, atomically: true, encoding: .utf8)
@@ -1754,6 +1782,10 @@ public final class AppStore: ObservableObject {
             }
             try? reloadRunsAndArtifacts()
             selectedRunOutput = log
+            latestCodexSessionRecommendation = CodexSessionResultRecommendation(
+                action: .needsManualReview,
+                reason: "\(summary) failed before lifecycle facts could be refreshed."
+            )
             errorMessage = error.localizedDescription
         }
     }
@@ -1775,14 +1807,109 @@ public final class AppStore: ObservableObject {
         return .unknown
     }
 
-    private func codexLogText(command: String, startedAt: Date, endedAt: Date, exitCode: Int?, output: String) -> String {
+    private func refreshCodexLifecycleBridge(project: Project, task: FactoryTask?, result: CommandResult) async {
+        guard let task else {
+            latestCodexSessionRecommendation = CodexSessionResultRecommendation(
+                action: .noAction,
+                reason: "Codex command completed at the project level."
+            )
+            return
+        }
+        guard let repository else {
+            latestCodexSessionRecommendation = CodexSessionResultRecommendation(
+                action: .needsManualReview,
+                reason: "Repository state was unavailable after the Codex command."
+            )
+            return
+        }
+
+        do {
+            if let gitService {
+                gitSnapshot = try await gitService.snapshot(project: project, task: task)
+            }
+            let facts = try await taskLifecycleFacts(project: project, task: task, repository: repository)
+            let evaluation = TaskLifecycleService.evaluate(facts)
+            latestCodexSessionRecommendation = codexRecommendation(
+                result: result,
+                gitSnapshot: gitSnapshot,
+                latestTestStatus: facts.latestTestStatus,
+                lifecycleEvaluation: evaluation,
+                currentStatus: task.status
+            )
+            latestLifecycleReport = nil
+        } catch {
+            latestCodexSessionRecommendation = CodexSessionResultRecommendation(
+                action: .needsManualReview,
+                reason: "Codex command completed, but lifecycle facts could not be refreshed: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func codexRecommendation(
+        result: CommandResult,
+        gitSnapshot: GitSnapshot,
+        latestTestStatus: WorkflowCheckStatus?,
+        lifecycleEvaluation: TaskLifecycleEvaluation,
+        currentStatus: TaskStatus
+    ) -> CodexSessionResultRecommendation {
+        if CodexSessionResultImporter.containsClearFailure(result.output) {
+            return CodexSessionResultRecommendation(
+                action: .needsManualReview,
+                reason: "Codex output contains a failure signal."
+            )
+        }
+        if !gitSnapshot.changedFiles.isEmpty {
+            if latestTestStatus == .passed {
+                return CodexSessionResultRecommendation(
+                    action: .reviewDiff,
+                    reason: "Git changes are present and latest tests passed."
+                )
+            }
+            return CodexSessionResultRecommendation(
+                action: .runTests,
+                reason: "Git changes are present after Codex activity."
+            )
+        }
+        if lifecycleEvaluation.isAutomaticSafe,
+           lifecycleEvaluation.recommendedStatus != currentStatus {
+            return CodexSessionResultRecommendation(
+                action: .syncLifecycle,
+                reason: "Lifecycle evaluation has a safe status recommendation."
+            )
+        }
+        if lifecycleEvaluation.requiredManualReview {
+            return CodexSessionResultRecommendation(
+                action: .needsManualReview,
+                reason: lifecycleEvaluation.reason
+            )
+        }
+        return CodexSessionResultRecommendation(
+            action: .noAction,
+            reason: "No Git changes or lifecycle updates were detected."
+        )
+    }
+
+    private func codexLogText(
+        kind: CodexSessionCommandKind,
+        command: String,
+        startedAt: Date,
+        endedAt: Date,
+        exitCode: Int?,
+        standardOutput: String,
+        standardError: String
+    ) -> String {
         """
+        Kind: \(kind.rawValue)
         Command: \(command)
         Started: \(DateCoding.string(from: startedAt))
         Ended: \(DateCoding.string(from: endedAt))
         Exit code: \(exitCode.map(String.init) ?? "unavailable")
 
-        \(output)
+        stdout:
+        \(standardOutput.isEmpty ? "(empty)" : standardOutput)
+
+        stderr:
+        \(standardError.isEmpty ? "(empty)" : standardError)
         """
     }
 

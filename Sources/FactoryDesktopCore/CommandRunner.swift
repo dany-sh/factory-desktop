@@ -29,14 +29,29 @@ public struct CommandRequest: Equatable {
 public struct CommandResult: Equatable {
     public var command: String
     public var exitCode: Int32
-    public var output: String
+    public var standardOutput: String
+    public var standardError: String
+
+    public var output: String {
+        [standardOutput, standardError]
+            .filter { !$0.isEmpty }
+            .joined(separator: standardOutput.isEmpty || standardError.isEmpty ? "" : "\n")
+    }
 
     public var succeeded: Bool { exitCode == 0 }
 
     public init(command: String, exitCode: Int32, output: String) {
         self.command = command
         self.exitCode = exitCode
-        self.output = output
+        self.standardOutput = output
+        self.standardError = ""
+    }
+
+    public init(command: String, exitCode: Int32, standardOutput: String, standardError: String) {
+        self.command = command
+        self.exitCode = exitCode
+        self.standardOutput = standardOutput
+        self.standardError = standardError
     }
 }
 
@@ -55,8 +70,9 @@ public final class CommandRunner {
             }
 
             let outputPipe = Pipe()
+            let errorPipe = Pipe()
             process.standardOutput = outputPipe
-            process.standardError = outputPipe
+            process.standardError = errorPipe
             let inputPipe: Pipe?
             if request.standardInput != nil {
                 let pipe = Pipe()
@@ -70,15 +86,23 @@ public final class CommandRunner {
             let outputTask = Task {
                 outputPipe.fileHandleForReading.readDataToEndOfFile()
             }
+            let errorTask = Task {
+                errorPipe.fileHandleForReading.readDataToEndOfFile()
+            }
             if let standardInput = request.standardInput, let inputPipe {
                 inputPipe.fileHandleForWriting.write(Data(standardInput.utf8))
                 try? inputPipe.fileHandleForWriting.close()
             }
             process.waitUntilExit()
 
-            let data = await outputTask.value
-            let output = String(data: data, encoding: .utf8) ?? ""
-            return CommandResult(command: request.displayString, exitCode: process.terminationStatus, output: output)
+            let outputData = await outputTask.value
+            let errorData = await errorTask.value
+            return CommandResult(
+                command: request.displayString,
+                exitCode: process.terminationStatus,
+                standardOutput: String(data: outputData, encoding: .utf8) ?? "",
+                standardError: String(data: errorData, encoding: .utf8) ?? ""
+            )
         }.value
     }
 

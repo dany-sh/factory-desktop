@@ -295,6 +295,58 @@ public enum CodexSessionStatus: String, CaseIterable, Codable, Identifiable, Sen
     }
 }
 
+public enum CodexSessionCommandKind: String, CaseIterable, Codable, Identifiable, Sendable {
+    case openProject = "open_project"
+    case resumeSession = "resume_session"
+    case sessionCheck = "session_check"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .openProject: "Open Project"
+        case .resumeSession: "Resume Session"
+        case .sessionCheck: "Session Check"
+        }
+    }
+}
+
+public enum CodexSessionRecommendedAction: String, CaseIterable, Codable, Identifiable, Sendable {
+    case reviewDiff = "review_diff"
+    case runTests = "run_tests"
+    case syncLifecycle = "sync_lifecycle"
+    case needsManualReview = "needs_manual_review"
+    case noAction = "no_action"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .reviewDiff: "Review Diff"
+        case .runTests: "Run Tests"
+        case .syncLifecycle: "Sync Lifecycle"
+        case .needsManualReview: "Needs Manual Review"
+        case .noAction: "No Action"
+        }
+    }
+}
+
+public struct CodexSessionResultRecommendation: Equatable, Sendable {
+    public var action: CodexSessionRecommendedAction
+    public var reason: String
+    public var createdAt: Date
+
+    public init(
+        action: CodexSessionRecommendedAction,
+        reason: String,
+        createdAt: Date = Date()
+    ) {
+        self.action = action
+        self.reason = reason
+        self.createdAt = createdAt
+    }
+}
+
 public struct CodexProjectLink: Identifiable, Equatable, Codable, Sendable {
     public var id: String
     public var projectId: String

@@ -126,6 +126,10 @@ struct InspectorView: View {
                         if let summary = session.lastSummary, !summary.isEmpty {
                             InfoRow(label: "Summary", value: summary)
                         }
+                        if let recommendation = store.latestCodexSessionRecommendation {
+                            InfoRow(label: "Next", value: recommendation.action.displayName)
+                            InfoRow(label: "Reason", value: recommendation.reason)
+                        }
                         HStack {
                             Button {
                                 Task { await store.resumeSelectedTaskCodexSession() }

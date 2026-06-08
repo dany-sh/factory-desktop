@@ -1708,6 +1708,102 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(storedSession.status, .active)
     }
 
+    @MainActor
+    func testSuccessfulCodexCommandCreatesRunRecordAndSummary() async throws {
+        let fixture = try makeCodexStoreFixture { request in
+            CommandResult(
+                command: request.displayString,
+                exitCode: 0,
+                standardOutput: "Reviewed current worktree and found changes ready for inspection.\nNext: review diff.\n",
+                standardError: "minor warning\n"
+            )
+        }
+
+        fixture.store.attachCodexSessionToSelectedTask(sessionId: "session-123")
+        await fixture.store.resumeSelectedTaskCodexSession()
+
+        let runs = try fixture.repository.runs(taskId: fixture.task.id)
+        let run = try XCTUnwrap(runs.first)
+        let session = try XCTUnwrap(fixture.repository.latestCodexSessionLink(taskId: fixture.task.id))
+        let log = try XCTUnwrap(run.outputPath).withFileContents()
+
+        XCTAssertEqual(run.executor, "codex_cli")
+        XCTAssertEqual(run.status, .succeeded)
+        XCTAssertEqual(run.exitCode, 0)
+        XCTAssertTrue(run.summary.contains("Resume Session"))
+        XCTAssertTrue(log.contains("stdout:"))
+        XCTAssertTrue(log.contains("stderr:"))
+        XCTAssertEqual(session.status, .active)
+        XCTAssertEqual(session.lastSummary, "Reviewed current worktree and found changes ready for inspection.")
+        XCTAssertNotNil(session.lastSeenAt)
+    }
+
+    @MainActor
+    func testFailedCodexCommandCreatesFailedRunAndSessionStatus() async throws {
+        let fixture = try makeCodexStoreFixture { request in
+            CommandResult(
+                command: request.displayString,
+                exitCode: 2,
+                standardOutput: "",
+                standardError: "error: session not found\n"
+            )
+        }
+
+        fixture.store.attachCodexSessionToSelectedTask(sessionId: "session-123")
+        await fixture.store.resumeSelectedTaskCodexSession()
+
+        let run = try XCTUnwrap(fixture.repository.runs(taskId: fixture.task.id).first)
+        let session = try XCTUnwrap(fixture.repository.latestCodexSessionLink(taskId: fixture.task.id))
+
+        XCTAssertEqual(run.status, .failed)
+        XCTAssertEqual(run.exitCode, 2)
+        XCTAssertEqual(session.status, .failed)
+        XCTAssertEqual(session.lastSummary, "error: session not found")
+        XCTAssertEqual(fixture.store.latestCodexSessionRecommendation?.action, .needsManualReview)
+    }
+
+    @MainActor
+    func testCodexOutputDoesNotDirectlyChangeTaskStatusOrLifecycleSync() async throws {
+        let fixture = try makeCodexStoreFixture(taskStatus: .readyForReview) { request in
+            CommandResult(
+                command: request.displayString,
+                exitCode: 0,
+                standardOutput: "Task appears complete and ready to close.\n",
+                standardError: ""
+            )
+        }
+
+        fixture.store.attachCodexSessionToSelectedTask(sessionId: "session-123")
+        await fixture.store.runSelectedTaskCodexSessionCheck()
+
+        let storedTask = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first)
+        let events = try fixture.repository.taskEvents(taskId: fixture.task.id)
+        let session = try XCTUnwrap(fixture.repository.latestCodexSessionLink(taskId: fixture.task.id))
+
+        XCTAssertEqual(storedTask.status, .readyForReview)
+        XCTAssertEqual(events, [])
+        XCTAssertNil(fixture.store.latestLifecycleSyncResult)
+        XCTAssertEqual(session.status, .completed)
+    }
+
+    @MainActor
+    func testMalformedOrMissingCodexSessionIDIsSafe() async throws {
+        let fixture = try makeCodexStoreFixture { request in
+            CommandResult(command: request.displayString, exitCode: 0, output: "should not run")
+        }
+
+        fixture.store.attachCodexSessionToSelectedTask(sessionId: "")
+        XCTAssertNil(try fixture.repository.latestCodexSessionLink(taskId: fixture.task.id))
+        XCTAssertEqual(try fixture.repository.runs(taskId: fixture.task.id), [])
+
+        fixture.store.attachCodexSessionToSelectedTask(sessionId: "bad;rm")
+        XCTAssertNil(try fixture.repository.latestCodexSessionLink(taskId: fixture.task.id))
+        XCTAssertEqual(try fixture.repository.runs(taskId: fixture.task.id), [])
+
+        await fixture.store.resumeSelectedTaskCodexSession()
+        XCTAssertEqual(try fixture.repository.runs(taskId: fixture.task.id), [])
+    }
+
     private func XCTAssertTaskStateRecommendation(
         _ expected: TaskStateRecommendedAction,
         for input: TaskStateRecommendationInput,
@@ -1725,6 +1821,38 @@ final class FactoryDesktopCoreTests: XCTestCase {
         let database = try SQLiteDatabase(url: paths.database)
         try MigrationRunner(database: database, paths: paths).migrate()
         return (root, paths, FactoryRepository(database: database))
+    }
+
+    @MainActor
+    private func makeCodexStoreFixture(
+        taskStatus: TaskStatus = .approved,
+        runCommand: @escaping (CommandRequest) async throws -> CommandResult
+    ) throws -> CodexStoreFixture {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
+        let task = FactoryTask(
+            id: "task",
+            projectId: project.id,
+            title: "Codex session task",
+            status: taskStatus,
+            localWorktreePath: fixture.root.path
+        )
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        let service = CodexCLIService(runCommand: runCommand)
+        let store = AppStore(paths: fixture.paths, codexCLIService: service)
+        store.selectedProjectID = project.id
+        store.selectedTaskID = task.id
+        try store.reloadRunsAndArtifacts()
+        return CodexStoreFixture(
+            root: fixture.root,
+            paths: fixture.paths,
+            repository: fixture.repository,
+            store: store,
+            project: project,
+            task: task
+        )
     }
 
     @MainActor
@@ -1899,6 +2027,15 @@ private struct LifecycleSyncFixture {
     var task: FactoryTask
 }
 
+private struct CodexStoreFixture {
+    var root: URL
+    var paths: FactoryPaths
+    var repository: FactoryRepository
+    var store: AppStore
+    var project: Project
+    var task: FactoryTask
+}
+
 private enum LifecycleGitScenario {
     case unmergedCleanLocalBranch
     case mergedCleanLocalBranch
@@ -1913,4 +2050,10 @@ private struct LifecycleGitFixture {
     var codexBranch: String?
     var localWorktreePath: String?
     var codexWorktreePath: String?
+}
+
+private extension String {
+    func withFileContents() throws -> String {
+        try String(contentsOfFile: self, encoding: .utf8)
+    }
 }
