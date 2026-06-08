@@ -25,19 +25,6 @@ struct ContentView: View {
             NewTaskView()
                 .environmentObject(store)
         }
-        .sheet(
-            isPresented: Binding(
-                get: { store.selectedMarkdownDocument != nil },
-                set: { presented in
-                    if !presented {
-                        store.requestCloseMarkdownDocument()
-                    }
-                }
-            )
-        ) {
-            MarkdownViewerEditorView()
-                .environmentObject(store)
-        }
         .alert(
             "Factory Desktop",
             isPresented: Binding(
@@ -50,30 +37,6 @@ struct ContentView: View {
             }
         } message: {
             Text(store.errorMessage ?? "")
-        }
-        .confirmationDialog(
-            "You have unsaved markdown changes.",
-            isPresented: Binding(
-                get: { store.pendingMarkdownDecision != nil },
-                set: { presented in
-                    if !presented {
-                        store.cancelPendingMarkdownDecision()
-                    }
-                }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Save") {
-                store.resolvePendingMarkdownDecision(saveChanges: true)
-            }
-            Button("Discard Changes", role: .destructive) {
-                store.resolvePendingMarkdownDecision(saveChanges: false, discardChanges: true)
-            }
-            Button("Cancel", role: .cancel) {
-                store.resolvePendingMarkdownDecision(saveChanges: nil)
-            }
-        } message: {
-            Text("Save, discard, or cancel before switching documents or closing the viewer.")
         }
         .task {
             await store.refreshGitStatus()

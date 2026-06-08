@@ -3,6 +3,7 @@ import SwiftUI
 
 struct LifecycleCleanupView: View {
     @EnvironmentObject private var store: AppStore
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -219,6 +220,7 @@ private struct CleanupPresentationGroupView: View {
 
 private struct ArtifactWasteGroupRow: View {
     @EnvironmentObject private var store: AppStore
+    @Environment(\.openWindow) private var openWindow
     var group: ArtifactWasteGroup
     @State private var isExpanded = false
 
@@ -235,7 +237,7 @@ private struct ArtifactWasteGroupRow: View {
                             .textSelection(.enabled)
                         if AppStore.isMarkdownPath(item.path) {
                             Button("Open in Markdown Viewer") {
-                                store.requestOpenMarkdownFile(path: item.path)
+                                openWindow(id: "markdown-document", value: AppStore.normalizedMarkdownPath(item.path))
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)

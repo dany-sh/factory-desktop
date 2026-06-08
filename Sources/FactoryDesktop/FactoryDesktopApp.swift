@@ -21,6 +21,24 @@ struct FactoryDesktopApp: App {
         .windowStyle(.titleBar)
         .defaultSize(width: 1200, height: 800)
         .windowResizability(.contentMinSize)
+
+        WindowGroup("Markdown", id: "markdown-document", for: String.self) { documentPathBinding in
+            if let documentPath = documentPathBinding.wrappedValue {
+                MarkdownViewerEditorView(documentPath: documentPath)
+                    .environmentObject(store)
+                    .background(WindowAccessor { window in
+                        FactoryDesktopAppDelegate.activate(window: window)
+                    })
+            } else {
+                ContentUnavailableView(
+                    "No Markdown Document",
+                    systemImage: "doc.text",
+                    description: Text("Choose a markdown file from Factory Desktop to open it in a separate window.")
+                )
+            }
+        }
+        .defaultSize(width: 940, height: 760)
+        .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings") {
@@ -64,7 +82,7 @@ final class FactoryDesktopAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-private struct WindowAccessor: NSViewRepresentable {
+struct WindowAccessor: NSViewRepresentable {
     var onResolve: (NSWindow) -> Void
 
     func makeCoordinator() -> Coordinator {

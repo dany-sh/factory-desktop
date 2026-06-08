@@ -94,7 +94,7 @@ public struct MarkdownDocumentStore {
     }
 
     public func loadDocument(atPath path: String, title: String? = nil) throws -> MarkdownDocument {
-        let normalizedPath = normalized(path)
+        let normalizedPath = Self.normalizedMarkdownPath(path)
         let displayTitle = normalizedTitle(for: normalizedPath, fallback: title)
         let exists = fileManager.fileExists(atPath: normalizedPath)
         let version = fileVersion(atPath: normalizedPath)
@@ -128,7 +128,7 @@ public struct MarkdownDocumentStore {
     }
 
     public func refreshMetadata(for document: MarkdownDocument) -> MarkdownDocument {
-        let normalizedPath = normalized(document.path)
+        let normalizedPath = Self.normalizedMarkdownPath(document.path)
         let exists = fileManager.fileExists(atPath: normalizedPath)
         let version = fileVersion(atPath: normalizedPath)
         let lastModifiedAt = version?.modificationDate
@@ -155,7 +155,7 @@ public struct MarkdownDocumentStore {
     }
 
     public func save(_ document: MarkdownDocument) throws -> MarkdownDocument {
-        let normalizedPath = normalized(document.path)
+        let normalizedPath = Self.normalizedMarkdownPath(document.path)
         guard fileManager.fileExists(atPath: normalizedPath) else {
             throw MarkdownDocumentSaveConflict.fileNotFound(normalizedPath)
         }
@@ -170,7 +170,7 @@ public struct MarkdownDocumentStore {
         return try loadDocument(atPath: normalizedPath, title: document.title)
     }
 
-    private func normalized(_ path: String) -> String {
+    public static func normalizedMarkdownPath(_ path: String) -> String {
         URL(fileURLWithPath: path).standardizedFileURL.path
     }
 

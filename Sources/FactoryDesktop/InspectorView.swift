@@ -3,6 +3,7 @@ import SwiftUI
 
 struct InspectorView: View {
     @EnvironmentObject private var store: AppStore
+    @Environment(\.openWindow) private var openWindow
     @State private var commitMessage = ""
     @State private var codexWorkspacePath = ""
     @State private var codexSessionID = ""
@@ -422,9 +423,9 @@ struct InspectorView: View {
             } else if let artifact = store.latestTaskStateReviewArtifact {
                 InfoRow(label: "Latest artifact", value: artifact.path)
                 Button {
-                    Task { await store.openArtifact(artifact) }
+                    openArtifact(artifact)
                 } label: {
-                    Label("Open Artifact", systemImage: "arrow.up.forward.app")
+                    Label(buttonTitle(for: artifact), systemImage: buttonIcon(for: artifact))
                 }
             } else {
                 Text("Run Review Task State to inspect artifacts and get one recommended next action.")
@@ -669,9 +670,9 @@ struct InspectorView: View {
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                         Button {
-                            Task { await store.openArtifact(artifact) }
+                            openArtifact(artifact)
                         } label: {
-                            Label("Open Artifact", systemImage: "arrow.up.forward.app")
+                            Label(buttonTitle(for: artifact), systemImage: buttonIcon(for: artifact))
                         }
                         .controlSize(.small)
                     }
@@ -679,6 +680,22 @@ struct InspectorView: View {
                 }
             }
         }
+    }
+
+    private func openArtifact(_ artifact: Artifact) {
+        if AppStore.isMarkdownPath(artifact.path) {
+            openWindow(id: "markdown-document", value: AppStore.normalizedMarkdownPath(artifact.path))
+        } else {
+            Task { await store.openArtifact(artifact) }
+        }
+    }
+
+    private func buttonTitle(for artifact: Artifact) -> String {
+        AppStore.isMarkdownPath(artifact.path) ? "Open Markdown" : "Open Artifact"
+    }
+
+    private func buttonIcon(for artifact: Artifact) -> String {
+        AppStore.isMarkdownPath(artifact.path) ? "doc.text" : "arrow.up.forward.app"
     }
 }
 

@@ -10,6 +10,9 @@ let package = Package(
     products: [
         .executable(name: "FactoryDesktop", targets: ["FactoryDesktop"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.1")
+    ],
     targets: [
         .systemLibrary(
             name: "CSQLite",
@@ -23,7 +26,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "FactoryDesktop",
-            dependencies: ["FactoryDesktopCore"]
+            dependencies: [
+                "FactoryDesktopCore",
+                .product(name: "MarkdownUI", package: "swift-markdown-ui")
+            ]
         ),
         .testTarget(
             name: "FactoryDesktopCoreTests",

@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ProjectDashboardView: View {
     @EnvironmentObject private var store: AppStore
+    @Environment(\.openWindow) private var openWindow
     @State private var showActiveTasks = false
     @State private var showArchivedTasks = false
     @State private var projectMarkdownFiles: [ProjectMarkdownFile] = []
@@ -191,7 +192,7 @@ struct ProjectDashboardView: View {
                         }
                         Spacer()
                         Button("Open") {
-                            store.requestOpenMarkdownFile(path: file.path, title: file.name)
+                            openWindow(id: "markdown-document", value: AppStore.normalizedMarkdownPath(file.path))
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)

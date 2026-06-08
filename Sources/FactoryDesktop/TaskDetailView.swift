@@ -3,6 +3,7 @@ import SwiftUI
 
 struct TaskDetailView: View {
     @EnvironmentObject private var store: AppStore
+    @Environment(\.openWindow) private var openWindow
     @State private var draft = TaskDraft()
     @State private var acceptanceText = ""
     @State private var loadedTaskID: String?
@@ -1092,9 +1093,16 @@ struct TaskDetailView: View {
 
     private func artifactPath(_ artifact: Artifact) -> some View {
         Button {
-            Task { await store.openArtifact(artifact) }
+            if AppStore.isMarkdownPath(artifact.path) {
+                openWindow(id: "markdown-document", value: AppStore.normalizedMarkdownPath(artifact.path))
+            } else {
+                Task { await store.openArtifact(artifact) }
+            }
         } label: {
-            Label("Open Artifact", systemImage: "arrow.up.forward.app")
+            Label(
+                AppStore.isMarkdownPath(artifact.path) ? "Open Markdown" : "Open Artifact",
+                systemImage: AppStore.isMarkdownPath(artifact.path) ? "doc.text" : "arrow.up.forward.app"
+            )
         }
         .controlSize(.small)
     }

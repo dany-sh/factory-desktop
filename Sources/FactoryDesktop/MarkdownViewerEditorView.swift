@@ -1,4 +1,6 @@
 import FactoryDesktopCore
+import AppKit
+import MarkdownUI
 import SwiftUI
 
 private enum MarkdownDocumentMode: String, CaseIterable, Identifiable {
@@ -9,8 +11,15 @@ private enum MarkdownDocumentMode: String, CaseIterable, Identifiable {
 }
 
 struct MarkdownViewerEditorView: View {
-    @EnvironmentObject private var store: AppStore
+    let documentPath: String
     @State private var mode: MarkdownDocumentMode = .preview
+    @StateObject private var viewModel: MarkdownDocumentViewModel
+    @State private var window: NSWindow?
+
+    init(documentPath: String) {
+        self.documentPath = documentPath
+        _viewModel = StateObject(wrappedValue: MarkdownDocumentViewModel(path: documentPath))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -18,14 +27,59 @@ struct MarkdownViewerEditorView: View {
             Divider()
             bodyContent
         }
-        .frame(minWidth: 760, minHeight: 520)
+        .frame(minWidth: 820, minHeight: 620)
         .onAppear {
             mode = .preview
-            store.refreshSelectedMarkdownDocumentStatus()
+            viewModel.loadIfNeeded()
         }
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
-            store.refreshSelectedMarkdownDocumentStatus()
+            viewModel.refresh()
         }
+        .confirmationDialog(
+            "You have unsaved markdown changes.",
+            isPresented: Binding(
+                get: { viewModel.pendingDecision != nil },
+                set: { presented in
+                    if !presented {
+                        viewModel.cancelPendingDecision()
+                    }
+                }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Save") {
+                if viewModel.resolvePendingDecision(saveChanges: true) {
+                    closeWindow()
+                }
+            }
+            Button("Discard Changes", role: .destructive) {
+                if viewModel.resolvePendingDecision(saveChanges: false, discardChanges: true) {
+                    closeWindow()
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                _ = viewModel.resolvePendingDecision(saveChanges: nil)
+            }
+        } message: {
+            Text("Save, discard, or cancel before closing this markdown window.")
+        }
+        .alert(
+            "Markdown Document",
+            isPresented: Binding(
+                get: { viewModel.errorMessage != nil },
+                set: { if !$0 { viewModel.errorMessage = nil } }
+            )
+        ) {
+            Button("OK") {
+                viewModel.errorMessage = nil
+            }
+        } message: {
+            Text(viewModel.errorMessage ?? "")
+        }
+        .background(WindowAccessor { resolvedWindow in
+            window = resolvedWindow
+            resolvedWindow.title = document?.title ?? URL(fileURLWithPath: documentPath).lastPathComponent
+        })
     }
 
     private var header: some View {
@@ -49,6 +103,12 @@ struct MarkdownViewerEditorView: View {
                 .pickerStyle(.segmented)
                 .frame(width: 170)
                 .disabled((document?.canEdit == false) && mode == .edit)
+                Button {
+                    viewModel.requestClose()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
             }
 
             HStack(spacing: 8) {
@@ -64,11 +124,11 @@ struct MarkdownViewerEditorView: View {
                 }
                 Spacer()
                 Button("Discard") {
-                    store.discardSelectedMarkdownChanges()
+                    viewModel.discardChanges()
                 }
                 .disabled(document?.isDirty != true)
                 Button("Save") {
-                    _ = store.saveSelectedMarkdownDocument()
+                    _ = viewModel.save()
                 }
                 .keyboardShortcut("s", modifiers: [.command])
                 .disabled(document?.isDirty != true)
@@ -116,7 +176,7 @@ struct MarkdownViewerEditorView: View {
                         description: Text("The markdown file is missing or moved. You can keep the path visible here, but it cannot be read until the file returns.")
                     )
                 } else {
-                    Text(renderedMarkdown(document.text))
+                    Markdown(document.text)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
                 }
@@ -133,8 +193,8 @@ struct MarkdownViewerEditorView: View {
                 preview(document)
             } else {
                 TextEditor(text: Binding(
-                    get: { store.selectedMarkdownDocument?.text ?? "" },
-                    set: { store.updateSelectedMarkdownDraft($0) }
+                    get: { viewModel.document?.text ?? "" },
+                    set: { viewModel.updateText($0) }
                 ))
                 .font(.system(.body, design: .monospaced))
                 .disabled(document.canEdit == false)
@@ -145,17 +205,7 @@ struct MarkdownViewerEditorView: View {
     }
 
     private var document: MarkdownDocument? {
-        store.selectedMarkdownDocument
-    }
-
-    private func renderedMarkdown(_ text: String) -> AttributedString {
-        if let rendered = try? AttributedString(
-            markdown: text,
-            options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .full)
-        ) {
-            return rendered
-        }
-        return AttributedString(text)
+        viewModel.document
     }
 
     private func metadataPill(_ text: String, tint: Color = .secondary) -> some View {
@@ -165,5 +215,9 @@ struct MarkdownViewerEditorView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(tint.opacity(0.12), in: Capsule())
+    }
+
+    private func closeWindow() {
+        window?.performClose(nil)
     }
 }
