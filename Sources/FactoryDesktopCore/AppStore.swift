@@ -1661,6 +1661,7 @@ public final class AppStore: ObservableObject {
         let artifactSummaries = taskStateArtifactSummaries()
         let taskWorktreeSummaries = await taskStateWorktreeSummaries(task: task)
         let canonicalSummary = await canonicalWorktreeSummary(project: project)
+        let gitFacts = await gitService?.taskLifecycleGitFacts(project: project, task: task)
         let missingWorktrees = taskWorktreeSummaries.filter { !$0.exists }
         let hasPlan = artifactSummaries.contains { $0.type == .plan && $0.exists }
         let hasRawPlanReview = artifactSummaries.contains {
@@ -1679,28 +1680,37 @@ public final class AppStore: ObservableObject {
         let hasDiffReviewArtifact = artifactSummaries.contains { $0.type == .localDiffReview && $0.exists }
         let hasFinalReviewArtifact = artifactSummaries.contains { $0.type == .finalReview && $0.exists }
         let hasExistingWorktree = taskWorktreeSummaries.contains { $0.exists }
-        let appearsMerged = task.status == .done || latestPreflightSuggestsArchive()
         let workflowSummaries = WorkflowCheckSummariesBuilder.build(
             project: project,
             runs: try repository.runs(taskId: task.id),
             artifacts: try repository.artifacts(taskId: task.id)
         )
-        let cleanupSafetyState = Self.lifecycleCleanupSafetyState(
+        var cleanupSafetyState = Self.lifecycleCleanupSafetyState(
             hasRiskyPreflight: hasRiskyPreflight,
-            hasExistingWorktree: hasExistingWorktree,
+            hasExistingWorktree: gitFacts?.worktreePathExists ?? hasExistingWorktree,
             hasMissingWorktree: !missingWorktrees.isEmpty,
-            hasImplementationChanges: hasImplementationChanges,
+            hasImplementationChanges: gitFacts?.worktreeIsDirty ?? hasImplementationChanges,
             projectType: project.type
         )
+        if gitFacts?.isAmbiguous == true {
+            cleanupSafetyState = .ambiguous
+        }
+        let branchExists = gitFacts?.branchExists ?? (task.localBranch != nil || task.codexBranch != nil)
+        let worktreeExists = gitFacts?.worktreePathExists ?? hasExistingWorktree
+        let worktreeIsDirty = gitFacts?.worktreeIsDirty ?? (hasExistingWorktree ? hasImplementationChanges : nil)
 
         return TaskLifecycleFacts(
             currentStatus: task.status,
             taskType: task.type,
-            hasBranch: task.localBranch != nil || task.codexBranch != nil,
-            hasWorktree: hasExistingWorktree,
-            worktreeIsDirty: hasExistingWorktree ? hasImplementationChanges : nil,
-            hasCommits: appearsMerged ? true : nil,
-            appearsMergedIntoDefault: appearsMerged,
+            hasBranch: branchExists,
+            hasWorktree: worktreeExists,
+            worktreeIsDirty: worktreeIsDirty,
+            hasCommits: gitFacts?.hasCommits,
+            hasUnmergedCommitsComparedToDefault: gitFacts?.hasUnmergedCommitsComparedToDefault,
+            appearsMergedIntoDefault: gitFacts?.appearsMergedIntoDefault,
+            defaultBranchResolved: gitFacts?.defaultBranchResolved,
+            gitFactSource: gitFacts?.source ?? .none,
+            isGitStateAmbiguous: gitFacts?.isAmbiguous ?? false,
             latestBuildStatus: Self.workflowStatus(.build, in: workflowSummaries),
             latestTestStatus: Self.latestTestStatus(in: workflowSummaries),
             latestVisualQCStatus: Self.workflowStatus(.visualQC, in: workflowSummaries),

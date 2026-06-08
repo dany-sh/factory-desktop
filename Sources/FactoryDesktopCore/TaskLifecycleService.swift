@@ -28,7 +28,11 @@ public struct TaskLifecycleFacts: Equatable, Codable {
     public var hasWorktree: Bool
     public var worktreeIsDirty: Bool?
     public var hasCommits: Bool?
+    public var hasUnmergedCommitsComparedToDefault: Bool?
     public var appearsMergedIntoDefault: Bool?
+    public var defaultBranchResolved: Bool?
+    public var gitFactSource: TaskLifecycleGitFactSource
+    public var isGitStateAmbiguous: Bool
     public var latestBuildStatus: WorkflowCheckStatus?
     public var latestTestStatus: WorkflowCheckStatus?
     public var latestVisualQCStatus: WorkflowCheckStatus?
@@ -50,7 +54,11 @@ public struct TaskLifecycleFacts: Equatable, Codable {
         hasWorktree: Bool = false,
         worktreeIsDirty: Bool? = nil,
         hasCommits: Bool? = nil,
+        hasUnmergedCommitsComparedToDefault: Bool? = nil,
         appearsMergedIntoDefault: Bool? = nil,
+        defaultBranchResolved: Bool? = nil,
+        gitFactSource: TaskLifecycleGitFactSource = .none,
+        isGitStateAmbiguous: Bool = false,
         latestBuildStatus: WorkflowCheckStatus? = nil,
         latestTestStatus: WorkflowCheckStatus? = nil,
         latestVisualQCStatus: WorkflowCheckStatus? = nil,
@@ -71,7 +79,11 @@ public struct TaskLifecycleFacts: Equatable, Codable {
         self.hasWorktree = hasWorktree
         self.worktreeIsDirty = worktreeIsDirty
         self.hasCommits = hasCommits
+        self.hasUnmergedCommitsComparedToDefault = hasUnmergedCommitsComparedToDefault
         self.appearsMergedIntoDefault = appearsMergedIntoDefault
+        self.defaultBranchResolved = defaultBranchResolved
+        self.gitFactSource = gitFactSource
+        self.isGitStateAmbiguous = isGitStateAmbiguous
         self.latestBuildStatus = latestBuildStatus
         self.latestTestStatus = latestTestStatus
         self.latestVisualQCStatus = latestVisualQCStatus
@@ -189,6 +201,19 @@ public enum TaskLifecycleService {
             )
         }
 
+        if facts.isGitStateAmbiguous || facts.defaultBranchResolved == false {
+            let reason = facts.defaultBranchResolved == false
+                ? "Default branch could not be resolved for lifecycle sync."
+                : "Git lifecycle facts are ambiguous."
+            return TaskLifecycleEvaluation(
+                recommendedStatus: facts.currentStatus,
+                recommendedAction: .investigate,
+                reason: reason,
+                isAutomaticSafe: false,
+                requiredManualReview: true
+            )
+        }
+
         if facts.appearsMergedIntoDefault == true {
             if let blockReason = automaticCompletionBlockReason(facts) {
                 return TaskLifecycleEvaluation(
@@ -273,6 +298,15 @@ public enum TaskLifecycleService {
     }
 
     private static func automaticCompletionBlockReason(_ facts: TaskLifecycleFacts) -> String? {
+        if facts.isGitStateAmbiguous {
+            return "Git lifecycle facts are ambiguous."
+        }
+        if facts.defaultBranchResolved == false {
+            return "Default branch could not be resolved."
+        }
+        if facts.hasBranch == false {
+            return "Task branch is missing."
+        }
         if facts.worktreeIsDirty == true {
             return "Worktree has uncommitted changes."
         }

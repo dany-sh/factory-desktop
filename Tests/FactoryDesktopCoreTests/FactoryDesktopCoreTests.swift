@@ -626,13 +626,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
             projectType: .codeRepo,
             taskStatus: .readyForReview,
             commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
-            createWorktree: true
-        )
-        try insertArtifact(
-            type: .preflight,
-            fileName: "preflight.md",
-            text: "Overall recommendation: archive\nMerged to default: yes\n",
-            fixture: fixture
+            gitScenario: .mergedCleanLocalBranch
         )
 
         let maybeResult = await fixture.store.syncSelectedTaskLifecycle()
@@ -739,13 +733,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
             projectType: .codeRepo,
             taskStatus: .readyForReview,
             commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
-            createWorktree: true
-        )
-        try insertArtifact(
-            type: .preflight,
-            fileName: "preflight.md",
-            text: "Overall recommendation: archive\nMerged to default: yes\n",
-            fixture: safe
+            gitScenario: .mergedCleanLocalBranch
         )
         let unsafe = try makeLifecycleSyncFixture(
             projectType: .codeRepo,
@@ -778,13 +766,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
             projectType: .codeRepo,
             taskStatus: .readyForReview,
             commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
-            createWorktree: true
-        )
-        try insertArtifact(
-            type: .preflight,
-            fileName: "preflight.md",
-            text: "Overall recommendation: archive\nMerged to default: yes\n",
-            fixture: fixture
+            gitScenario: .mergedCleanLocalBranch
         )
 
         let maybeFirst = await fixture.store.syncSelectedTaskLifecycle()
@@ -812,6 +794,110 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(event.kind, .statusChangedManually)
         XCTAssertEqual(event.previousStatus, .ready)
         XCTAssertEqual(event.newStatus, .blocked)
+    }
+
+    @MainActor
+    func testLifecycleGitFactsUnmergedBranchCanSyncReadyForReviewWhenCleanReviewedAndTested() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .testing,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
+            gitScenario: .unmergedCleanLocalBranch
+        )
+        try fixture.repository.upsert(run: RunRecord(
+            id: "passing-test",
+            projectId: fixture.project.id,
+            taskId: fixture.task.id,
+            runType: .unitTests,
+            executor: "local_runner",
+            status: .succeeded,
+            command: "printf test",
+            exitCode: 0
+        ))
+        try insertArtifact(type: .localDiffReview, fileName: "diff-review.md", text: "Reviewed.", fixture: fixture)
+
+        let maybeResult = await fixture.store.syncSelectedTaskLifecycle()
+        let result = try XCTUnwrap(maybeResult)
+        let stored = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first)
+
+        XCTAssertTrue(result.didApply)
+        XCTAssertEqual(result.appliedStatus, .readyForReview)
+        XCTAssertEqual(stored.status, .readyForReview)
+        XCTAssertTrue(result.evaluation.isAutomaticSafe)
+    }
+
+    @MainActor
+    func testLifecycleGitFactsDirtyWorktreeBlocksAutomaticSync() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .readyForReview,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
+            gitScenario: .mergedDirtyLocalBranch
+        )
+
+        let maybeResult = await fixture.store.syncSelectedTaskLifecycle()
+        let result = try XCTUnwrap(maybeResult)
+        let stored = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first)
+
+        XCTAssertFalse(result.didApply)
+        XCTAssertFalse(result.evaluation.isAutomaticSafe)
+        XCTAssertEqual(stored.status, .readyForReview)
+        XCTAssertEqual(try fixture.repository.taskEvents(taskId: fixture.task.id), [])
+    }
+
+    @MainActor
+    func testLifecycleGitFactsMissingBranchAndPathRequireManualReview() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .readyForReview,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
+            gitScenario: .missingBranchAndPath
+        )
+
+        let maybeResult = await fixture.store.syncSelectedTaskLifecycle()
+        let result = try XCTUnwrap(maybeResult)
+
+        XCTAssertFalse(result.didApply)
+        XCTAssertFalse(result.evaluation.isAutomaticSafe)
+        XCTAssertTrue(result.evaluation.requiredManualReview)
+        XCTAssertEqual(result.evaluation.recommendedStatus, .readyForReview)
+    }
+
+    @MainActor
+    func testLifecycleGitFactsLocalAndCodexFactsDoNotOverwriteEachOther() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .readyForReview,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
+            gitScenario: .conflictingLocalAndCodexBranches
+        )
+
+        let maybeResult = await fixture.store.syncSelectedTaskLifecycle()
+        let result = try XCTUnwrap(maybeResult)
+
+        XCTAssertFalse(result.didApply)
+        XCTAssertFalse(result.evaluation.isAutomaticSafe)
+        XCTAssertTrue(result.evaluation.requiredManualReview)
+        XCTAssertTrue(result.evaluation.reason.contains("ambiguous"))
+    }
+
+    @MainActor
+    func testLifecycleGitFactsMissingDefaultBranchFallbackIsSafe() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .readyForReview,
+            commandConfiguration: ProjectCommandConfiguration(unitTests: "printf test-ok"),
+            defaultBranch: "trunk",
+            gitScenario: .unmergedCleanLocalBranch
+        )
+
+        let maybeResult = await fixture.store.syncSelectedTaskLifecycle()
+        let result = try XCTUnwrap(maybeResult)
+
+        XCTAssertFalse(result.didApply)
+        XCTAssertFalse(result.evaluation.isAutomaticSafe)
+        XCTAssertTrue(result.evaluation.requiredManualReview)
+        XCTAssertEqual(try fixture.repository.tasks(projectId: fixture.project.id).first?.status, .readyForReview)
     }
 
     func testArchivedTaskHasNoActiveNextAction() {
@@ -1360,17 +1446,22 @@ final class FactoryDesktopCoreTests: XCTestCase {
         projectType: ProjectType,
         taskStatus: TaskStatus,
         commandConfiguration: ProjectCommandConfiguration = ProjectCommandConfiguration(),
+        defaultBranch: String = "main",
         createWorktree: Bool = false,
-        createMissingWorktreeReference: Bool = false
+        createMissingWorktreeReference: Bool = false,
+        gitScenario: LifecycleGitScenario? = nil
     ) throws -> LifecycleSyncFixture {
         let fixture = try makeRepositoryFixture()
+        let gitFixture = try gitScenario.map { try makeLifecycleGitFixture(root: fixture.root, scenario: $0) }
         let worktreeURL = fixture.root.appendingPathComponent("task-worktree", isDirectory: true)
         let missingWorktreeURL = fixture.root.appendingPathComponent("missing-worktree", isDirectory: true)
         if createWorktree {
             try FileManager.default.createDirectory(at: worktreeURL, withIntermediateDirectories: true)
         }
         let taskWorktreePath: String?
-        if createWorktree {
+        if let gitFixture {
+            taskWorktreePath = gitFixture.localWorktreePath
+        } else if createWorktree {
             taskWorktreePath = worktreeURL.path
         } else if createMissingWorktreeReference {
             taskWorktreePath = missingWorktreeURL.path
@@ -1381,7 +1472,8 @@ final class FactoryDesktopCoreTests: XCTestCase {
             id: "project",
             name: "Demo",
             type: projectType,
-            path: fixture.root.path,
+            path: gitFixture?.projectPath ?? fixture.root.path,
+            defaultBranch: defaultBranch,
             commandConfiguration: commandConfiguration
         )
         let task = FactoryTask(
@@ -1389,8 +1481,10 @@ final class FactoryDesktopCoreTests: XCTestCase {
             projectId: project.id,
             title: "Task",
             status: taskStatus,
-            localBranch: taskWorktreePath == nil ? nil : "local/task",
-            localWorktreePath: taskWorktreePath
+            localBranch: gitFixture?.localBranch ?? (taskWorktreePath == nil ? nil : "local/task"),
+            codexBranch: gitFixture?.codexBranch,
+            localWorktreePath: taskWorktreePath,
+            codexWorktreePath: gitFixture?.codexWorktreePath
         )
         try fixture.repository.upsert(project: project)
         try fixture.repository.upsert(task: task)
@@ -1428,6 +1522,86 @@ final class FactoryDesktopCoreTests: XCTestCase {
         try fixture.repository.insert(artifact: artifact)
         return artifact
     }
+
+    private func makeLifecycleGitFixture(root: URL, scenario: LifecycleGitScenario) throws -> LifecycleGitFixture {
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        let localWorktree = root.appendingPathComponent("local-worktree", isDirectory: true)
+        let codexWorktree = root.appendingPathComponent("codex-worktree", isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try runGit(["init", "-b", "main"], in: repo)
+        try runGit(["config", "user.email", "factory@example.test"], in: repo)
+        try runGit(["config", "user.name", "Factory Test"], in: repo)
+        try "base\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "README.md"], in: repo)
+        try runGit(["commit", "-m", "Initial commit"], in: repo)
+
+        let localBranch = "local/task"
+        let codexBranch = "codex/task"
+
+        switch scenario {
+        case .unmergedCleanLocalBranch, .mergedCleanLocalBranch, .mergedDirtyLocalBranch:
+            try runGit(["worktree", "add", "-b", localBranch, localWorktree.path, "main"], in: repo)
+            try appendLine("local change", to: localWorktree.appendingPathComponent("README.md"))
+            try runGit(["add", "README.md"], in: localWorktree)
+            try runGit(["commit", "-m", "Task change"], in: localWorktree)
+            if scenario == .mergedCleanLocalBranch || scenario == .mergedDirtyLocalBranch {
+                try runGit(["merge", "--ff-only", localBranch], in: repo)
+            }
+            if scenario == .mergedDirtyLocalBranch {
+                try appendLine("dirty", to: localWorktree.appendingPathComponent("README.md"))
+            }
+            return LifecycleGitFixture(
+                projectPath: repo.path,
+                localBranch: localBranch,
+                localWorktreePath: localWorktree.path
+            )
+        case .missingBranchAndPath:
+            return LifecycleGitFixture(
+                projectPath: repo.path,
+                localBranch: "local/missing",
+                localWorktreePath: localWorktree.path
+            )
+        case .conflictingLocalAndCodexBranches:
+            try runGit(["worktree", "add", "-b", localBranch, localWorktree.path, "main"], in: repo)
+            try appendLine("local change", to: localWorktree.appendingPathComponent("README.md"))
+            try runGit(["add", "README.md"], in: localWorktree)
+            try runGit(["commit", "-m", "Local task change"], in: localWorktree)
+            try runGit(["merge", "--ff-only", localBranch], in: repo)
+            try runGit(["worktree", "add", "-b", codexBranch, codexWorktree.path, "main"], in: repo)
+            try appendLine("codex change", to: codexWorktree.appendingPathComponent("README.md"))
+            try runGit(["add", "README.md"], in: codexWorktree)
+            try runGit(["commit", "-m", "Codex task change"], in: codexWorktree)
+            return LifecycleGitFixture(
+                projectPath: repo.path,
+                localBranch: localBranch,
+                codexBranch: codexBranch,
+                localWorktreePath: localWorktree.path,
+                codexWorktreePath: codexWorktree.path
+            )
+        }
+    }
+
+    private func appendLine(_ line: String, to url: URL) throws {
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        try (existing + line + "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func runGit(_ arguments: [String], in directory: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git"] + arguments
+        process.currentDirectoryURL = directory
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        if process.terminationStatus != 0 {
+            XCTFail("git \(arguments.joined(separator: " ")) failed: \(output)")
+            throw FactoryError.commandFailed(output)
+        }
+    }
 }
 
 private struct LifecycleSyncFixture {
@@ -1437,4 +1611,20 @@ private struct LifecycleSyncFixture {
     var store: AppStore
     var project: Project
     var task: FactoryTask
+}
+
+private enum LifecycleGitScenario {
+    case unmergedCleanLocalBranch
+    case mergedCleanLocalBranch
+    case mergedDirtyLocalBranch
+    case missingBranchAndPath
+    case conflictingLocalAndCodexBranches
+}
+
+private struct LifecycleGitFixture {
+    var projectPath: String
+    var localBranch: String?
+    var codexBranch: String?
+    var localWorktreePath: String?
+    var codexWorktreePath: String?
 }

@@ -1,5 +1,52 @@
 import Foundation
 
+public enum TaskLifecycleGitFactSource: String, CaseIterable, Codable, Identifiable {
+    case none
+    case repository
+    case localWorktree = "local_worktree"
+    case codexWorktree = "codex_worktree"
+    case localAndCodexWorktrees = "local_and_codex_worktrees"
+
+    public var id: String { rawValue }
+}
+
+public struct TaskLifecycleGitFacts: Equatable, Codable {
+    public var branchExists: Bool
+    public var worktreePathExists: Bool
+    public var worktreeIsDirty: Bool?
+    public var hasCommits: Bool?
+    public var hasUnmergedCommitsComparedToDefault: Bool?
+    public var appearsMergedIntoDefault: Bool?
+    public var defaultBranchResolved: Bool
+    public var source: TaskLifecycleGitFactSource
+    public var isAmbiguous: Bool
+    public var ambiguityReasons: [String]
+
+    public init(
+        branchExists: Bool = false,
+        worktreePathExists: Bool = false,
+        worktreeIsDirty: Bool? = nil,
+        hasCommits: Bool? = nil,
+        hasUnmergedCommitsComparedToDefault: Bool? = nil,
+        appearsMergedIntoDefault: Bool? = nil,
+        defaultBranchResolved: Bool = false,
+        source: TaskLifecycleGitFactSource = .none,
+        isAmbiguous: Bool = false,
+        ambiguityReasons: [String] = []
+    ) {
+        self.branchExists = branchExists
+        self.worktreePathExists = worktreePathExists
+        self.worktreeIsDirty = worktreeIsDirty
+        self.hasCommits = hasCommits
+        self.hasUnmergedCommitsComparedToDefault = hasUnmergedCommitsComparedToDefault
+        self.appearsMergedIntoDefault = appearsMergedIntoDefault
+        self.defaultBranchResolved = defaultBranchResolved
+        self.source = source
+        self.isAmbiguous = isAmbiguous
+        self.ambiguityReasons = ambiguityReasons
+    }
+}
+
 public final class GitService {
     private let commandRunner: CommandRunner
     private let paths: FactoryPaths
@@ -369,6 +416,96 @@ public final class GitService {
         }
     }
 
+    public func taskLifecycleGitFacts(project: Project, task: FactoryTask) async -> TaskLifecycleGitFacts {
+        guard project.type == .codeRepo else {
+            return TaskLifecycleGitFacts(defaultBranchResolved: true)
+        }
+
+        let directory = URL(fileURLWithPath: project.path)
+        guard Self.pathIsExistingDirectory(project.path) else {
+            return TaskLifecycleGitFacts(
+                defaultBranchResolved: false,
+                isAmbiguous: true,
+                ambiguityReasons: ["Project path is missing."]
+            )
+        }
+
+        let defaultBranch = project.defaultBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !defaultBranch.isEmpty else {
+            return TaskLifecycleGitFacts(
+                defaultBranchResolved: false,
+                isAmbiguous: true,
+                ambiguityReasons: ["Default branch is empty."]
+            )
+        }
+
+        let defaultBranchResolved = await gitValue(["rev-parse", "--verify", defaultBranch], in: directory) != nil
+        var ambiguityReasons: [String] = []
+        if !defaultBranchResolved {
+            ambiguityReasons.append("Default branch \(defaultBranch) could not be resolved.")
+        }
+
+        var branchFacts: [LifecycleBranchProbe] = []
+        if let localBranch = task.localBranch, let branch = normalized(localBranch) {
+            branchFacts.append(await lifecycleBranchProbe(label: "Local branch", branch: branch, defaultBranch: defaultBranch, defaultBranchResolved: defaultBranchResolved, directory: directory))
+        }
+        if let codexBranch = task.codexBranch, let branch = normalized(codexBranch), branch != task.localBranch {
+            branchFacts.append(await lifecycleBranchProbe(label: "Codex branch", branch: branch, defaultBranch: defaultBranch, defaultBranchResolved: defaultBranchResolved, directory: directory))
+        }
+
+        for fact in branchFacts where !fact.exists {
+            ambiguityReasons.append("\(fact.label) \(fact.branch) is missing.")
+        }
+
+        var localWorktree: TaskWorktreeSummary?
+        if let localWorktreePath = task.localWorktreePath, let path = normalized(localWorktreePath) {
+            localWorktree = await inspectWorktree(label: "Local worktree", path: path)
+            appendWorktreeAmbiguity(summary: localWorktree, expectedBranch: task.localBranch, ambiguityReasons: &ambiguityReasons)
+        }
+
+        var codexWorktree: TaskWorktreeSummary?
+        if let codexWorktreePath = task.codexWorktreePath, let path = normalized(codexWorktreePath) {
+            codexWorktree = await inspectWorktree(label: "Codex worktree", path: path)
+            appendWorktreeAmbiguity(summary: codexWorktree, expectedBranch: task.codexBranch, ambiguityReasons: &ambiguityReasons)
+        }
+
+        let summaries = [localWorktree, codexWorktree].compactMap { $0 }
+        let existingSummaries = summaries.filter(\.exists)
+        let knownDirtyStates = existingSummaries.compactMap(\.isClean).map { !$0 }
+        let worktreeIsDirty: Bool?
+        if knownDirtyStates.contains(true) {
+            worktreeIsDirty = true
+        } else if knownDirtyStates.count == existingSummaries.count {
+            worktreeIsDirty = existingSummaries.isEmpty ? nil : false
+        } else {
+            worktreeIsDirty = nil
+        }
+
+        let existingBranchFacts = branchFacts.filter(\.exists)
+        let hasUnmerged = aggregateBool(existingBranchFacts.map(\.hasUnmergedCommitsComparedToDefault))
+        let appearsMerged = aggregateBool(existingBranchFacts.map(\.appearsMergedIntoDefault))
+        if branchFacts.count > 1 {
+            let unmergedValues = Set(existingBranchFacts.compactMap(\.hasUnmergedCommitsComparedToDefault))
+            let mergedValues = Set(existingBranchFacts.compactMap(\.appearsMergedIntoDefault))
+            if unmergedValues.count > 1 || mergedValues.count > 1 {
+                ambiguityReasons.append("Local and Codex branch Git facts disagree.")
+            }
+        }
+
+        return TaskLifecycleGitFacts(
+            branchExists: branchFacts.contains(where: \.exists),
+            worktreePathExists: summaries.isEmpty ? false : summaries.allSatisfy(\.exists),
+            worktreeIsDirty: worktreeIsDirty,
+            hasCommits: hasUnmerged,
+            hasUnmergedCommitsComparedToDefault: hasUnmerged,
+            appearsMergedIntoDefault: appearsMerged,
+            defaultBranchResolved: defaultBranchResolved,
+            source: lifecycleFactSource(localWorktree: localWorktree, codexWorktree: codexWorktree, hasBranchFacts: !branchFacts.isEmpty),
+            isAmbiguous: !ambiguityReasons.isEmpty,
+            ambiguityReasons: ambiguityReasons
+        )
+    }
+
     public func commitAll(path: String, defaultBranch: String, message: String) async throws -> CommandResult {
         guard Self.pathIsExistingDirectory(path) else {
             throw FactoryError.missingWorktreePath(path)
@@ -686,6 +823,76 @@ public final class GitService {
         return value.isEmpty ? nil : value
     }
 
+    private func lifecycleBranchProbe(
+        label: String,
+        branch: String,
+        defaultBranch: String,
+        defaultBranchResolved: Bool,
+        directory: URL
+    ) async -> LifecycleBranchProbe {
+        let exists = await gitValue(["rev-parse", "--verify", branch], in: directory) != nil
+        guard exists, defaultBranchResolved else {
+            return LifecycleBranchProbe(label: label, branch: branch, exists: exists)
+        }
+
+        let unmergedCount = await gitCount(["rev-list", "--count", "\(defaultBranch)..\(branch)"], in: directory)
+        let merged = await isAncestor(branch, of: defaultBranch, in: directory)
+        return LifecycleBranchProbe(
+            label: label,
+            branch: branch,
+            exists: true,
+            hasUnmergedCommitsComparedToDefault: unmergedCount.map { $0 > 0 },
+            appearsMergedIntoDefault: merged
+        )
+    }
+
+    private func appendWorktreeAmbiguity(summary: TaskWorktreeSummary?, expectedBranch: String?, ambiguityReasons: inout [String]) {
+        guard let summary else { return }
+        if !summary.exists {
+            ambiguityReasons.append("\(summary.label) path is missing.")
+            return
+        }
+        if summary.isClean == nil {
+            ambiguityReasons.append("\(summary.label) dirty state is unknown.")
+        }
+        if let expectedBranch,
+           let expectedBranch = normalized(expectedBranch),
+           let actualBranch = summary.branch,
+           actualBranch != expectedBranch {
+            ambiguityReasons.append("\(summary.label) is on \(actualBranch), expected \(expectedBranch).")
+        }
+        if expectedBranch != nil, summary.branch == nil {
+            ambiguityReasons.append("\(summary.label) branch is unknown.")
+        }
+    }
+
+    private func lifecycleFactSource(
+        localWorktree: TaskWorktreeSummary?,
+        codexWorktree: TaskWorktreeSummary?,
+        hasBranchFacts: Bool
+    ) -> TaskLifecycleGitFactSource {
+        let hasLocal = localWorktree?.exists == true
+        let hasCodex = codexWorktree?.exists == true
+        switch (hasLocal, hasCodex) {
+        case (true, true): return .localAndCodexWorktrees
+        case (true, false): return .localWorktree
+        case (false, true): return .codexWorktree
+        case (false, false): return hasBranchFacts ? .repository : .none
+        }
+    }
+
+    private func aggregateBool(_ values: [Bool?]) -> Bool? {
+        let concrete = values.compactMap { $0 }
+        if concrete.contains(true) { return true }
+        if concrete.isEmpty { return nil }
+        return false
+    }
+
+    private func gitCount(_ arguments: [String], in directory: URL) async -> Int? {
+        guard let output = await gitOutput(arguments, in: directory) else { return nil }
+        return Int(output.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     private func gitOutput(_ arguments: [String], in directory: URL) async -> String? {
         do {
             let result = try await commandRunner.run(CommandRequest(executable: "git", arguments: arguments, workingDirectory: directory))
@@ -752,4 +959,12 @@ public struct WorktreeResult: Equatable {
 private struct PreflightTarget: Equatable {
     var type: PreflightTargetType
     var path: String
+}
+
+private struct LifecycleBranchProbe: Equatable {
+    var label: String
+    var branch: String
+    var exists: Bool
+    var hasUnmergedCommitsComparedToDefault: Bool?
+    var appearsMergedIntoDefault: Bool?
 }
