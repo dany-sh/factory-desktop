@@ -20,6 +20,8 @@ public final class AppStore: ObservableObject {
     @Published public private(set) var selectedTaskCodexSessionLink: CodexSessionLink?
     @Published public private(set) var codexSessionLinks: [CodexSessionLink] = []
     @Published public private(set) var latestCodexSessionRecommendation: CodexSessionResultRecommendation?
+    @Published public private(set) var selectedMarkdownDocument: MarkdownDocument?
+    @Published public private(set) var pendingMarkdownDecision: PendingMarkdownDecision?
     @Published public private(set) var buildInfo: BuildInfo
     @Published public var selectedRunOutput: String = ""
     @Published public var selectedWorkspaceScope: WorkspaceSelectionScope = .project
@@ -36,6 +38,7 @@ public final class AppStore: ObservableObject {
     private var gitService: GitService?
     private var ollamaClient: OllamaClient
     private var handoffService: HandoffService
+    private let markdownDocumentStore = MarkdownDocumentStore()
 
     public var selectedProject: Project? {
         guard let selectedProjectID else { return projects.first }
@@ -351,6 +354,93 @@ public final class AppStore: ObservableObject {
             return
         }
         selectedWorkspaceScope = .task
+    }
+
+    public func updateSelectedMarkdownDraft(_ text: String) {
+        guard let selectedMarkdownDocument else { return }
+        self.selectedMarkdownDocument = markdownDocumentStore.updatingDraft(selectedMarkdownDocument, text: text)
+    }
+
+    public func requestOpenMarkdownFile(path: String, title: String? = nil) {
+        let target = MarkdownOpenTarget(
+            path: URL(fileURLWithPath: path).standardizedFileURL.path,
+            title: title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? title!.trimmingCharacters(in: .whitespacesAndNewlines)
+                : URL(fileURLWithPath: path).lastPathComponent
+        )
+
+        if let selectedMarkdownDocument,
+           selectedMarkdownDocument.isDirty,
+           selectedMarkdownDocument.path != target.path {
+            pendingMarkdownDecision = .open(target)
+            return
+        }
+
+        openMarkdownTarget(target)
+    }
+
+    public func requestCloseMarkdownDocument() {
+        guard let selectedMarkdownDocument else { return }
+        if selectedMarkdownDocument.isDirty {
+            pendingMarkdownDecision = .close
+        } else {
+            self.selectedMarkdownDocument = nil
+        }
+    }
+
+    public func cancelPendingMarkdownDecision() {
+        pendingMarkdownDecision = nil
+    }
+
+    @discardableResult
+    public func saveSelectedMarkdownDocument() -> Bool {
+        guard let selectedMarkdownDocument else { return false }
+        do {
+            self.selectedMarkdownDocument = try markdownDocumentStore.save(selectedMarkdownDocument)
+            statusMessage = "Saved \(selectedMarkdownDocument.path)."
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            refreshSelectedMarkdownDocumentStatus()
+            return false
+        }
+    }
+
+    public func discardSelectedMarkdownChanges() {
+        guard let selectedMarkdownDocument else { return }
+        do {
+            self.selectedMarkdownDocument = try markdownDocumentStore.discardChanges(for: selectedMarkdownDocument)
+            statusMessage = "Reloaded \(selectedMarkdownDocument.path)."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func resolvePendingMarkdownDecision(saveChanges: Bool?, discardChanges: Bool = false) {
+        let pending = pendingMarkdownDecision
+        pendingMarkdownDecision = nil
+
+        if saveChanges == true, saveSelectedMarkdownDocument() == false {
+            pendingMarkdownDecision = pending
+            return
+        }
+
+        if discardChanges {
+            discardSelectedMarkdownChanges()
+        }
+
+        guard let pending else { return }
+        switch pending {
+        case .open(let target):
+            openMarkdownTarget(target)
+        case .close:
+            selectedMarkdownDocument = nil
+        }
+    }
+
+    public func refreshSelectedMarkdownDocumentStatus() {
+        guard let selectedMarkdownDocument else { return }
+        self.selectedMarkdownDocument = markdownDocumentStore.refreshMetadata(for: selectedMarkdownDocument)
     }
 
     public func createTask(title: String, type: TaskType, goal: String = "") async {
@@ -1767,6 +1857,13 @@ public final class AppStore: ObservableObject {
     }
 
     public func openArtifact(_ artifact: Artifact) async {
+        if Self.isMarkdownPath(artifact.path) {
+            requestOpenMarkdownFile(
+                path: artifact.path,
+                title: artifact.artifactType?.displayName ?? artifact.description
+            )
+            return
+        }
         do {
             _ = try await commandRunner.run(CommandRequest(executable: "open", arguments: [artifact.path]))
             statusMessage = "Opened \(artifact.path)."
@@ -2134,6 +2231,19 @@ public final class AppStore: ObservableObject {
 
     private func latestArtifact(type: ArtifactType) -> Artifact? {
         artifacts.first { $0.type == type.rawValue }
+    }
+
+    public static func isMarkdownPath(_ path: String) -> Bool {
+        URL(fileURLWithPath: path).pathExtension.lowercased() == "md"
+    }
+
+    private func openMarkdownTarget(_ target: MarkdownOpenTarget) {
+        do {
+            selectedMarkdownDocument = try markdownDocumentStore.loadDocument(atPath: target.path, title: target.title)
+            statusMessage = "Opened \(target.path)."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func clearStoredWorktreePath(displayID: String, action: WorktreeRepairAction) {

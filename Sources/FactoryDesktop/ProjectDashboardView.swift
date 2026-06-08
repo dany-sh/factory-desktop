@@ -5,6 +5,7 @@ struct ProjectDashboardView: View {
     @EnvironmentObject private var store: AppStore
     @State private var showActiveTasks = false
     @State private var showArchivedTasks = false
+    @State private var projectMarkdownFiles: [ProjectMarkdownFile] = []
 
     var body: some View {
         Group {
@@ -13,6 +14,7 @@ struct ProjectDashboardView: View {
                     VStack(alignment: .leading, spacing: 18) {
                         header(project: project)
                         summaryPanel(project: project)
+                        projectDocsPanel(project: project)
                         taskListsPanel
                         LifecycleCleanupView()
                     }
@@ -26,6 +28,12 @@ struct ProjectDashboardView: View {
                     description: Text("Register or select a project to review repo health, hygiene, and task history.")
                 )
             }
+        }
+        .onAppear {
+            refreshProjectMarkdownFiles()
+        }
+        .onChange(of: store.selectedProject?.path) { _, _ in
+            refreshProjectMarkdownFiles()
         }
     }
 
@@ -150,6 +158,59 @@ struct ProjectDashboardView: View {
         )
     }
 
+    private func projectDocsPanel(project: Project) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Project Docs")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    refreshProjectMarkdownFiles()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if projectMarkdownFiles.isEmpty {
+                Text("No root-level markdown files found for this project yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(projectMarkdownFiles) { file in
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(file.name)
+                                .font(.body.weight(.semibold))
+                            Text(file.path)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                                .textSelection(.enabled)
+                        }
+                        Spacer()
+                        Button("Open") {
+                            store.requestOpenMarkdownFile(path: file.path, title: file.name)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    .padding(.vertical, 3)
+                    if file.id != projectMarkdownFiles.last?.id {
+                        Divider()
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
     private func taskList(tasks: [FactoryTask]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(tasks) { task in
@@ -234,4 +295,33 @@ struct ProjectDashboardView: View {
     private var archivedTasks: [FactoryTask] {
         store.tasksForSelectedProject.filter { $0.status == .done || $0.status == .archived }
     }
+
+    private func refreshProjectMarkdownFiles() {
+        guard let project = store.selectedProject else {
+            projectMarkdownFiles = []
+            return
+        }
+
+        let root = URL(fileURLWithPath: project.path)
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            projectMarkdownFiles = []
+            return
+        }
+
+        projectMarkdownFiles = urls
+            .filter { $0.pathExtension.lowercased() == "md" }
+            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+            .map { ProjectMarkdownFile(path: $0.path) }
+    }
+}
+
+private struct ProjectMarkdownFile: Identifiable, Equatable {
+    var path: String
+
+    var id: String { path }
+    var name: String { URL(fileURLWithPath: path).lastPathComponent }
 }

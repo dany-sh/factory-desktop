@@ -218,6 +218,7 @@ private struct CleanupPresentationGroupView: View {
 }
 
 private struct ArtifactWasteGroupRow: View {
+    @EnvironmentObject private var store: AppStore
     var group: ArtifactWasteGroup
     @State private var isExpanded = false
 
@@ -232,6 +233,13 @@ private struct ArtifactWasteGroupRow: View {
                             .lineLimit(2)
                             .truncationMode(.middle)
                             .textSelection(.enabled)
+                        if AppStore.isMarkdownPath(item.path) {
+                            Button("Open in Markdown Viewer") {
+                                store.requestOpenMarkdownFile(path: item.path)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
                         Text("Age \(item.ageDays.map { "\($0)d" } ?? "unknown") · size \(item.sizeBytes.map(ByteCountFormatter.string) ?? "unknown") · linked \(item.isLinkedToActiveTaskOrRun ? "yes" : "no")")
                             .font(.caption)
                             .foregroundStyle(.secondary)

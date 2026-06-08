@@ -2,6 +2,98 @@ import XCTest
 @testable import FactoryDesktopCore
 
 final class FactoryDesktopCoreTests: XCTestCase {
+    func testMarkdownDocumentStoreLoadsMarkdownFromDisk() throws {
+        let root = makeTemporaryDirectory()
+        let file = root.appendingPathComponent("plan.md")
+        try "# Plan\n\n- one".write(to: file, atomically: true, encoding: .utf8)
+
+        let document = try MarkdownDocumentStore().loadDocument(atPath: file.path)
+
+        XCTAssertEqual(document.path, file.path)
+        XCTAssertEqual(document.title, "plan.md")
+        XCTAssertEqual(document.text, "# Plan\n\n- one")
+        XCTAssertEqual(document.savedText, "# Plan\n\n- one")
+        XCTAssertTrue(document.fileExists)
+        XCTAssertFalse(document.isDirty)
+    }
+
+    func testMarkdownDocumentStoreHandlesMissingFile() throws {
+        let file = makeTemporaryDirectory().appendingPathComponent("missing.md")
+
+        let document = try MarkdownDocumentStore().loadDocument(atPath: file.path)
+
+        XCTAssertFalse(document.fileExists)
+        XCTAssertFalse(document.canEdit)
+        XCTAssertEqual(document.text, "")
+        XCTAssertEqual(document.savedText, "")
+    }
+
+    func testMarkdownDocumentStoreTracksDirtyStateAndDiscard() throws {
+        let root = makeTemporaryDirectory()
+        let file = root.appendingPathComponent("notes.md")
+        try "before".write(to: file, atomically: true, encoding: .utf8)
+
+        let store = MarkdownDocumentStore()
+        let loaded = try store.loadDocument(atPath: file.path)
+        let dirty = store.updatingDraft(loaded, text: "after")
+        let reloaded = try store.discardChanges(for: dirty)
+
+        XCTAssertTrue(dirty.isDirty)
+        XCTAssertEqual(reloaded.text, "before")
+        XCTAssertFalse(reloaded.isDirty)
+    }
+
+    func testMarkdownDocumentStoreSavesChangesBackToDisk() throws {
+        let root = makeTemporaryDirectory()
+        let file = root.appendingPathComponent("summary.md")
+        try "draft".write(to: file, atomically: true, encoding: .utf8)
+
+        let store = MarkdownDocumentStore()
+        let loaded = try store.loadDocument(atPath: file.path)
+        let dirty = store.updatingDraft(loaded, text: "final")
+        let saved = try store.save(dirty)
+
+        XCTAssertEqual(saved.text, "final")
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "final")
+        XCTAssertFalse(saved.isDirty)
+    }
+
+    func testMarkdownDocumentStoreDetectsExternalModificationConflict() throws {
+        let root = makeTemporaryDirectory()
+        let file = root.appendingPathComponent("review.md")
+        try "first".write(to: file, atomically: true, encoding: .utf8)
+
+        let store = MarkdownDocumentStore()
+        let loaded = try store.loadDocument(atPath: file.path)
+        let dirty = store.updatingDraft(loaded, text: "local edit")
+        Thread.sleep(forTimeInterval: 1.1)
+        try "external edit".write(to: file, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try store.save(dirty)) { error in
+            XCTAssertEqual(error as? MarkdownDocumentSaveConflict, .fileChangedOnDisk(file.path))
+        }
+    }
+
+    func testMarkdownDocumentStoreDetectsReadOnlyFilesWhereFeasible() throws {
+        let root = makeTemporaryDirectory()
+        let file = root.appendingPathComponent("readonly.md")
+        try "locked".write(to: file, atomically: true, encoding: .utf8)
+        _ = try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: Int16(0o444))], ofItemAtPath: file.path)
+        defer {
+            _ = try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: Int16(0o644))], ofItemAtPath: file.path)
+        }
+
+        let store = MarkdownDocumentStore()
+        let loaded = try store.loadDocument(atPath: file.path)
+
+        if loaded.isWritable == false {
+            XCTAssertFalse(loaded.canEdit)
+            XCTAssertThrowsError(try store.save(store.updatingDraft(loaded, text: "blocked"))) { error in
+                XCTAssertEqual(error as? MarkdownDocumentSaveConflict, .readOnlyFile(file.path))
+            }
+        }
+    }
+
     func testSlugIsStableAndBranchSafe() {
         XCTAssertEqual(Slug.make("Improve source controls UI"), "improve-source-controls-ui")
         XCTAssertEqual(Slug.make("   ***   "), "task")
@@ -2463,4 +2555,11 @@ private extension String {
     func withFileContents() throws -> String {
         try String(contentsOfFile: self, encoding: .utf8)
     }
+}
+
+private func makeTemporaryDirectory() -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("factory-desktop-tests-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
 }
