@@ -1457,13 +1457,23 @@ public final class AppStore: ObservableObject {
             clearStoredWorktreePath(displayID: displayID, action: action)
         case .archiveTask:
             updateSelectedTaskStatus(.archived)
-        case .recreateWorktreeFromBranch, .relinkExistingWorktree:
-            statusMessage = "\(action.displayName) is a P0 placeholder. No worktree was created, relinked, or deleted."
+        case .recreateWorktreeFromBranch:
+            Task { await refreshSelectedTaskWorktree(displayID: displayID) }
+        case .relinkExistingWorktree:
+            statusMessage = "\(action.displayName) is a P0 placeholder. No worktree was relinked."
         }
     }
 
-    public func canPerformWorktreeRepairAction(_ action: WorktreeRepairAction) -> Bool {
-        !action.isFoundationOnly
+    public func canPerformWorktreeRepairAction(_ action: WorktreeRepairAction, displayID: String? = nil) -> Bool {
+        switch action {
+        case .recreateWorktreeFromBranch:
+            guard let displayID else { return false }
+            return selectedTaskWorktreeDisplays.contains { $0.id == displayID }
+        case .relinkExistingWorktree:
+            return false
+        default:
+            return !action.isFoundationOnly
+        }
     }
 
     @discardableResult
@@ -2072,6 +2082,56 @@ public final class AppStore: ObservableObject {
             self.selectedTaskID = task.id
             self.latestLifecycleReport = nil
             self.statusMessage = "\(action.displayName) completed. Branch metadata was preserved."
+        }
+    }
+
+    private func worktreeFlavor(for displayID: String) -> WorktreeFlavor? {
+        switch displayID {
+        case "local":
+            return .local
+        case "codex":
+            return .codex
+        default:
+            return nil
+        }
+    }
+
+    public func refreshSelectedTaskWorktree(displayID: String) async {
+        guard let project = selectedProject, var task = selectedTask, let repository, let gitService,
+              let flavor = worktreeFlavor(for: displayID) else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        do {
+            let assessment = await gitService.assessTaskWorktreeRefresh(project: project, task: task, flavor: flavor)
+            guard assessment.canRefresh else {
+                statusMessage = assessment.reason
+                errorMessage = assessment.reason
+                return
+            }
+
+            let result = try await gitService.refreshTaskWorktreeFromDefault(project: project, task: task, flavor: flavor)
+            switch flavor {
+            case .local:
+                task.localBranch = result.branch
+                task.localWorktreePath = result.path
+            case .codex:
+                task.codexBranch = result.branch
+                task.codexWorktreePath = result.path
+            }
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
+            try reload()
+            selectedTaskID = task.id
+            await refreshGitStatus()
+            await refreshLifecycleScan()
+            statusMessage = "Refreshed \(flavor == .local ? "task" : "alternate") worktree from \(project.defaultBranch)."
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 

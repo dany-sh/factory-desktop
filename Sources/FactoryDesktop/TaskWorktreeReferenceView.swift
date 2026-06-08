@@ -91,7 +91,7 @@ struct TaskWorktreeReferenceView: View {
     }
 
     private func shouldEnable(_ action: WorktreeRepairAction) -> Bool {
-        guard store.canPerformWorktreeRepairAction(action) else { return false }
+        guard store.canPerformWorktreeRepairAction(action, displayID: display.id) else { return false }
         switch action {
         case .refreshLifecycleScan:
             return true
@@ -99,7 +99,9 @@ struct TaskWorktreeReferenceView: View {
             return display.state == .missingPath && !isCompletedTask
         case .archiveTask:
             return store.selectedTask != nil && store.selectedTask?.status != .archived
-        case .recreateWorktreeFromBranch, .relinkExistingWorktree:
+        case .recreateWorktreeFromBranch:
+            return !isCompletedTask && display.state != .dirtyRisk
+        case .relinkExistingWorktree:
             return false
         }
     }
@@ -117,7 +119,9 @@ struct TaskWorktreeReferenceView: View {
             return "Mark this stored worktree reference as cleaned by clearing the missing path."
         case .archiveTask:
             return "Archive the selected task."
-        case .recreateWorktreeFromBranch, .relinkExistingWorktree:
+        case .recreateWorktreeFromBranch:
+            return "Safely replace a clean or missing task worktree with a fresh one from the current default branch."
+        case .relinkExistingWorktree:
             return "Foundation-only placeholder in P0."
         }
     }

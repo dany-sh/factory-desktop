@@ -12,10 +12,8 @@ struct InspectorView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                projectCard
                 if store.selectedWorkspaceScope == .project {
-                    projectWorkspaceCard
-                    lifecycleCard
+                    projectScopePlaceholder
                 } else {
                     codexCard
                     worktreeCard
@@ -47,34 +45,6 @@ struct InspectorView: View {
         }
         .onChange(of: store.selectedCodexProjectLink?.workspacePath) { _, _ in
             syncCodexWorkspaceDraft()
-        }
-    }
-
-    private var projectCard: some View {
-        InspectorCard(title: "Project Context") {
-            if let project = store.selectedProject {
-                InfoRow(label: "Name", value: project.name)
-                InfoRow(label: "Type", value: project.type.displayName)
-                InfoRow(label: "Path", value: project.path)
-                InfoRow(label: "Default", value: project.defaultBranch)
-                Divider()
-                Text("Test Commands")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                if project.testCommands.isEmpty {
-                    Text("None configured.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(project.testCommands, id: \.self) { command in
-                        Text(command)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                    }
-                }
-            } else {
-                Text("No project selected.")
-                    .foregroundStyle(.secondary)
-            }
         }
     }
 
@@ -511,24 +481,17 @@ struct InspectorView: View {
         LifecycleCleanupView()
     }
 
-    private var projectWorkspaceCard: some View {
-        let summary = store.projectStatusSummary
-        return InspectorCard(title: "Project Workspace") {
-            Text("You are viewing project-wide state. Open a task from the dashboard or sidebar to return to task-specific execution details.")
-                .font(.caption)
+    private var projectScopePlaceholder: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Project view is focused in the main workspace.")
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            HStack(spacing: 12) {
-                TaskStateMetric(label: "Active", value: "\(summary.activeTaskCount)")
-                TaskStateMetric(label: "Archived", value: "\(summary.archivedTaskCount)")
-                TaskStateMetric(label: "Cleanup", value: "\(summary.cleanupItemCount)")
-            }
-            Button {
-                Task { await store.refreshGitStatus() }
-            } label: {
-                Label("Refresh Git Status", systemImage: "arrow.clockwise")
-            }
-            .buttonStyle(.bordered)
+            Text("Select a task to see task-specific inspector details.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.top, 4)
     }
 
     private var compactProjectStatusCard: some View {

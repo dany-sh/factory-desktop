@@ -66,6 +66,20 @@ public final class GitService {
         self.paths = paths
     }
 
+    public struct TaskWorktreeRefreshAssessment: Equatable {
+        public var branch: String
+        public var path: String
+        public var canRefresh: Bool
+        public var reason: String
+
+        public init(branch: String, path: String, canRefresh: Bool, reason: String) {
+            self.branch = branch
+            self.path = path
+            self.canRefresh = canRefresh
+            self.reason = reason
+        }
+    }
+
     public func snapshot(project: Project, task: FactoryTask?) async throws -> GitSnapshot {
         let worktreePath = preferredWorktreePath(project: project, task: task)
         guard Self.pathIsExistingDirectory(worktreePath) else {
@@ -302,6 +316,169 @@ public final class GitService {
         }
 
         return WorktreeResult(branch: branch, path: worktreeURL.path)
+    }
+
+    public func assessTaskWorktreeRefresh(
+        project: Project,
+        task: FactoryTask,
+        flavor: WorktreeFlavor
+    ) async -> TaskWorktreeRefreshAssessment {
+        let branch = storedBranch(for: task, flavor: flavor) ?? branchName(for: task, flavor: flavor)
+        let path = storedWorktreePath(for: task, flavor: flavor) ?? paths.worktreeDirectory(project: project, task: task, flavor: flavor).path
+
+        guard project.type == .codeRepo else {
+            return TaskWorktreeRefreshAssessment(
+                branch: branch,
+                path: path,
+                canRefresh: false,
+                reason: "Only code projects support worktree refresh."
+            )
+        }
+
+        let directory = URL(fileURLWithPath: project.path)
+        guard Self.pathIsExistingDirectory(project.path) else {
+            return TaskWorktreeRefreshAssessment(
+                branch: branch,
+                path: path,
+                canRefresh: false,
+                reason: "Project path is missing."
+            )
+        }
+
+        let defaultBranch = project.defaultBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !defaultBranch.isEmpty,
+              await gitValue(["rev-parse", "--verify", defaultBranch], in: directory) != nil else {
+            return TaskWorktreeRefreshAssessment(
+                branch: branch,
+                path: path,
+                canRefresh: false,
+                reason: "Default branch \(project.defaultBranch) could not be resolved."
+            )
+        }
+
+        let standardizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        let branchExists = await gitValue(["rev-parse", "--verify", branch], in: directory) != nil
+        let worktreeOutput = await gitOutput(["worktree", "list", "--porcelain"], in: directory) ?? ""
+        let prunableOutput = await gitOutput(["worktree", "prune", "--dry-run"], in: directory) ?? ""
+        let prunablePaths = LifecycleParser.parsePrunableWorktreePaths(prunableOutput)
+        let worktrees = LifecycleParser.parseWorktreePorcelain(worktreeOutput, prunablePaths: prunablePaths)
+
+        if let conflictingPath = worktrees.first(where: {
+            $0.branch == branch && URL(fileURLWithPath: $0.path).standardizedFileURL.path != standardizedPath
+        })?.path {
+            return TaskWorktreeRefreshAssessment(
+                branch: branch,
+                path: path,
+                canRefresh: false,
+                reason: "Task branch is checked out in another worktree: \(conflictingPath)"
+            )
+        }
+
+        let pathExists = FileManager.default.fileExists(atPath: standardizedPath)
+        if pathExists {
+            guard let isClean = await worktreeCleanState(path: standardizedPath) else {
+                return TaskWorktreeRefreshAssessment(
+                    branch: branch,
+                    path: path,
+                    canRefresh: false,
+                    reason: "Worktree state is unknown. Refresh lifecycle scan and inspect manually first."
+                )
+            }
+            if !isClean {
+                return TaskWorktreeRefreshAssessment(
+                    branch: branch,
+                    path: path,
+                    canRefresh: false,
+                    reason: "Worktree has local changes. Review or commit them before refreshing from \(defaultBranch)."
+                )
+            }
+        }
+
+        if branchExists {
+            let unmergedCount = await gitCount(["rev-list", "--count", "\(defaultBranch)..\(branch)"], in: directory) ?? 0
+            if unmergedCount > 0 {
+                return TaskWorktreeRefreshAssessment(
+                    branch: branch,
+                    path: path,
+                    canRefresh: false,
+                    reason: "Task branch has \(unmergedCount) unique commit(s). Keep or review that work before refreshing from \(defaultBranch)."
+                )
+            }
+        }
+
+        let reason: String
+        if branchExists {
+            reason = pathExists
+                ? "Task worktree is clean and the task branch has no unique commits. It is safe to rebuild from \(defaultBranch)."
+                : "Task branch has no unique commits and the worktree path is missing. It is safe to recreate from \(defaultBranch)."
+        } else {
+            reason = "Task branch does not exist yet. A fresh worktree can be created from \(defaultBranch)."
+        }
+        return TaskWorktreeRefreshAssessment(
+            branch: branch,
+            path: path,
+            canRefresh: true,
+            reason: reason
+        )
+    }
+
+    public func refreshTaskWorktreeFromDefault(
+        project: Project,
+        task: FactoryTask,
+        flavor: WorktreeFlavor
+    ) async throws -> WorktreeResult {
+        let assessment = await assessTaskWorktreeRefresh(project: project, task: task, flavor: flavor)
+        guard assessment.canRefresh else {
+            throw FactoryError.commandFailed(assessment.reason)
+        }
+
+        let directory = URL(fileURLWithPath: project.path)
+        let standardizedPath = URL(fileURLWithPath: assessment.path).standardizedFileURL.path
+        let branchExists = await gitValue(["rev-parse", "--verify", assessment.branch], in: directory) != nil
+
+        // Clear stale worktree metadata before reusing a prior task path.
+        let prune = try await commandRunner.run(
+            CommandRequest(executable: "git", arguments: ["worktree", "prune"], workingDirectory: directory, manuallyApproved: true)
+        )
+        guard prune.succeeded else {
+            throw FactoryError.commandFailed(prune.output)
+        }
+
+        if FileManager.default.fileExists(atPath: standardizedPath) {
+            let remove = try await commandRunner.run(
+                CommandRequest(executable: "git", arguments: ["worktree", "remove", standardizedPath], workingDirectory: directory, manuallyApproved: true)
+            )
+            guard remove.succeeded else {
+                throw FactoryError.commandFailed(remove.output)
+            }
+        }
+
+        if branchExists {
+            let delete = try await commandRunner.run(
+                CommandRequest(executable: "git", arguments: ["branch", "-d", assessment.branch], workingDirectory: directory, manuallyApproved: true)
+            )
+            guard delete.succeeded else {
+                throw FactoryError.commandFailed(delete.output)
+            }
+        }
+
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: standardizedPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let add = try await commandRunner.run(
+            CommandRequest(
+                executable: "git",
+                arguments: ["worktree", "add", "-b", assessment.branch, standardizedPath, project.defaultBranch],
+                workingDirectory: directory,
+                manuallyApproved: true
+            )
+        )
+        guard add.succeeded else {
+            throw FactoryError.commandFailed(add.output)
+        }
+
+        return WorktreeResult(branch: assessment.branch, path: standardizedPath)
     }
 
     public func openVSCode(path: String) async throws -> CommandResult {
@@ -901,6 +1078,24 @@ public final class GitService {
     private func gitCount(_ arguments: [String], in directory: URL) async -> Int? {
         guard let output = await gitOutput(arguments, in: directory) else { return nil }
         return Int(output.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func storedBranch(for task: FactoryTask, flavor: WorktreeFlavor) -> String? {
+        switch flavor {
+        case .local:
+            return normalized(task.localBranch ?? "")
+        case .codex:
+            return normalized(task.codexBranch ?? "")
+        }
+    }
+
+    private func storedWorktreePath(for task: FactoryTask, flavor: WorktreeFlavor) -> String? {
+        switch flavor {
+        case .local:
+            return normalized(task.localWorktreePath ?? "")
+        case .codex:
+            return normalized(task.codexWorktreePath ?? "")
+        }
     }
 
     private func gitOutput(_ arguments: [String], in directory: URL) async -> String? {

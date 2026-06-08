@@ -1383,6 +1383,56 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertTrue(actions.contains(.archiveTask))
     }
 
+    func testRepairActionDisplayNameUsesRefreshLanguage() {
+        XCTAssertEqual(WorktreeRepairAction.recreateWorktreeFromBranch.displayName, "Refresh worktree from default branch")
+    }
+
+    @MainActor
+    func testRefreshSelectedTaskWorktreeRebuildsCleanOutdatedBranchFromDefault() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .approved,
+            gitScenario: .staleCleanLocalBranch
+        )
+
+        fixture.store.selectProject(fixture.project.id)
+        fixture.store.selectTask(fixture.task.id)
+
+        await fixture.store.refreshSelectedTaskWorktree(displayID: "local")
+
+        let storedTask = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first { $0.id == fixture.task.id })
+        let refreshedPath = try XCTUnwrap(storedTask.localWorktreePath)
+        let repoURL = URL(fileURLWithPath: fixture.project.path)
+        let worktreeURL = URL(fileURLWithPath: refreshedPath)
+
+        let mainHead = try runGitOutput(["rev-parse", "--short", fixture.project.defaultBranch], in: repoURL)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let refreshedHead = try runGitOutput(["rev-parse", "--short", "HEAD"], in: worktreeURL)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        XCTAssertEqual(refreshedHead, mainHead)
+        XCTAssertEqual(storedTask.localBranch, "local/task")
+        XCTAssertEqual(fixture.store.errorMessage, nil)
+        XCTAssertTrue(fixture.store.statusMessage.contains("Refreshed task worktree"))
+    }
+
+    @MainActor
+    func testRefreshSelectedTaskWorktreeRefusesBranchWithUniqueCommits() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .approved,
+            gitScenario: .unmergedCleanLocalBranch
+        )
+
+        fixture.store.selectProject(fixture.project.id)
+        fixture.store.selectTask(fixture.task.id)
+
+        await fixture.store.refreshSelectedTaskWorktree(displayID: "local")
+
+        XCTAssertNotNil(fixture.store.errorMessage)
+        XCTAssertTrue(fixture.store.errorMessage?.contains("unique commit") == true)
+    }
+
     func testMissingPathStillBlocksUnsafeOpenAction() throws {
         let missing = FileManager.default.temporaryDirectory
             .appendingPathComponent("factory-missing-blocks-\(UUID().uuidString)", isDirectory: true)
@@ -2101,6 +2151,16 @@ final class FactoryDesktopCoreTests: XCTestCase {
                 localBranch: localBranch,
                 localWorktreePath: localWorktree.path
             )
+        case .staleCleanLocalBranch:
+            try runGit(["worktree", "add", "-b", localBranch, localWorktree.path, "main"], in: repo)
+            try appendLine("main advanced", to: repo.appendingPathComponent("README.md"))
+            try runGit(["add", "README.md"], in: repo)
+            try runGit(["commit", "-m", "Advance main"], in: repo)
+            return LifecycleGitFixture(
+                projectPath: repo.path,
+                localBranch: localBranch,
+                localWorktreePath: localWorktree.path
+            )
         case .missingBranchAndPath:
             return LifecycleGitFixture(
                 projectPath: repo.path,
@@ -2148,6 +2208,23 @@ final class FactoryDesktopCoreTests: XCTestCase {
             throw FactoryError.commandFailed(output)
         }
     }
+}
+
+private func runGitOutput(_ arguments: [String], in directory: URL) throws -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["git"] + arguments
+    process.currentDirectoryURL = directory
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = pipe
+    try process.run()
+    process.waitUntilExit()
+    let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    if process.terminationStatus != 0 {
+        throw FactoryError.commandFailed(output)
+    }
+    return output
 }
 
 private func hygieneReport(
@@ -2237,6 +2314,7 @@ private enum LifecycleGitScenario {
     case unmergedCleanLocalBranch
     case mergedCleanLocalBranch
     case mergedDirtyLocalBranch
+    case staleCleanLocalBranch
     case missingBranchAndPath
     case conflictingLocalAndCodexBranches
 }

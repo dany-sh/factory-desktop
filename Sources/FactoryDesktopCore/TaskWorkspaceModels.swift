@@ -92,7 +92,7 @@ public enum WorktreeRepairAction: String, CaseIterable, Codable, Identifiable {
         case .refreshLifecycleScan: "Refresh lifecycle scan"
         case .removeStaleWorktreeReference: "Remove stale worktree reference"
         case .markWorktreeCleaned: "Mark worktree cleaned"
-        case .recreateWorktreeFromBranch: "Recreate worktree from branch"
+        case .recreateWorktreeFromBranch: "Refresh worktree from default branch"
         case .relinkExistingWorktree: "Relink existing worktree"
         case .archiveTask: "Archive task"
         }

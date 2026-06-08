@@ -3,6 +3,8 @@ import SwiftUI
 
 struct ProjectDashboardView: View {
     @EnvironmentObject private var store: AppStore
+    @State private var showActiveTasks = false
+    @State private var showArchivedTasks = false
 
     var body: some View {
         Group {
@@ -54,15 +56,6 @@ struct ProjectDashboardView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(store.isWorking)
-
-                    if store.selectedTask != nil {
-                        Button {
-                            store.showTaskWorkspace()
-                        } label: {
-                            Label("Open Selected Task", systemImage: "arrow.right.circle")
-                        }
-                        .buttonStyle(.bordered)
-                    }
                 }
             }
         }
@@ -116,10 +109,36 @@ struct ProjectDashboardView: View {
                     .foregroundStyle(.secondary)
             } else {
                 if !activeTasks.isEmpty {
-                    taskList(title: "Active Tasks", tasks: activeTasks)
+                    DisclosureGroup(isExpanded: $showActiveTasks) {
+                        taskList(tasks: activeTasks)
+                            .padding(.top, 8)
+                    } label: {
+                        HStack {
+                            Text("Active Tasks")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Text("\(activeTasks.count)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 2)
                 }
                 if !archivedTasks.isEmpty {
-                    taskList(title: "Archived / Completed", tasks: archivedTasks)
+                    DisclosureGroup(isExpanded: $showArchivedTasks) {
+                        taskList(tasks: archivedTasks)
+                            .padding(.top, 8)
+                    } label: {
+                        HStack {
+                            Text("Archived / Completed")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Text("\(archivedTasks.count)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 2)
                 }
             }
         }
@@ -131,12 +150,8 @@ struct ProjectDashboardView: View {
         )
     }
 
-    private func taskList(title: String, tasks: [FactoryTask]) -> some View {
+    private func taskList(tasks: [FactoryTask]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-
             ForEach(tasks) { task in
                 HStack(spacing: 10) {
                     Circle()
