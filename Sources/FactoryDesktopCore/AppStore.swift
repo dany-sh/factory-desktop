@@ -117,6 +117,14 @@ public final class AppStore: ObservableObject {
         ArtifactGrouping.group(artifacts)
     }
 
+    public var projectHygieneSummary: ProjectHygieneSummary {
+        ProjectHygienePresentation.summarize(
+            report: latestLifecycleReport,
+            selectedTask: selectedTask,
+            tasks: tasksForSelectedProject
+        )
+    }
+
     public var taskWorkflowHealth: TaskWorkflowHealth {
         TaskWorkflowHealthBuilder.build(
             task: selectedTask,

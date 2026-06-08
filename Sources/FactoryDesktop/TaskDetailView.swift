@@ -9,6 +9,7 @@ struct TaskDetailView: View {
     @State private var selectedStage: TaskWorkspaceStage = .overview
     @State private var isTaskBriefExpanded = false
     @State private var showAllArtifacts = false
+    @State private var showingProjectHygiene = false
     @FocusState private var focusedField: TaskEditorField?
 
     var body: some View {
@@ -274,7 +275,7 @@ struct TaskDetailView: View {
             recentEventsPanel
             taskWorktreePanel
             preflightPanel
-            LifecycleCleanupView()
+            projectHygieneSummaryPanel
             DisclosureGroup("Task Brief", isExpanded: $isTaskBriefExpanded) {
                 taskForm(task: task)
             }
@@ -284,6 +285,83 @@ struct TaskDetailView: View {
                 RoundedRectangle(cornerRadius: 12)
                     .stroke(.separator.opacity(0.6))
             )
+        }
+    }
+
+    private var projectHygieneSummaryPanel: some View {
+        let summary = store.projectHygieneSummary
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Project Hygiene")
+                        .font(.headline)
+                    Text("Repo hygiene covers project-wide cleanup and safety. Task lifecycle sync covers the selected task's status decision.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(summary.severity.displayName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(hygieneSeverityColor(summary.severity))
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 10)], spacing: 10) {
+                InfoChip(label: "Total Items", value: "\(summary.totalCleanupItemCount)")
+                InfoChip(label: "Selected Task", value: "\(summary.selectedTaskRelevantItemCount)")
+                InfoChip(label: "Historical", value: "\(summary.historicalItemCount)")
+                InfoChip(label: "Artifact Waste", value: "\(summary.artifactWasteItemCount)")
+            }
+
+            if summary.selectedTaskBlockerCount > 0 {
+                Text("Selected task blocker: \(summary.selectedTaskBlockerCount) item\(summary.selectedTaskBlockerCount == 1 ? "" : "s") need review in this task workspace.")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.red)
+            } else if summary.totalCleanupItemCount > summary.selectedTaskRelevantItemCount {
+                Text("Project-wide cleanup exists, but unrelated archived task references are kept out of this task workspace.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Button {
+                    showingProjectHygiene = true
+                } label: {
+                    Label("Open Project Hygiene", systemImage: "wrench.and.screwdriver")
+                }
+                .buttonStyle(.bordered)
+                .disabled(store.latestLifecycleReport == nil)
+
+                Button {
+                    Task { await store.refreshLifecycleScan() }
+                } label: {
+                    Label("Refresh Scan", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .disabled(store.selectedProject == nil || store.isWorking)
+            }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
+        .sheet(isPresented: $showingProjectHygiene) {
+            ScrollView {
+                LifecycleCleanupView()
+                    .environmentObject(store)
+            }
+            .frame(minWidth: 760, minHeight: 680)
+            .padding()
+        }
+    }
+
+    private func hygieneSeverityColor(_ severity: HygieneSeverity) -> Color {
+        switch severity {
+        case .safe: .green
+        case .warning: .orange
+        case .blocked: .red
+        case .informational: .secondary
         }
     }
 

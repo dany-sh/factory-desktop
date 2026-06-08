@@ -1139,6 +1139,71 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(waste.first { $0.id == "old" }?.sizeBytes, 3)
     }
 
+    func testProjectHygieneSummaryCountsTotalAndSeparatesSelectedTaskItems() {
+        let selected = FactoryTask(id: "selected-task", projectId: "project", title: "Selected", localBranch: "factory/selected")
+        let archived = FactoryTask(id: "archived-task", projectId: "project", title: "Archived", status: .archived)
+        let report = hygieneReport(
+            lifecycleItems: [
+                lifecycleItem(id: "task-worktree-selected-task-local", label: "Selected: Task Worktree", branch: "factory/selected", classification: .missingPath),
+                lifecycleItem(id: "task-worktree-archived-task-local", label: "Archived: Task Worktree", classification: .removedCleaned),
+                lifecycleItem(id: "branch-factory/old", kind: .branch, label: "factory/old", classification: .alreadyMerged)
+            ],
+            artifactWasteItems: [
+                artifactWaste(id: "waste", path: "/tmp/runs/RUN1/preflight.md", runId: "RUN1")
+            ]
+        )
+
+        let summary = ProjectHygienePresentation.summarize(report: report, selectedTask: selected, tasks: [selected, archived])
+
+        XCTAssertEqual(summary.totalCleanupItemCount, 4)
+        XCTAssertEqual(summary.selectedTaskRelevantItemCount, 1)
+        XCTAssertEqual(summary.selectedTaskBlockerCount, 1)
+        XCTAssertEqual(summary.historicalItemCount, 1)
+        XCTAssertEqual(summary.artifactWasteItemCount, 1)
+        XCTAssertEqual(summary.presentationGroups.first { $0.scope == .selectedTask }?.count, 1)
+        XCTAssertEqual(summary.presentationGroups.first { $0.scope == .archivedTask }?.collapsedByDefault, true)
+    }
+
+    func testProjectHygieneSummaryGroupsBackupBranchesSeparately() {
+        let report = hygieneReport(lifecycleItems: [
+            lifecycleItem(id: "branch-backup/main-wip", kind: .branch, label: "backup/main-wip", classification: .backupProtected),
+            lifecycleItem(id: "branch-factory/done", kind: .branch, label: "factory/done", classification: .alreadyMerged)
+        ])
+
+        let summary = ProjectHygienePresentation.summarize(report: report, selectedTask: nil, tasks: [])
+
+        XCTAssertEqual(summary.presentationGroups.first { $0.scope == .backupProtected }?.count, 1)
+        XCTAssertEqual(summary.presentationGroups.first { $0.scope == .branch }?.count, 1)
+    }
+
+    func testArtifactWasteGroupsByRunFolderAndType() {
+        let groups = ProjectHygienePresentation.groupArtifactWaste([
+            artifactWaste(id: "a", path: "/tmp/runs/B079/preflight.md", runId: "B079"),
+            artifactWaste(id: "b", path: "/tmp/runs/B079/preflight.md", runId: "B079"),
+            artifactWaste(id: "c", path: "/tmp/runs/B079/task-state-review.md", runId: "B079"),
+            artifactWaste(id: "d", path: "/tmp/runs/C100/preflight.md", runId: "C100")
+        ])
+
+        XCTAssertEqual(groups.first { $0.title == "Run B079" && $0.artifactType == "preflight.md" }?.count, 2)
+        XCTAssertEqual(groups.first { $0.title == "Run B079" && $0.artifactType == "task-state-review.md" }?.count, 1)
+        XCTAssertEqual(groups.first { $0.title == "Run C100" && $0.artifactType == "preflight.md" }?.count, 1)
+    }
+
+    func testArchivedCleanupDoesNotBecomeSelectedTaskBlocker() {
+        let selected = FactoryTask(id: "selected-task", projectId: "project", title: "Selected")
+        let archived = FactoryTask(id: "archived-task", projectId: "project", title: "Archived", status: .done)
+        let report = hygieneReport(lifecycleItems: [
+            lifecycleItem(id: "task-worktree-archived-task-local", label: "Archived: Task Worktree", classification: .missingPath)
+        ])
+
+        let summary = ProjectHygienePresentation.summarize(report: report, selectedTask: selected, tasks: [selected, archived])
+
+        XCTAssertEqual(summary.selectedTaskRelevantItemCount, 0)
+        XCTAssertEqual(summary.selectedTaskBlockerCount, 0)
+        XCTAssertEqual(summary.historicalItemCount, 1)
+        XCTAssertEqual(summary.presentationGroups.first { $0.scope == .archivedTask }?.severity, .warning)
+    }
+
     func testTaskWorktreeDisplayMapsSingleWorktreeToTaskWorktree() {
         let task = FactoryTask(
             projectId: "project",
@@ -2016,6 +2081,71 @@ final class FactoryDesktopCoreTests: XCTestCase {
             throw FactoryError.commandFailed(output)
         }
     }
+}
+
+private func hygieneReport(
+    lifecycleItems: [LifecycleItem] = [],
+    artifactWasteItems: [ArtifactWasteItem] = []
+) -> RepoHygieneReport {
+    RepoHygieneReport(
+        projectId: "project",
+        projectName: "Project",
+        canonicalRepoPath: "/tmp/project",
+        currentBranch: "main",
+        currentHEAD: "HEAD",
+        defaultBranch: "main",
+        originDefaultBranch: "main",
+        workingTreeClean: true,
+        defaultAheadOfOrigin: 0,
+        defaultBehindOrigin: 0,
+        localBranches: [],
+        gitWorktrees: [],
+        staleWorktreeMetadata: [],
+        runnerEnvironment: RunnerGitEnvironment(environment: [:]),
+        lifecycleItems: lifecycleItems,
+        preflightGate: LifecyclePreflightGate(level: .green, checks: []),
+        artifactWasteItems: artifactWasteItems,
+        hygieneEvents: []
+    )
+}
+
+private func lifecycleItem(
+    id: String,
+    kind: LifecycleItemKind = .worktree,
+    label: String,
+    branch: String? = nil,
+    classification: LifecycleClassification
+) -> LifecycleItem {
+    LifecycleItem(
+        id: id,
+        kind: kind,
+        label: label,
+        branch: branch,
+        classification: classification,
+        state: classification == .missingPath ? .blocked : .cleaned,
+        reason: "Test item",
+        recommendation: classification == .missingPath ? .manualReviewRequired : .continueWork,
+        allowedActions: [.refreshScan]
+    )
+}
+
+private func artifactWaste(
+    id: String,
+    path: String,
+    runId: String? = nil
+) -> ArtifactWasteItem {
+    ArtifactWasteItem(
+        id: id,
+        projectId: "project",
+        taskId: "task",
+        runId: runId,
+        path: path,
+        ageDays: 40,
+        sizeBytes: 12,
+        isLinkedToActiveTaskOrRun: false,
+        classification: .safeToArchive,
+        recommendation: .archiveArtifacts
+    )
 }
 
 private struct LifecycleSyncFixture {
