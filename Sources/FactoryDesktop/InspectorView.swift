@@ -17,6 +17,7 @@ struct InspectorView: View {
                 worktreeCard
                 actionCard
                 taskStateCard
+                lifecycleSyncCard
                 preflightCard
                 lifecycleCard
                 gitCard
@@ -479,6 +480,26 @@ struct InspectorView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var lifecycleSyncCard: some View {
+        InspectorCard(title: "Lifecycle Sync") {
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    Task { await store.syncSelectedTaskLifecycle() }
+                } label: {
+                    Label("Sync lifecycle", systemImage: "arrow.triangle.2.circlepath")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .disabled(store.selectedTask == nil || store.isWorking)
+
+                LifecycleSyncSummaryView(
+                    result: store.latestLifecycleSyncResult,
+                    emptyMessage: "Run lifecycle sync to inspect Git-backed task facts."
+                )
+            }
+        }
+        .buttonStyle(.bordered)
     }
 
     private var lifecycleCard: some View {
