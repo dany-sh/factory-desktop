@@ -16,6 +16,16 @@ public extension FactoryTask {
         }
         return changed
     }
+
+    mutating func setBaseBranchCommit(_ commit: String?, for flavor: WorktreeFlavor) {
+        switch flavor {
+        case .local:
+            localBaseBranchCommit = commit
+        case .codex:
+            codexBaseBranchCommit = commit
+        }
+        updatedAt = Date()
+    }
 }
 
 public struct TaskWorktreeDisplay: Equatable, Identifiable {

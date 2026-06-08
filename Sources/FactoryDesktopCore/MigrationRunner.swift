@@ -232,6 +232,14 @@ public final class MigrationRunner {
             CREATE INDEX IF NOT EXISTS idx_codex_session_links_project_id ON codex_session_links(project_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_codex_session_links_task_id ON codex_session_links(task_id, updated_at DESC);
             """
+        ),
+        Migration(
+            version: 5,
+            name: "task_base_branch_commits",
+            sql: """
+            ALTER TABLE tasks ADD COLUMN local_base_branch_commit TEXT;
+            ALTER TABLE tasks ADD COLUMN codex_base_branch_commit TEXT;
+            """
         )
     ]
 }

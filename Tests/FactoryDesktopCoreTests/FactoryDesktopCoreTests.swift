@@ -252,6 +252,73 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(duplicateItem.recommendation, .deleteDuplicateBranch)
     }
 
+    func testLifecycleClassifierMarksBehindBranchAsOutdatedRefreshable() {
+        let branch = GitBranchRecord(
+            name: "local/task",
+            head: "abc1234",
+            aheadOfDefault: 0,
+            behindDefault: 3,
+            hasUniqueCommits: false,
+            isActiveFactoryBranch: true
+        )
+
+        let item = LifecycleClassifier.classifyBranch(branch, defaultBranch: "main", checkedOutBranches: ["local/task"])
+
+        XCTAssertEqual(item.classification, LifecycleClassification.outdated)
+        XCTAssertEqual(item.state, LifecycleState.outdated)
+        XCTAssertEqual(item.recommendation, LifecycleRecommendedAction.refreshFromMain)
+        XCTAssertEqual(item.allowedActions, [LifecycleSafeAction.inspectDiff, LifecycleSafeAction.refreshFromMain])
+        XCTAssertEqual(item.ahead, 0)
+        XCTAssertEqual(item.behind, 3)
+    }
+
+    func testLifecycleClassifierMarksDivergedBranchAsOutdatedRebaseable() {
+        let branch = GitBranchRecord(
+            name: "local/task",
+            head: "abc1234",
+            aheadOfDefault: 2,
+            behindDefault: 4,
+            hasUniqueCommits: true,
+            isActiveFactoryBranch: true,
+            fastForwardPossible: false
+        )
+
+        let item = LifecycleClassifier.classifyBranch(branch, defaultBranch: "main", checkedOutBranches: ["local/task"])
+
+        XCTAssertEqual(item.classification, LifecycleClassification.outdated)
+        XCTAssertEqual(item.state, LifecycleState.outdated)
+        XCTAssertEqual(item.recommendation, LifecycleRecommendedAction.rebaseOntoMain)
+        XCTAssertEqual(item.allowedActions, [LifecycleSafeAction.inspectDiff, LifecycleSafeAction.rebaseOntoMain])
+        XCTAssertEqual(item.ahead, 2)
+        XCTAssertEqual(item.behind, 4)
+    }
+
+    func testLifecycleGateSkipsTargetBranchBlockersForExistingTaskWorkspace() {
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: "/tmp/demo", defaultBranch: "main")
+        let task = FactoryTask(
+            id: "task",
+            projectId: "project",
+            title: "Task",
+            localBranch: "local/task",
+            localWorktreePath: "/tmp/task-worktree"
+        )
+
+        let gate = LifecycleClassifier.gate(
+            project: project,
+            selectedTask: task,
+            currentBranch: "main",
+            workingTreeClean: true,
+            defaultAheadOfOrigin: 0,
+            worktrees: [GitWorktreeRecord(path: "/tmp/task-worktree", branch: "local/task", isClean: true)],
+            branches: [GitBranchRecord(name: "local/task", isActiveFactoryBranch: true)],
+            staleMetadata: [],
+            runnerEnvironment: RunnerGitEnvironment(environment: [:])
+        )
+
+        XCTAssertFalse(gate.checks.contains { $0.id == "target-branch-exists" })
+        XCTAssertFalse(gate.checks.contains { $0.id == "target-branch-checked-out" })
+    }
+
     func testLifecycleClassifierMarksStoredMissingWorktreeReference() {
         let task = FactoryTask(id: "task", projectId: "project", title: "Task", localBranch: "factory/task", localWorktreePath: "/tmp/missing")
         let display = TaskWorktreeDisplay(
@@ -1413,6 +1480,36 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(refreshedHead, mainHead)
         XCTAssertEqual(storedTask.localBranch, "local/task")
         XCTAssertEqual(fixture.store.errorMessage, nil)
+        XCTAssertTrue(fixture.store.statusMessage.contains("Refreshed task worktree"))
+    }
+
+    @MainActor
+    func testLifecycleRefreshFromMainUpdatesStoredBaseCommit() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .approved,
+            gitScenario: .staleCleanLocalBranch
+        )
+
+        fixture.store.selectProject(fixture.project.id)
+        fixture.store.selectTask(fixture.task.id)
+        await fixture.store.refreshLifecycleScan()
+
+        let item = try XCTUnwrap(fixture.store.latestLifecycleReport?.lifecycleItems.first {
+            $0.kind == .branch && $0.branch == "local/task"
+        })
+        XCTAssertEqual(item.classification, LifecycleClassification.outdated)
+        XCTAssertEqual(item.recommendation, .refreshFromMain)
+
+        await fixture.store.performLifecycleAction(.refreshFromMain, item: item)
+
+        let storedTask = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first { $0.id == fixture.task.id })
+        let repoURL = URL(fileURLWithPath: fixture.project.path)
+        let mainHead = try runGitOutput(["rev-parse", "--verify", fixture.project.defaultBranch], in: repoURL)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        XCTAssertEqual(storedTask.localBaseBranchCommit, mainHead)
+        XCTAssertNil(fixture.store.errorMessage)
         XCTAssertTrue(fixture.store.statusMessage.contains("Refreshed task worktree"))
     }
 

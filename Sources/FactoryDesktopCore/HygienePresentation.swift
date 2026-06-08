@@ -277,7 +277,7 @@ public enum ProjectHygienePresentation {
         switch item.classification {
         case .dirtyRisk, .unpushedRisk, .missingPath, .orphanedMetadata, .unknownRisk:
             .blocked
-        case .readyToMerge, .duplicateEquivalent, .backupProtected, .removedCleaned, .staleCandidate:
+        case .outdated, .readyToMerge, .duplicateEquivalent, .backupProtected, .removedCleaned, .staleCandidate:
             .warning
         case .healthy, .active, .alreadyMerged:
             .safe

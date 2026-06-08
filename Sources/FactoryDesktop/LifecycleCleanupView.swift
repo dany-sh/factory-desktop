@@ -292,6 +292,7 @@ private struct LifecycleMetric: View {
 private struct LifecycleItemRow: View {
     @EnvironmentObject private var store: AppStore
     var item: LifecycleItem
+    @State private var pendingConfirmationAction: LifecycleSafeAction?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -330,19 +331,31 @@ private struct LifecycleItemRow: View {
             actionButtons
         }
         .padding(.vertical, 4)
+        .alert(item: $pendingConfirmationAction) { action in
+            Alert(
+                title: Text(action.displayName),
+                message: Text(confirmationMessage(for: action)),
+                primaryButton: .default(Text(confirmLabel(for: action))) {
+                    Task { await store.performLifecycleAction(action, item: item) }
+                },
+                secondaryButton: .cancel()
+            )
+        }
     }
 
     private var actionButtons: some View {
         HStack(spacing: 8) {
             ForEach(item.allowedActions.prefix(4)) { action in
                 Button(action.displayName) {
-                    if action == .refreshScan {
-                        Task { await store.refreshLifecycleScan() }
+                    if action.requiresConfirmation {
+                        pendingConfirmationAction = action
+                    } else {
+                        Task { await store.performLifecycleAction(action, item: item) }
                     }
                 }
                 .controlSize(.small)
-                .disabled(store.isWorking || action != .refreshScan)
-                .help(action == .refreshScan ? "Refresh the lifecycle scan." : "Foundation-only safe action. Command helper exists; execution is not wired in P0.")
+                .disabled(store.isWorking)
+                .help(help(for: action))
             }
         }
     }
@@ -351,10 +364,55 @@ private struct LifecycleItemRow: View {
         switch item.classification {
         case .healthy, .alreadyMerged:
             .green
-        case .active, .readyToMerge, .duplicateEquivalent, .staleCandidate, .removedCleaned:
+        case .active, .outdated, .readyToMerge, .duplicateEquivalent, .staleCandidate, .removedCleaned:
             .orange
         case .dirtyRisk, .unpushedRisk, .backupProtected, .orphanedMetadata, .unknownRisk, .missingPath:
             .red
+        }
+    }
+
+    private func help(for action: LifecycleSafeAction) -> String {
+        switch action {
+        case .refreshScan:
+            return "Refresh the lifecycle scan."
+        case .inspectDiff:
+            return "Preview the current diff or divergence against the default branch."
+        case .refreshFromMain:
+            return "Fast-forward this clean task worktree to the latest default branch and update the stored base commit."
+        case .rebaseOntoMain:
+            return "Replay the task commits on top of the latest default branch after confirmation."
+        case .stashWorktreeChanges:
+            return "Stash tracked and untracked worktree changes before refreshing."
+        case .createWIPBackupCommit:
+            return "Create a WIP commit inside the task worktree so the branch can be updated safely."
+        default:
+            return action.isFoundationOnly ? "Foundation-only action." : action.displayName
+        }
+    }
+
+    private func confirmationMessage(for action: LifecycleSafeAction) -> String {
+        switch action {
+        case .rebaseOntoMain:
+            return "This task branch is \(item.ahead ?? 0) commit(s) ahead and \(item.behind ?? 0) behind the default branch. Factory will run git rebase inside the selected task worktree."
+        case .stashWorktreeChanges:
+            return "Factory will run git stash push -u only inside the selected task worktree."
+        case .createWIPBackupCommit:
+            return "Factory will run git add -A and git commit only inside the selected task worktree."
+        default:
+            return item.reason
+        }
+    }
+
+    private func confirmLabel(for action: LifecycleSafeAction) -> String {
+        switch action {
+        case .rebaseOntoMain:
+            return "Rebase"
+        case .stashWorktreeChanges:
+            return "Stash"
+        case .createWIPBackupCommit:
+            return "Commit WIP"
+        default:
+            return "Continue"
         }
     }
 }

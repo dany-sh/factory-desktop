@@ -3,6 +3,7 @@ import Foundation
 public enum LifecycleClassification: String, CaseIterable, Codable, Identifiable {
     case healthy
     case active
+    case outdated
     case readyToMerge = "ready_to_merge"
     case alreadyMerged = "already_merged"
     case duplicateEquivalent = "duplicate_equivalent"
@@ -21,6 +22,7 @@ public enum LifecycleClassification: String, CaseIterable, Codable, Identifiable
         switch self {
         case .healthy: "Healthy"
         case .active: "Active"
+        case .outdated: "Outdated"
         case .readyToMerge: "Ready To Merge"
         case .alreadyMerged: "Already Merged"
         case .duplicateEquivalent: "Duplicate Equivalent"
@@ -54,6 +56,7 @@ public enum LifecycleState: String, CaseIterable, Codable, Identifiable {
     case archived
     case cleaned
     case blocked
+    case outdated
     case dirtyRisk = "dirty_risk"
     case conflictRisk = "conflict_risk"
     case duplicateEquivalent = "duplicate_equivalent"
@@ -82,6 +85,7 @@ public enum LifecycleState: String, CaseIterable, Codable, Identifiable {
         case .archived: "Archived"
         case .cleaned: "Cleaned"
         case .blocked: "Blocked"
+        case .outdated: "Outdated"
         case .dirtyRisk: "Dirty Risk"
         case .conflictRisk: "Conflict Risk"
         case .duplicateEquivalent: "Duplicate Equivalent"
@@ -97,6 +101,8 @@ public enum LifecycleRecommendedAction: String, CaseIterable, Codable, Identifia
     case runTests = "run_tests"
     case reviewDiff = "review_diff"
     case createBackup = "create_backup"
+    case refreshFromMain = "refresh_from_main"
+    case rebaseOntoMain = "rebase_onto_main"
     case mergeFastForward = "merge_fast_forward"
     case pushMain = "push_main"
     case deleteDuplicateBranch = "delete_duplicate_branch"
@@ -112,6 +118,8 @@ public enum LifecycleRecommendedAction: String, CaseIterable, Codable, Identifia
         case .runTests: "Run Tests"
         case .reviewDiff: "Review Diff"
         case .createBackup: "Create Backup"
+        case .refreshFromMain: "Refresh from Main"
+        case .rebaseOntoMain: "Rebase onto Main"
         case .mergeFastForward: "Merge Fast Forward"
         case .pushMain: "Push Main"
         case .deleteDuplicateBranch: "Delete Duplicate Branch"
@@ -125,6 +133,9 @@ public enum LifecycleRecommendedAction: String, CaseIterable, Codable, Identifia
 public enum LifecycleSafeAction: String, CaseIterable, Codable, Identifiable {
     case refreshScan = "refresh_scan"
     case inspectDiff = "inspect_diff"
+    case refreshFromMain = "refresh_from_main"
+    case rebaseOntoMain = "rebase_onto_main"
+    case stashWorktreeChanges = "stash_worktree_changes"
     case createWIPBackupCommit = "create_wip_backup_commit"
     case fastForwardMergeToMain = "fast_forward_merge_to_main"
     case pushMain = "push_main"
@@ -142,6 +153,9 @@ public enum LifecycleSafeAction: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .refreshScan: "Refresh Scan"
         case .inspectDiff: "Inspect Diff"
+        case .refreshFromMain: "Refresh from Main"
+        case .rebaseOntoMain: "Rebase onto Main"
+        case .stashWorktreeChanges: "Stash Changes"
         case .createWIPBackupCommit: "Create WIP Backup Commit"
         case .fastForwardMergeToMain: "Fast-forward Merge to Main"
         case .pushMain: "Push Main"
@@ -157,7 +171,7 @@ public enum LifecycleSafeAction: String, CaseIterable, Codable, Identifiable {
 
     public var isFoundationOnly: Bool {
         switch self {
-        case .refreshScan, .inspectDiff:
+        case .refreshScan, .inspectDiff, .refreshFromMain:
             return false
         default:
             return true
@@ -166,7 +180,7 @@ public enum LifecycleSafeAction: String, CaseIterable, Codable, Identifiable {
 
     public var requiresConfirmation: Bool {
         switch self {
-        case .refreshScan, .inspectDiff:
+        case .refreshScan, .inspectDiff, .refreshFromMain:
             return false
         default:
             return true
@@ -390,6 +404,8 @@ public struct GitBranchRecord: Equatable, Codable, Identifiable {
     public var head: String?
     public var aheadOfOrigin: Int?
     public var behindOrigin: Int?
+    public var aheadOfDefault: Int?
+    public var behindDefault: Int?
     public var isMergedToDefault: Bool
     public var isDuplicateEquivalent: Bool
     public var hasUniqueCommits: Bool
@@ -402,6 +418,8 @@ public struct GitBranchRecord: Equatable, Codable, Identifiable {
         head: String? = nil,
         aheadOfOrigin: Int? = nil,
         behindOrigin: Int? = nil,
+        aheadOfDefault: Int? = nil,
+        behindDefault: Int? = nil,
         isMergedToDefault: Bool = false,
         isDuplicateEquivalent: Bool = false,
         hasUniqueCommits: Bool = false,
@@ -413,6 +431,8 @@ public struct GitBranchRecord: Equatable, Codable, Identifiable {
         self.head = head
         self.aheadOfOrigin = aheadOfOrigin
         self.behindOrigin = behindOrigin
+        self.aheadOfDefault = aheadOfDefault
+        self.behindDefault = behindDefault
         self.isMergedToDefault = isMergedToDefault
         self.isDuplicateEquivalent = isDuplicateEquivalent
         self.hasUniqueCommits = hasUniqueCommits
@@ -713,6 +733,42 @@ public enum LifecycleClassifier {
             )
         }
 
+        if let behindDefault = branch.behindDefault, behindDefault > 0 {
+            let aheadDefault = branch.aheadOfDefault ?? 0
+            if aheadDefault == 0 {
+                return LifecycleItem(
+                    id: "branch-\(branch.name)",
+                    kind: .branch,
+                    label: branch.name,
+                    branch: branch.name,
+                    head: branch.head,
+                    ahead: aheadDefault,
+                    behind: behindDefault,
+                    classification: .outdated,
+                    state: .outdated,
+                    reason: "Branch is \(behindDefault) commit(s) behind \(defaultBranch) with no unique task commits. Refresh from Main is safe.",
+                    recommendation: .refreshFromMain,
+                    allowedActions: [.inspectDiff, .refreshFromMain]
+                )
+            }
+
+            return LifecycleItem(
+                id: "branch-\(branch.name)",
+                kind: .branch,
+                label: branch.name,
+                branch: branch.name,
+                head: branch.head,
+                ahead: aheadDefault,
+                behind: behindDefault,
+                classification: .outdated,
+                state: .outdated,
+                reason: "Branch is \(aheadDefault) commit(s) ahead and \(behindDefault) behind \(defaultBranch). Rebase onto Main is required before continuing.",
+                recommendation: .rebaseOntoMain,
+                allowedActions: [.inspectDiff, .rebaseOntoMain],
+                blockedActions: [LifecycleBlockedAction(action: .deleteDuplicateBranch, reason: "Branch has unique commits.")]
+            )
+        }
+
         if branch.hasUniqueCommits {
             let checkedOut = checkedOutBranches.contains(branch.name)
             let fastForwardBlocked = branch.fastForwardPossible == false
@@ -779,7 +835,7 @@ public enum LifecycleClassifier {
                 state: .dirtyRisk,
                 reason: "Worktree has staged, unstaged, or untracked changes.",
                 recommendation: .reviewDiff,
-                allowedActions: [.inspectDiff, .createWIPBackupCommit],
+                allowedActions: [.inspectDiff, .stashWorktreeChanges, .createWIPBackupCommit],
                 blockedActions: [LifecycleBlockedAction(action: .removeCleanWorktree, reason: "Factory never deletes dirty worktrees.")]
             )
         }
@@ -916,17 +972,28 @@ public enum LifecycleClassifier {
             checks.append(LifecycleGateCheck(id: "duplicate-active-branches", label: "Duplicate branches", level: .yellow, message: "Multiple active Factory/Codex branches look equivalent: \(duplicateKeys.sorted().joined(separator: ", "))."))
         }
         if let selectedTask {
+            let hasExistingTaskWorkspace = [
+                selectedTask.localBranch,
+                selectedTask.codexBranch,
+                selectedTask.localWorktreePath,
+                selectedTask.codexWorktreePath
+            ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .contains { !$0.isEmpty }
+
             let expectedBranches = [
                 WorktreeFlavor.local.branchPrefix + "/" + selectedTask.id.shortID + "-" + Slug.make(selectedTask.title, maxLength: 36),
                 WorktreeFlavor.codex.branchPrefix + "/" + selectedTask.id.shortID + "-" + Slug.make(selectedTask.title, maxLength: 36)
             ]
-            let branchNames = Set(branches.map(\.name))
-            if let existing = expectedBranches.first(where: { branchNames.contains($0) }) {
-                checks.append(LifecycleGateCheck(id: "target-branch-exists", label: "Target branch", level: .red, message: "\(existing) already exists."))
-            }
-            let checkedOutBranches = Set(worktrees.compactMap(\.branch))
-            if let checkedOut = expectedBranches.first(where: { checkedOutBranches.contains($0) }) {
-                checks.append(LifecycleGateCheck(id: "target-branch-checked-out", label: "Target branch", level: .red, message: "\(checkedOut) is checked out elsewhere."))
+            if !hasExistingTaskWorkspace {
+                let branchNames = Set(branches.map(\.name))
+                if let existing = expectedBranches.first(where: { branchNames.contains($0) }) {
+                    checks.append(LifecycleGateCheck(id: "target-branch-exists", label: "Target branch", level: .red, message: "\(existing) already exists."))
+                }
+                let checkedOutBranches = Set(worktrees.compactMap(\.branch))
+                if let checkedOut = expectedBranches.first(where: { checkedOutBranches.contains($0) }) {
+                    checks.append(LifecycleGateCheck(id: "target-branch-checked-out", label: "Target branch", level: .red, message: "\(checkedOut) is checked out elsewhere."))
+                }
             }
         }
         if !staleMetadata.isEmpty {

@@ -101,7 +101,8 @@ public final class FactoryRepository {
             rows = try database.query(
                 """
                 SELECT id, project_id, title, type, status, priority, goal, context, acceptance_criteria_json,
-                       local_branch, codex_branch, local_worktree_path, codex_worktree_path, created_at, updated_at
+                       local_branch, codex_branch, local_worktree_path, codex_worktree_path,
+                       local_base_branch_commit, codex_base_branch_commit, created_at, updated_at
                 FROM tasks
                 WHERE project_id = ?
                 ORDER BY updated_at DESC, created_at DESC;
@@ -112,7 +113,8 @@ public final class FactoryRepository {
             rows = try database.query(
                 """
                 SELECT id, project_id, title, type, status, priority, goal, context, acceptance_criteria_json,
-                       local_branch, codex_branch, local_worktree_path, codex_worktree_path, created_at, updated_at
+                       local_branch, codex_branch, local_worktree_path, codex_worktree_path,
+                       local_base_branch_commit, codex_base_branch_commit, created_at, updated_at
                 FROM tasks
                 ORDER BY updated_at DESC, created_at DESC;
                 """
@@ -126,9 +128,10 @@ public final class FactoryRepository {
             """
             INSERT INTO tasks (
               id, project_id, title, type, status, priority, goal, context, acceptance_criteria_json,
-              local_branch, codex_branch, local_worktree_path, codex_worktree_path, created_at, updated_at
+              local_branch, codex_branch, local_worktree_path, codex_worktree_path,
+              local_base_branch_commit, codex_base_branch_commit, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               project_id = excluded.project_id,
               title = excluded.title,
@@ -142,6 +145,8 @@ public final class FactoryRepository {
               codex_branch = excluded.codex_branch,
               local_worktree_path = excluded.local_worktree_path,
               codex_worktree_path = excluded.codex_worktree_path,
+              local_base_branch_commit = excluded.local_base_branch_commit,
+              codex_base_branch_commit = excluded.codex_base_branch_commit,
               updated_at = excluded.updated_at;
             """,
             binds: [
@@ -158,6 +163,8 @@ public final class FactoryRepository {
                 .text(task.codexBranch),
                 .text(task.localWorktreePath),
                 .text(task.codexWorktreePath),
+                .text(task.localBaseBranchCommit),
+                .text(task.codexBaseBranchCommit),
                 .text(DateCoding.string(from: task.createdAt)),
                 .text(DateCoding.string(from: task.updatedAt))
             ]
@@ -477,6 +484,8 @@ public final class FactoryRepository {
             codexBranch: row.optional("codex_branch"),
             localWorktreePath: row.optional("local_worktree_path"),
             codexWorktreePath: row.optional("codex_worktree_path"),
+            localBaseBranchCommit: row.optional("local_base_branch_commit"),
+            codexBaseBranchCommit: row.optional("codex_base_branch_commit"),
             createdAt: DateCoding.date(from: row.required("created_at")),
             updatedAt: DateCoding.date(from: row.required("updated_at"))
         )

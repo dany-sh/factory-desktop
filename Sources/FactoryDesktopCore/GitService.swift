@@ -80,6 +80,43 @@ public final class GitService {
         }
     }
 
+    public enum TaskWorktreeSyncState: String, Equatable {
+        case current
+        case outdated
+        case needsRebase
+        case dirty
+        case missing
+        case unknown
+    }
+
+    public struct TaskWorktreeSyncAssessment: Equatable {
+        public var branch: String
+        public var path: String
+        public var state: TaskWorktreeSyncState
+        public var aheadOfDefault: Int
+        public var behindDefault: Int
+        public var defaultHead: String?
+        public var reason: String
+
+        public init(
+            branch: String,
+            path: String,
+            state: TaskWorktreeSyncState,
+            aheadOfDefault: Int = 0,
+            behindDefault: Int = 0,
+            defaultHead: String? = nil,
+            reason: String
+        ) {
+            self.branch = branch
+            self.path = path
+            self.state = state
+            self.aheadOfDefault = aheadOfDefault
+            self.behindDefault = behindDefault
+            self.defaultHead = defaultHead
+            self.reason = reason
+        }
+    }
+
     public func snapshot(project: Project, task: FactoryTask?) async throws -> GitSnapshot {
         let worktreePath = preferredWorktreePath(project: project, task: task)
         guard Self.pathIsExistingDirectory(worktreePath) else {
@@ -209,6 +246,11 @@ public final class GitService {
             }
 
             if branch.name != project.defaultBranch {
+                if let countsOutput = await gitOutput(["rev-list", "--left-right", "--count", "\(project.defaultBranch)...\(branch.name)"], in: directory),
+                   let counts = PreflightStatusSummary.parseAheadBehindCounts(countsOutput) {
+                    branch.aheadOfDefault = counts.behind
+                    branch.behindDefault = counts.ahead
+                }
                 let cherryLog = await gitOutput(["log", "--left-right", "--cherry-pick", "--oneline", "\(project.defaultBranch)...\(branch.name)"], in: directory) ?? ""
                 let diffStat = await gitOutput(["diff", "--stat", "\(project.defaultBranch)..\(branch.name)"], in: directory) ?? ""
                 let defaultIsAncestor = await isAncestor(project.defaultBranch, of: branch.name, in: directory)
@@ -481,6 +523,174 @@ public final class GitService {
         return WorktreeResult(branch: assessment.branch, path: standardizedPath)
     }
 
+    public func defaultBranchHead(project: Project) async -> String? {
+        let directory = URL(fileURLWithPath: project.path)
+        return await gitValue(["rev-parse", "--verify", project.defaultBranch], in: directory)
+    }
+
+    public func assessTaskWorktreeSync(
+        project: Project,
+        task: FactoryTask,
+        flavor: WorktreeFlavor
+    ) async -> TaskWorktreeSyncAssessment {
+        let branch = storedBranch(for: task, flavor: flavor) ?? branchName(for: task, flavor: flavor)
+        let path = storedWorktreePath(for: task, flavor: flavor) ?? paths.worktreeDirectory(project: project, task: task, flavor: flavor).path
+
+        guard project.type == .codeRepo else {
+            return TaskWorktreeSyncAssessment(branch: branch, path: path, state: .unknown, reason: "Only code projects support branch sync actions.")
+        }
+
+        let directory = URL(fileURLWithPath: project.path)
+        guard Self.pathIsExistingDirectory(project.path) else {
+            return TaskWorktreeSyncAssessment(branch: branch, path: path, state: .unknown, reason: "Project path is missing.")
+        }
+
+        let defaultBranch = project.defaultBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !defaultBranch.isEmpty,
+              let defaultHead = await gitValue(["rev-parse", "--verify", defaultBranch], in: directory) else {
+            return TaskWorktreeSyncAssessment(branch: branch, path: path, state: .unknown, reason: "Default branch \(project.defaultBranch) could not be resolved.")
+        }
+
+        guard await gitValue(["rev-parse", "--verify", branch], in: directory) != nil else {
+            return TaskWorktreeSyncAssessment(branch: branch, path: path, state: .missing, defaultHead: defaultHead, reason: "Task branch does not exist yet.")
+        }
+
+        guard Self.pathIsExistingDirectory(path) else {
+            return TaskWorktreeSyncAssessment(branch: branch, path: path, state: .missing, defaultHead: defaultHead, reason: "Task worktree path is missing.")
+        }
+
+        guard let isClean = await worktreeCleanState(path: path) else {
+            return TaskWorktreeSyncAssessment(branch: branch, path: path, state: .unknown, defaultHead: defaultHead, reason: "Worktree state is unknown. Refresh lifecycle scan and inspect manually first.")
+        }
+
+        guard let countsOutput = await gitOutput(["rev-list", "--left-right", "--count", "\(defaultBranch)...\(branch)"], in: directory),
+              let counts = PreflightStatusSummary.parseAheadBehindCounts(countsOutput) else {
+            return TaskWorktreeSyncAssessment(branch: branch, path: path, state: .unknown, defaultHead: defaultHead, reason: "Ahead/behind counts could not be resolved.")
+        }
+
+        let aheadOfDefault = counts.behind
+        let behindDefault = counts.ahead
+
+        if !isClean {
+            return TaskWorktreeSyncAssessment(
+                branch: branch,
+                path: path,
+                state: .dirty,
+                aheadOfDefault: aheadOfDefault,
+                behindDefault: behindDefault,
+                defaultHead: defaultHead,
+                reason: "Worktree has local changes. Review, stash, or commit WIP before updating from \(defaultBranch)."
+            )
+        }
+
+        if behindDefault > 0, aheadOfDefault == 0 {
+            return TaskWorktreeSyncAssessment(
+                branch: branch,
+                path: path,
+                state: .outdated,
+                aheadOfDefault: aheadOfDefault,
+                behindDefault: behindDefault,
+                defaultHead: defaultHead,
+                reason: "Branch is \(behindDefault) commit(s) behind \(defaultBranch) with no unique task commits."
+            )
+        }
+
+        if behindDefault > 0, aheadOfDefault > 0 {
+            return TaskWorktreeSyncAssessment(
+                branch: branch,
+                path: path,
+                state: .needsRebase,
+                aheadOfDefault: aheadOfDefault,
+                behindDefault: behindDefault,
+                defaultHead: defaultHead,
+                reason: "Branch is \(aheadOfDefault) commit(s) ahead and \(behindDefault) behind \(defaultBranch)."
+            )
+        }
+
+        return TaskWorktreeSyncAssessment(
+            branch: branch,
+            path: path,
+            state: .current,
+            aheadOfDefault: aheadOfDefault,
+            behindDefault: behindDefault,
+            defaultHead: defaultHead,
+            reason: "Task branch is current with \(defaultBranch)."
+        )
+    }
+
+    public func refreshTaskWorktreeFromMain(
+        project: Project,
+        task: FactoryTask,
+        flavor: WorktreeFlavor
+    ) async throws -> TaskWorktreeSyncAssessment {
+        let assessment = await assessTaskWorktreeSync(project: project, task: task, flavor: flavor)
+        guard assessment.state == .outdated else {
+            throw FactoryError.commandFailed(assessment.reason)
+        }
+
+        let result = try await commandRunner.run(
+            CommandRequest(
+                executable: "git",
+                arguments: ["merge", "--ff-only", project.defaultBranch],
+                workingDirectory: URL(fileURLWithPath: assessment.path),
+                manuallyApproved: true
+            )
+        )
+        guard result.succeeded else {
+            throw FactoryError.commandFailed(result.output)
+        }
+
+        return await assessTaskWorktreeSync(project: project, task: task, flavor: flavor)
+    }
+
+    public func rebaseTaskWorktreeOntoDefault(
+        project: Project,
+        task: FactoryTask,
+        flavor: WorktreeFlavor
+    ) async throws -> TaskWorktreeSyncAssessment {
+        let assessment = await assessTaskWorktreeSync(project: project, task: task, flavor: flavor)
+        guard assessment.state == .needsRebase else {
+            throw FactoryError.commandFailed(assessment.reason)
+        }
+
+        let result = try await commandRunner.run(
+            CommandRequest(
+                executable: "git",
+                arguments: ["rebase", project.defaultBranch],
+                workingDirectory: URL(fileURLWithPath: assessment.path),
+                manuallyApproved: true
+            )
+        )
+        guard result.succeeded else {
+            throw FactoryError.commandFailed(result.output)
+        }
+
+        return await assessTaskWorktreeSync(project: project, task: task, flavor: flavor)
+    }
+
+    public func stashTaskWorktreeChanges(
+        project: Project,
+        task: FactoryTask,
+        flavor: WorktreeFlavor
+    ) async throws -> CommandResult {
+        let path = storedWorktreePath(for: task, flavor: flavor) ?? paths.worktreeDirectory(project: project, task: task, flavor: flavor).path
+        guard Self.pathIsExistingDirectory(path) else {
+            throw FactoryError.missingWorktreePath(path)
+        }
+        let result = try await commandRunner.run(
+            CommandRequest(
+                executable: "git",
+                arguments: ["stash", "push", "-u", "-m", "Factory stash before refresh"],
+                workingDirectory: URL(fileURLWithPath: path),
+                manuallyApproved: true
+            )
+        )
+        guard result.succeeded else {
+            throw FactoryError.commandFailed(result.output)
+        }
+        return result
+    }
+
     public func openVSCode(path: String) async throws -> CommandResult {
         guard Self.pathIsExistingDirectory(path) else {
             throw FactoryError.missingWorktreePath(path)
@@ -538,6 +748,8 @@ public final class GitService {
                 return CommandRequest(executable: "git", arguments: ["diff", "--stat"], workingDirectory: URL(fileURLWithPath: path))
             }
             return CommandRequest(executable: "git", arguments: ["diff", "--stat"], workingDirectory: directory)
+        case .refreshFromMain, .rebaseOntoMain, .stashWorktreeChanges:
+            return nil
         case .createWIPBackupCommit:
             guard let path = item?.path else { return nil }
             return CommandRequest(executable: "git", arguments: ["commit", "-m", "WIP backup before cleanup"], workingDirectory: URL(fileURLWithPath: path), manuallyApproved: true)

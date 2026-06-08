@@ -656,6 +656,8 @@ public struct FactoryTask: Identifiable, Equatable, Codable {
     public var codexBranch: String?
     public var localWorktreePath: String?
     public var codexWorktreePath: String?
+    public var localBaseBranchCommit: String?
+    public var codexBaseBranchCommit: String?
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -673,6 +675,8 @@ public struct FactoryTask: Identifiable, Equatable, Codable {
         codexBranch: String? = nil,
         localWorktreePath: String? = nil,
         codexWorktreePath: String? = nil,
+        localBaseBranchCommit: String? = nil,
+        codexBaseBranchCommit: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -689,6 +693,8 @@ public struct FactoryTask: Identifiable, Equatable, Codable {
         self.codexBranch = codexBranch
         self.localWorktreePath = localWorktreePath
         self.codexWorktreePath = codexWorktreePath
+        self.localBaseBranchCommit = localBaseBranchCommit
+        self.codexBaseBranchCommit = codexBaseBranchCommit
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

@@ -493,7 +493,7 @@ public final class AppStore: ObservableObject {
                 task.codexBranch = result.branch
                 task.codexWorktreePath = result.path
             }
-            task.updatedAt = Date()
+            task.setBaseBranchCommit(await gitService.defaultBranchHead(project: project), for: flavor)
             try repository.upsert(task: task)
             try reload()
             selectedTaskID = task.id
@@ -1476,6 +1476,84 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    public func performLifecycleAction(_ action: LifecycleSafeAction, item: LifecycleItem) async {
+        guard let project = selectedProject, var task = selectedTask, let repository, let gitService else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        do {
+            var completionStatusMessage: String?
+            switch action {
+            case .refreshScan:
+                await refreshLifecycleScan()
+                return
+            case .inspectDiff:
+                guard let request = gitService.lifecycleActionCommand(action, project: project, item: item) else {
+                    errorMessage = "No diff command is available for this item."
+                    return
+                }
+                let result = try await commandRunner.run(request)
+                selectedRunOutput = result.output
+                completionStatusMessage = "Diff preview refreshed."
+            case .createWIPBackupCommit:
+                guard let flavor = worktreeFlavor(for: task, item: item), let path = item.path else {
+                    errorMessage = "This lifecycle item is not linked to the selected task worktree."
+                    return
+                }
+                let result = try await gitService.commitAll(path: path, defaultBranch: project.defaultBranch, message: "WIP backup before refresh")
+                selectedRunOutput = result.output
+                task.setBaseBranchCommit(await gitService.defaultBranchHead(project: project), for: flavor)
+                try repository.upsert(task: task)
+                completionStatusMessage = "WIP commit created."
+            case .stashWorktreeChanges:
+                guard let flavor = worktreeFlavor(for: task, item: item) else {
+                    errorMessage = "This lifecycle item is not linked to the selected task worktree."
+                    return
+                }
+                let result = try await gitService.stashTaskWorktreeChanges(project: project, task: task, flavor: flavor)
+                selectedRunOutput = result.output
+                completionStatusMessage = "Stashed local worktree changes."
+            case .refreshFromMain:
+                guard let flavor = worktreeFlavor(for: task, item: item) else {
+                    errorMessage = "This lifecycle item is not linked to the selected task worktree."
+                    return
+                }
+                let assessment = try await gitService.refreshTaskWorktreeFromMain(project: project, task: task, flavor: flavor)
+                task.setBaseBranchCommit(assessment.defaultHead, for: flavor)
+                try repository.upsert(task: task)
+                completionStatusMessage = "Refreshed task worktree from \(project.defaultBranch)."
+            case .rebaseOntoMain:
+                guard let flavor = worktreeFlavor(for: task, item: item) else {
+                    errorMessage = "This lifecycle item is not linked to the selected task worktree."
+                    return
+                }
+                let assessment = try await gitService.rebaseTaskWorktreeOntoDefault(project: project, task: task, flavor: flavor)
+                task.setBaseBranchCommit(assessment.defaultHead, for: flavor)
+                try repository.upsert(task: task)
+                completionStatusMessage = "Rebased task worktree onto \(project.defaultBranch)."
+            case .fastForwardMergeToMain, .pushMain, .deleteMergedBranch, .deleteDuplicateBranch,
+                 .removeCleanWorktree, .pruneWorktreeMetadata, .archiveOldArtifacts,
+                 .deleteOldArtifacts, .keepProtectBackupBranch:
+                errorMessage = "\(action.displayName) is not wired yet."
+                return
+            }
+
+            try reload()
+            selectedTaskID = task.id
+            await refreshGitStatus()
+            await refreshLifecycleScan()
+            if let completionStatusMessage {
+                statusMessage = completionStatusMessage
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     @discardableResult
     public func syncSelectedTaskLifecycle() async -> TaskLifecycleSyncResult? {
         guard let repository, let project = selectedProject, let task = selectedTask else {
@@ -2096,6 +2174,16 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    private func worktreeFlavor(for task: FactoryTask, item: LifecycleItem) -> WorktreeFlavor? {
+        if item.branch == task.localBranch || item.path == task.localWorktreePath {
+            return .local
+        }
+        if item.branch == task.codexBranch || item.path == task.codexWorktreePath {
+            return .codex
+        }
+        return nil
+    }
+
     public func refreshSelectedTaskWorktree(displayID: String) async {
         guard let project = selectedProject, var task = selectedTask, let repository, let gitService,
               let flavor = worktreeFlavor(for: displayID) else {
@@ -2123,7 +2211,7 @@ public final class AppStore: ObservableObject {
                 task.codexBranch = result.branch
                 task.codexWorktreePath = result.path
             }
-            task.updatedAt = Date()
+            task.setBaseBranchCommit(await gitService.defaultBranchHead(project: project), for: flavor)
             try repository.upsert(task: task)
             try reload()
             selectedTaskID = task.id
