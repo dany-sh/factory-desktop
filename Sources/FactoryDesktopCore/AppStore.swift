@@ -5,17 +5,23 @@ import Foundation
 public final class AppStore: ObservableObject {
     @Published public private(set) var projects: [Project] = []
     @Published public private(set) var tasks: [FactoryTask] = []
+    @Published public private(set) var backlogIdeas: [BacklogIdea] = []
     @Published public private(set) var runs: [RunRecord] = []
     @Published public private(set) var artifacts: [Artifact] = []
     @Published public private(set) var taskEvents: [TaskEvent] = []
     @Published public var selectedProjectID: String?
     @Published public var selectedTaskID: String?
+    @Published public var selectedBacklogIdeaID: String?
     @Published public var selectedModel: String = ModelPolicy.plannerDefault
     @Published public var gitSnapshot: GitSnapshot = GitSnapshot()
     @Published public var latestPreflightReport: PreflightReport?
     @Published public var latestLifecycleReport: RepoHygieneReport?
     @Published public private(set) var latestTaskStateReview: TaskStateReview?
     @Published public private(set) var latestLifecycleSyncResult: TaskLifecycleSyncResult?
+    @Published public private(set) var selectedRunnerProjectLink: RunnerProjectLink?
+    @Published public private(set) var selectedTaskRunnerSessionLink: RunnerSessionLink?
+    @Published public private(set) var runnerSessionLinks: [RunnerSessionLink] = []
+    @Published public private(set) var latestRunnerRecommendation: RunnerRecommendation?
     @Published public private(set) var selectedCodexProjectLink: CodexProjectLink?
     @Published public private(set) var selectedTaskCodexSessionLink: CodexSessionLink?
     @Published public private(set) var codexSessionLinks: [CodexSessionLink] = []
@@ -33,6 +39,7 @@ public final class AppStore: ObservableObject {
     private var repository: FactoryRepository?
     private var commandRunner: CommandRunner
     private var codexCLIService: CodexCLIService
+    private var runnerAdapters: [RunnerProvider: RunnerProviderAdapter]
     private var gitService: GitService?
     private var ollamaClient: OllamaClient
     private var handoffService: HandoffService
@@ -50,9 +57,37 @@ public final class AppStore: ObservableObject {
         return tasks.first { $0.id == selectedTaskID }
     }
 
+    public var selectedBacklogIdea: BacklogIdea? {
+        guard let selectedBacklogIdeaID else { return nil }
+        return backlogIdeas.first { $0.id == selectedBacklogIdeaID }
+    }
+
     public var tasksForSelectedProject: [FactoryTask] {
         guard let project = selectedProject else { return [] }
         return tasks.filter { $0.projectId == project.id }
+    }
+
+    public var backlogIdeasForSelectedProject: [BacklogIdea] {
+        guard let project = selectedProject else { return [] }
+        return backlogIdeas.filter { $0.projectId == project.id }
+    }
+
+    public var nextWorkItems: [BacklogNextWorkItem] {
+        let runnerLinksByTaskID = Dictionary(uniqueKeysWithValues: runnerSessionLinks.compactMap { link in
+            link.taskId.map { ($0, link) }
+        })
+        let recommendationsByTaskID: [String: RunnerRecommendation]
+        if let selectedTask {
+            recommendationsByTaskID = latestRunnerRecommendation.map { [selectedTask.id: $0] } ?? [:]
+        } else {
+            recommendationsByTaskID = [:]
+        }
+        return BacklogQueueRanking.rank(
+            ideas: backlogIdeasForSelectedProject,
+            tasks: tasksForSelectedProject,
+            runnerLinksByTaskID: runnerLinksByTaskID,
+            recommendationsByTaskID: recommendationsByTaskID
+        )
     }
 
     public var runsForSelectedTask: [RunRecord] {
@@ -196,8 +231,10 @@ public final class AppStore: ObservableObject {
         self.buildInfo = BuildInfoService.current(launchTimestamp: Date())
         self.commandRunner = CommandRunner()
         self.codexCLIService = codexCLIService ?? CodexCLIService(commandRunner: commandRunner)
+        self.runnerAdapters = [:]
         self.ollamaClient = OllamaClient()
         self.handoffService = HandoffService(paths: paths)
+        self.runnerAdapters[.codex] = CodexRunnerAdapter(service: self.codexCLIService)
 
         do {
             try paths.ensureBaseDirectories()
@@ -217,6 +254,7 @@ public final class AppStore: ObservableObject {
         guard let repository else { return }
         projects = try repository.projects()
         tasks = try repository.tasks()
+        backlogIdeas = try repository.backlogIdeas()
         if selectedProjectID == nil {
             selectedProjectID = projects.first?.id
         }
@@ -246,25 +284,33 @@ public final class AppStore: ObservableObject {
         if let project = selectedProject {
             selectedCodexProjectLink = try repository.codexProjectLink(projectId: project.id)
             codexSessionLinks = try repository.codexSessionLinks(projectId: project.id)
+            selectedRunnerProjectLink = try repository.runnerProjectLink(projectId: project.id)
+            runnerSessionLinks = try repository.runnerSessionLinks(projectId: project.id)
         } else {
             selectedCodexProjectLink = nil
             codexSessionLinks = []
+            selectedRunnerProjectLink = nil
+            runnerSessionLinks = []
         }
         if let task = selectedTask {
             selectedTaskCodexSessionLink = try repository.latestCodexSessionLink(taskId: task.id)
+            selectedTaskRunnerSessionLink = try repository.latestRunnerSessionLink(taskId: task.id)
         } else {
             selectedTaskCodexSessionLink = nil
+            selectedTaskRunnerSessionLink = nil
         }
     }
 
     public func selectProject(_ projectID: String?) {
         selectedProjectID = projectID
         selectedTaskID = tasks.first { $0.projectId == projectID }?.id
+        selectedBacklogIdeaID = backlogIdeas.first { $0.projectId == projectID }?.id
         selectedWorkspaceScope = .project
         latestPreflightReport = nil
         latestLifecycleReport = nil
         latestTaskStateReview = nil
         latestLifecycleSyncResult = nil
+        latestRunnerRecommendation = nil
         latestCodexSessionRecommendation = nil
         Task { await refreshGitStatus() }
         do {
@@ -276,12 +322,16 @@ public final class AppStore: ObservableObject {
 
     public func selectTask(_ taskID: String?) {
         selectedTaskID = taskID
+        if taskID != nil {
+            selectedBacklogIdeaID = nil
+        }
         selectedWorkspaceScope = taskID == nil ? .project : .task
         selectedRunOutput = ""
         latestPreflightReport = nil
         latestLifecycleReport = nil
         latestTaskStateReview = nil
         latestLifecycleSyncResult = nil
+        latestRunnerRecommendation = nil
         latestCodexSessionRecommendation = nil
         Task { await refreshGitStatus() }
         do {
@@ -436,6 +486,119 @@ public final class AppStore: ObservableObject {
             try repository.deleteTask(id: task.id)
             try self.reload()
             self.statusMessage = "Deleted task."
+        }
+    }
+
+    public func selectBacklogIdea(_ ideaID: String?) {
+        selectedBacklogIdeaID = ideaID
+        if ideaID != nil {
+            selectedTaskID = nil
+        }
+        selectedWorkspaceScope = .project
+        selectedRunOutput = ""
+        latestRunnerRecommendation = nil
+        latestCodexSessionRecommendation = nil
+    }
+
+    public func createBacklogIdea(title: String, category: String = "", source: String = "") {
+        perform {
+            guard let repository = self.repository, let project = self.selectedProject else {
+                throw FactoryError.missingSelection
+            }
+            let idea = BacklogIdea(
+                projectId: project.id,
+                title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled idea" : title,
+                category: category,
+                source: source
+            )
+            try repository.upsert(backlogIdea: idea)
+            try self.reload()
+            self.selectedBacklogIdeaID = idea.id
+            self.selectedTaskID = nil
+            self.statusMessage = "Created backlog idea \(idea.title)."
+        }
+    }
+
+    public func saveBacklogIdea(_ idea: BacklogIdea) {
+        perform {
+            guard let repository = self.repository else {
+                throw FactoryError.missingSelection
+            }
+            var updated = idea
+            updated.updatedAt = Date()
+            if updated.status != .promoted && updated.status != .archived {
+                updated.status = updated.isReadyToPromote ? .readyToPromote : (updated.goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .idea : .scoping)
+            }
+            try repository.upsert(backlogIdea: updated)
+            try self.reload()
+            self.selectedBacklogIdeaID = updated.id
+            self.statusMessage = "Saved backlog idea."
+        }
+    }
+
+    public func deleteSelectedBacklogIdea() {
+        perform {
+            guard let repository = self.repository, let idea = self.selectedBacklogIdea else {
+                throw FactoryError.missingSelection
+            }
+            try repository.deleteBacklogIdea(id: idea.id)
+            try self.reload()
+            self.selectedBacklogIdeaID = self.backlogIdeasForSelectedProject.first?.id
+            self.statusMessage = "Deleted backlog idea."
+        }
+    }
+
+    public func archiveSelectedBacklogIdea() {
+        perform {
+            guard var idea = self.selectedBacklogIdea else {
+                throw FactoryError.missingSelection
+            }
+            idea.status = .archived
+            self.saveBacklogIdea(idea)
+        }
+    }
+
+    public func promoteSelectedBacklogIdeaToTask() async {
+        guard let repository, let project = selectedProject, var idea = selectedBacklogIdea else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        guard idea.isReadyToPromote else {
+            errorMessage = "A backlog idea needs a goal and at least one acceptance criterion before promotion."
+            return
+        }
+        if project.type == .codeRepo {
+            guard await ensureLifecycleGateAllowsStart(project: project, selectedTask: nil) else { return }
+        }
+
+        perform {
+            let task = FactoryTask(
+                projectId: project.id,
+                title: idea.title,
+                type: .coding,
+                status: .backlog,
+                priority: idea.priorityLevel.taskPriority,
+                goal: idea.goal,
+                context: idea.context,
+                acceptanceCriteria: idea.acceptanceCriteria
+            )
+            try repository.upsert(task: task)
+            try repository.insert(taskEvent: TaskEvent(
+                taskId: task.id,
+                kind: .statusChangedManually,
+                source: .manual,
+                message: "Task created from backlog idea.",
+                previousStatus: nil,
+                newStatus: task.status
+            ))
+            idea.linkedTaskId = task.id
+            idea.status = .promoted
+            idea.updatedAt = Date()
+            try repository.upsert(backlogIdea: idea)
+            try self.reload()
+            self.selectedTaskID = task.id
+            self.selectedBacklogIdeaID = idea.id
+            self.statusMessage = "Promoted backlog idea to task."
         }
     }
 
@@ -1011,7 +1174,7 @@ public final class AppStore: ObservableObject {
         }
     }
 
-    public func linkCodexProject(workspacePath: String) {
+    public func linkRunnerProject(workspacePath: String, provider: RunnerProvider = .codex) {
         perform {
             guard let repository = self.repository, let project = self.selectedProject else {
                 throw FactoryError.missingSelection
@@ -1022,33 +1185,64 @@ public final class AppStore: ObservableObject {
             guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
                 throw FactoryError.invalidProjectPath(path)
             }
-            let existing = try repository.codexProjectLink(projectId: project.id)
-            let mode: CodexExecutionMode = path == project.path ? .local : .worktree
-            let link = CodexProjectLink(
+            let existing = try repository.runnerProjectLink(projectId: project.id)
+            let link = RunnerProjectLink(
                 id: existing?.id ?? UUID().uuidString,
                 projectId: project.id,
+                provider: provider,
                 workspacePath: URL(fileURLWithPath: path).standardizedFileURL.path,
-                preferredMode: mode,
-                preferredModel: existing?.preferredModel,
-                preferredReasoning: existing?.preferredReasoning,
+                preferredMode: nil,
+                preferredModelProfile: existing?.preferredModelProfile,
                 createdAt: existing?.createdAt ?? Date(),
                 updatedAt: Date()
             )
-            try repository.upsert(codexProjectLink: link)
+            try repository.upsert(runnerProjectLink: link)
             try self.reloadCodexLinks()
-            self.statusMessage = "Linked Codex project workspace."
+            self.statusMessage = "Linked runner workspace."
         }
     }
 
-    public func unlinkCodexProject() {
+    public func unlinkRunnerProject() {
         perform {
             guard let repository = self.repository, let project = self.selectedProject else {
                 throw FactoryError.missingSelection
             }
-            try repository.deleteCodexProjectLink(projectId: project.id)
+            try repository.deleteRunnerProjectLink(projectId: project.id)
             try self.reloadCodexLinks()
-            self.statusMessage = "Unlinked Codex project workspace."
+            self.statusMessage = "Unlinked runner workspace."
         }
+    }
+
+    public func attachRunnerSessionToSelectedTask(sessionID: String, provider: RunnerProvider = .codex) {
+        guard provider == .codex else {
+            errorMessage = "Only the Codex runner adapter is implemented in v1."
+            return
+        }
+        attachCodexSessionToSelectedTask(sessionId: sessionID)
+    }
+
+    public func detachRunnerSessionFromSelectedTask() {
+        detachCodexSessionFromSelectedTask()
+    }
+
+    public func refreshSelectedTaskRunnerSessionState() async {
+        await refreshSelectedTaskCodexSessionState()
+    }
+
+    public func checkSelectedTaskRunnerSession() async {
+        await runSelectedTaskCodexSessionCheck()
+    }
+
+    public func continueRunnerSession() async {
+        await continueRunnerSession(taskID: selectedTask?.id)
+    }
+
+    public func linkCodexProject(workspacePath: String) {
+        linkRunnerProject(workspacePath: workspacePath, provider: .codex)
+    }
+
+    public func unlinkCodexProject() {
+        unlinkRunnerProject()
     }
 
     public func attachCodexSessionToSelectedTask(sessionId: String) {
@@ -1172,6 +1366,178 @@ public final class AppStore: ObservableObject {
                 instruction: "Resume this session in read-only mode and summarize current state, blockers, and next recommended Factory Desktop action. Do not edit files."
             )
         }
+    }
+
+    public func scopeBacklogIdea(ideaID: String? = nil, provider: RunnerProvider = .codex) async {
+        guard let repository, let project = selectedProject else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        guard var idea = (ideaID.flatMap { id in backlogIdeas.first { $0.id == id } }) ?? selectedBacklogIdea else {
+            errorMessage = "Select a backlog idea first."
+            return
+        }
+        guard let adapter = runnerAdapters[provider] else {
+            errorMessage = "Runner provider \(provider.displayName) is not configured."
+            return
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        let directory = paths.backlogIdeaRunDirectory(project: project, idea: idea)
+        let promptURL = directory.appendingPathComponent("\(idea.id.shortID)-scoping-prompt.md")
+        let outputURL = directory.appendingPathComponent("\(idea.id.shortID)-scoping-output.log")
+        let prompt = backlogScopingPrompt(project: project, idea: idea)
+        var run = RunRecord(
+            projectId: project.id,
+            taskId: nil,
+            executor: "\(provider.rawValue)_runner",
+            model: selectedRunnerProjectLink?.preferredModelProfile?.modelName,
+            status: .running,
+            command: nil,
+            promptPath: promptURL.path,
+            outputPath: outputURL.path,
+            summary: "Scoping backlog idea"
+        )
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try prompt.write(to: promptURL, atomically: true, encoding: .utf8)
+            try repository.upsert(run: run)
+            idea.status = .scoping
+            idea.updatedAt = Date()
+            try repository.upsert(backlogIdea: idea)
+            try reload()
+            selectedBacklogIdeaID = idea.id
+
+            let request = RunnerRequest(
+                provider: provider,
+                mode: .scoping,
+                workspacePath: selectedRunnerProjectLink?.workspacePath ?? project.path,
+                backlogIdeaID: idea.id,
+                instruction: prompt,
+                modelProfile: selectedRunnerProjectLink?.preferredModelProfile,
+                sandboxMode: .readOnly
+            )
+            let result = try await adapter.execute(request)
+            try result.output.write(to: outputURL, atomically: true, encoding: .utf8)
+            run.status = result.succeeded ? .succeeded : .failed
+            run.command = result.command.displayString
+            run.exitCode = Int(result.exitCode)
+            run.summary = result.summary
+            run.endedAt = result.endedAt
+            try repository.upsert(run: run)
+
+            idea = mergeScopingResult(result, into: idea)
+            idea.updatedAt = Date()
+            try repository.upsert(backlogIdea: idea)
+            try reload()
+            selectedBacklogIdeaID = idea.id
+            selectedRunOutput = result.output
+            let action: RunnerRecommendedAction = idea.isReadyToPromote ? .promoteToTask : .scopeIdea
+            latestRunnerRecommendation = RunnerRecommendation(
+                action: action,
+                reason: idea.recommendedNextAction.isEmpty ? result.summary : idea.recommendedNextAction
+            )
+            statusMessage = result.succeeded ? "Scoped backlog idea." : "Backlog idea scoping failed."
+            if !result.succeeded {
+                errorMessage = result.output
+            }
+        } catch {
+            run.status = .failed
+            run.summary = error.localizedDescription
+            run.endedAt = Date()
+            try? repository.upsert(run: run)
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func dispatchTask(taskID: String? = nil, provider: RunnerProvider = .codex) async {
+        guard let project = selectedProject else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        guard let task = (taskID.flatMap { id in tasks.first { $0.id == id } }) ?? selectedTask else {
+            errorMessage = "Select a task to dispatch."
+            return
+        }
+        guard let adapter = runnerAdapters[provider] else {
+            errorMessage = "Runner provider \(provider.displayName) is not configured."
+            return
+        }
+        if project.type == .codeRepo {
+            guard await ensureLifecycleGateAllowsStart(project: project, selectedTask: task) else { return }
+            if !hasExistingTaskWorktree(task) {
+                selectedTaskID = task.id
+                await createWorktree(flavor: .local)
+            }
+        }
+        guard let refreshedTask = tasks.first(where: { $0.id == task.id }) ?? selectedTask else {
+            errorMessage = "Task disappeared before dispatch."
+            return
+        }
+        let workspacePath = runnerWorkspacePath(project: project, task: refreshedTask)
+        let request = RunnerRequest(
+            provider: provider,
+            mode: .coding,
+            workspacePath: workspacePath,
+            taskID: refreshedTask.id,
+            instruction: taskDispatchPrompt(project: project, task: refreshedTask),
+            modelProfile: selectedRunnerProjectLink?.preferredModelProfile,
+            linkedSessionID: nil,
+            sandboxMode: .readOnly
+        )
+        await runRunnerRequest(
+            request,
+            project: project,
+            task: refreshedTask,
+            summary: "Dispatch task",
+            transcriptPrefix: "runner-dispatch",
+            sessionLink: nil,
+            successfulStatus: .active,
+            adapter: adapter
+        )
+    }
+
+    public func continueRunnerSession(taskID: String? = nil) async {
+        guard let repository else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        let task = (taskID.flatMap { id in tasks.first { $0.id == id } }) ?? selectedTask
+        guard let task else {
+            errorMessage = "Select a task with a linked runner session."
+            return
+        }
+        guard let link = try? repository.latestRunnerSessionLink(taskId: task.id) else {
+            errorMessage = "Attach a runner session before continuing."
+            return
+        }
+        guard let project = selectedProject, let adapter = runnerAdapters[link.provider] else {
+            errorMessage = "Runner provider is unavailable."
+            return
+        }
+        let request = RunnerRequest(
+            provider: link.provider,
+            mode: .coding,
+            workspacePath: link.workspacePath,
+            taskID: task.id,
+            instruction: taskDispatchPrompt(project: project, task: task),
+            modelProfile: selectedRunnerProjectLink?.preferredModelProfile,
+            linkedSessionID: link.sessionID,
+            sandboxMode: .readOnly
+        )
+        await runRunnerRequest(
+            request,
+            project: project,
+            task: task,
+            summary: "Continue runner session",
+            transcriptPrefix: "runner-continue",
+            sessionLink: link,
+            successfulStatus: .active,
+            adapter: adapter
+        )
     }
 
     public func runFirstTestCommand() async {
@@ -1787,6 +2153,130 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    private func runRunnerRequest(
+        _ request: RunnerRequest,
+        project: Project,
+        task: FactoryTask,
+        summary: String,
+        transcriptPrefix: String,
+        sessionLink: RunnerSessionLink?,
+        successfulStatus: RunnerSessionStatus,
+        adapter: RunnerProviderAdapter
+    ) async {
+        guard let repository else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        let startedAt = Date()
+        let directory = paths.runDirectory(project: project, task: task)
+        let transcriptURL = directory.appendingPathComponent("\(transcriptPrefix)-\(UUID().uuidString.shortID).log")
+        var run = RunRecord(
+            projectId: project.id,
+            taskId: task.id,
+            executor: "\(request.provider.rawValue)_runner",
+            model: request.modelProfile?.modelName,
+            status: .running,
+            command: nil,
+            outputPath: transcriptURL.path,
+            summary: summary,
+            startedAt: startedAt
+        )
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try repository.upsert(run: run)
+            try reloadRunsAndArtifacts()
+
+            let result = try await adapter.execute(request)
+            let log = runnerLogText(
+                provider: request.provider,
+                mode: request.mode,
+                command: result.command.displayString,
+                startedAt: startedAt,
+                endedAt: result.endedAt,
+                exitCode: Int(result.exitCode),
+                standardOutput: result.standardOutput,
+                standardError: result.standardError
+            )
+            try log.write(to: transcriptURL, atomically: true, encoding: .utf8)
+
+            run.status = result.succeeded ? .succeeded : .failed
+            run.command = result.command.displayString
+            run.exitCode = Int(result.exitCode)
+            run.summary = result.summary
+            run.endedAt = result.endedAt
+            try repository.upsert(run: run)
+
+            if let existing = sessionLink {
+                try repository.updateRunnerSessionLink(
+                    id: existing.id,
+                    status: result.succeeded ? successfulStatus : .failed,
+                    lastSeenAt: result.endedAt,
+                    lastSummary: result.summary,
+                    transcriptPath: transcriptURL.path
+                )
+            } else if let sessionID = result.sessionMetadata?.sessionID, !sessionID.isEmpty {
+                let newLink = RunnerSessionLink(
+                    projectId: project.id,
+                    taskId: task.id,
+                    provider: request.provider,
+                    sessionID: sessionID,
+                    workspacePath: request.workspacePath,
+                    lastMode: request.mode,
+                    branchName: task.codexBranch ?? task.localBranch,
+                    worktreePath: task.codexWorktreePath ?? task.localWorktreePath,
+                    status: result.succeeded ? successfulStatus : .failed,
+                    lastSeenAt: result.endedAt,
+                    lastSummary: result.summary,
+                    transcriptPath: transcriptURL.path
+                )
+                try repository.upsert(runnerSessionLink: newLink)
+            }
+
+            try reloadRunsAndArtifacts()
+            selectedTaskID = task.id
+            selectedRunOutput = log
+            if result.succeeded {
+                await refreshRunnerLifecycleBridge(project: project, task: task, result: result)
+            } else {
+                latestRunnerRecommendation = RunnerRecommendation(
+                    action: .needsManualReview,
+                    reason: "\(summary) failed. Review the runner transcript before continuing."
+                )
+                errorMessage = result.output
+            }
+            statusMessage = result.succeeded ? "\(summary) completed." : "\(summary) failed."
+        } catch {
+            let endedAt = Date()
+            let log = runnerLogText(
+                provider: request.provider,
+                mode: request.mode,
+                command: summary,
+                startedAt: startedAt,
+                endedAt: endedAt,
+                exitCode: nil,
+                standardOutput: "",
+                standardError: error.localizedDescription
+            )
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try? log.write(to: transcriptURL, atomically: true, encoding: .utf8)
+            run.status = .failed
+            run.summary = error.localizedDescription
+            run.endedAt = endedAt
+            try? repository.upsert(run: run)
+            selectedRunOutput = log
+            latestRunnerRecommendation = RunnerRecommendation(
+                action: .needsManualReview,
+                reason: "\(summary) failed before lifecycle facts could be refreshed."
+            )
+            errorMessage = error.localizedDescription
+        }
+    }
+
     private func runCodexCommand(
         kind: CodexSessionCommandKind,
         summary: String,
@@ -1929,6 +2419,13 @@ public final class AppStore: ObservableObject {
             ?? project.path
     }
 
+    private func runnerWorkspacePath(project: Project, task: FactoryTask?) -> String {
+        selectedRunnerProjectLink?.workspacePath
+            ?? task?.localWorktreePath
+            ?? task?.codexWorktreePath
+            ?? project.path
+    }
+
     private func codexMode(workspacePath: String, project: Project) -> CodexExecutionMode {
         if workspacePath == project.path {
             return .local
@@ -1977,6 +2474,44 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    private func refreshRunnerLifecycleBridge(project: Project, task: FactoryTask?, result: RunnerResult) async {
+        guard let task else {
+            latestRunnerRecommendation = RunnerRecommendation(
+                action: .noAction,
+                reason: "Runner command completed at the project level."
+            )
+            return
+        }
+        guard let repository else {
+            latestRunnerRecommendation = RunnerRecommendation(
+                action: .needsManualReview,
+                reason: "Repository state was unavailable after the runner command."
+            )
+            return
+        }
+
+        do {
+            if let gitService {
+                gitSnapshot = try await gitService.snapshot(project: project, task: task)
+            }
+            let facts = try await taskLifecycleFacts(project: project, task: task, repository: repository)
+            let evaluation = TaskLifecycleService.evaluate(facts)
+            latestRunnerRecommendation = runnerRecommendation(
+                result: result,
+                gitSnapshot: gitSnapshot,
+                latestTestStatus: facts.latestTestStatus,
+                lifecycleEvaluation: evaluation,
+                currentStatus: task.status
+            )
+            latestLifecycleReport = nil
+        } catch {
+            latestRunnerRecommendation = RunnerRecommendation(
+                action: .needsManualReview,
+                reason: "Runner command completed, but lifecycle facts could not be refreshed: \(error.localizedDescription)"
+            )
+        }
+    }
+
     private func codexRecommendation(
         result: CommandResult,
         gitSnapshot: GitSnapshot,
@@ -2021,6 +2556,50 @@ public final class AppStore: ObservableObject {
         )
     }
 
+    private func runnerRecommendation(
+        result: RunnerResult,
+        gitSnapshot: GitSnapshot,
+        latestTestStatus: WorkflowCheckStatus?,
+        lifecycleEvaluation: TaskLifecycleEvaluation,
+        currentStatus: TaskStatus
+    ) -> RunnerRecommendation {
+        if CodexSessionResultImporter.containsClearFailure(result.output) {
+            return RunnerRecommendation(
+                action: .needsManualReview,
+                reason: "Runner output contains a failure signal."
+            )
+        }
+        if !gitSnapshot.changedFiles.isEmpty {
+            if latestTestStatus == .passed {
+                return RunnerRecommendation(
+                    action: .reviewDiff,
+                    reason: "Git changes are present and latest tests passed."
+                )
+            }
+            return RunnerRecommendation(
+                action: .runTests,
+                reason: "Git changes are present after runner activity."
+            )
+        }
+        if lifecycleEvaluation.isAutomaticSafe,
+           lifecycleEvaluation.recommendedStatus != currentStatus {
+            return RunnerRecommendation(
+                action: .syncLifecycle,
+                reason: "Lifecycle evaluation has a safe status recommendation."
+            )
+        }
+        if lifecycleEvaluation.requiredManualReview {
+            return RunnerRecommendation(
+                action: .needsManualReview,
+                reason: lifecycleEvaluation.reason
+            )
+        }
+        return RunnerRecommendation(
+            action: .noAction,
+            reason: "No Git changes or lifecycle updates were detected."
+        )
+    }
+
     private func codexLogText(
         kind: CodexSessionCommandKind,
         command: String,
@@ -2032,6 +2611,32 @@ public final class AppStore: ObservableObject {
     ) -> String {
         """
         Kind: \(kind.rawValue)
+        Command: \(command)
+        Started: \(DateCoding.string(from: startedAt))
+        Ended: \(DateCoding.string(from: endedAt))
+        Exit code: \(exitCode.map(String.init) ?? "unavailable")
+
+        stdout:
+        \(standardOutput.isEmpty ? "(empty)" : standardOutput)
+
+        stderr:
+        \(standardError.isEmpty ? "(empty)" : standardError)
+        """
+    }
+
+    private func runnerLogText(
+        provider: RunnerProvider,
+        mode: RunnerMode,
+        command: String,
+        startedAt: Date,
+        endedAt: Date,
+        exitCode: Int?,
+        standardOutput: String,
+        standardError: String
+    ) -> String {
+        """
+        Provider: \(provider.rawValue)
+        Mode: \(mode.rawValue)
         Command: \(command)
         Started: \(DateCoding.string(from: startedAt))
         Ended: \(DateCoding.string(from: endedAt))
@@ -2802,11 +3407,142 @@ public final class AppStore: ObservableObject {
         """
     }
 
+    private func backlogScopingPrompt(project: Project, idea: BacklogIdea) -> String {
+        """
+        You are Factory Desktop's runner-agnostic scoping assistant.
+        Scope this backlog idea without editing code.
+
+        Return JSON only with this shape:
+        {
+          "title": "...",
+          "goal": "...",
+          "context": "...",
+          "acceptanceCriteria": ["..."],
+          "priorityLevel": "p0|p1|p2|p3",
+          "category": "...",
+          "effort": "unknown|small|medium|large",
+          "risk": "unknown|low|medium|high",
+          "dependencies": "...",
+          "nonGoals": "...",
+          "suggestedTaskSplit": "...",
+          "recommendedNextAction": "..."
+        }
+
+        Project:
+        - Name: \(project.name)
+        - Type: \(project.type.rawValue)
+        - Path: \(project.path)
+
+        Backlog idea:
+        - Title: \(idea.title)
+        - Priority: \(idea.priorityLevel.rawValue)
+        - Category: \(idea.category.isEmpty ? "unknown" : idea.category)
+        - Source: \(idea.source.isEmpty ? "unknown" : idea.source)
+        - Goal: \(idea.goal.isEmpty ? "missing" : idea.goal)
+        - Context: \(idea.context.isEmpty ? "missing" : idea.context)
+        - Acceptance criteria: \(idea.acceptanceCriteria.isEmpty ? "missing" : idea.acceptanceCriteria.joined(separator: " | "))
+        - Dependencies: \(idea.dependencies.isEmpty ? "none" : idea.dependencies)
+        - Non-goals: \(idea.nonGoals.isEmpty ? "none" : idea.nonGoals)
+
+        Prefer practical scoping. Keep the title concise, acceptance criteria testable, and the next action explicit.
+        """
+    }
+
+    private func taskDispatchPrompt(project: Project, task: FactoryTask) -> String {
+        let acceptance = task.acceptanceCriteria.isEmpty
+            ? "- No explicit acceptance criteria provided."
+            : task.acceptanceCriteria.map { "- \($0)" }.joined(separator: "\n")
+        let tests = project.commandConfiguration.unitTests.map { "- \($0)" } ?? "- No unit test command configured."
+        return """
+        You are Factory Desktop's coding runner.
+        Execute this task in a safe, review-oriented way. Do not mark the task done yourself.
+
+        Task:
+        - Title: \(task.title)
+        - ID: \(task.id)
+        - Status: \(task.status.rawValue)
+        - Priority: \(task.priority.rawValue)
+
+        Goal:
+        \(task.goal.isEmpty ? task.title : task.goal)
+
+        Context:
+        \(task.context.isEmpty ? "No extra context provided." : task.context)
+
+        Acceptance criteria:
+        \(acceptance)
+
+        Constraints:
+        - Keep lifecycle sync as the only authority for persisted task status changes.
+        - Do not claim the task is done just because code was changed.
+        - Prefer minimal safe changes with clear verification.
+
+        Verification commands:
+        \(tests)
+        """
+    }
+
+    private func mergeScopingResult(_ result: RunnerResult, into idea: BacklogIdea) -> BacklogIdea {
+        var updated = idea
+        if let draft = parseBacklogScopingDraft(from: result.output) {
+            if let title = draft.title?.nonEmptyTrimmed { updated.title = title }
+            if let goal = draft.goal?.nonEmptyTrimmed { updated.goal = goal }
+            if let context = draft.context?.nonEmptyTrimmed { updated.context = context }
+            if let acceptanceCriteria = draft.acceptanceCriteria?.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }).filter({ !$0.isEmpty }), !acceptanceCriteria.isEmpty {
+                updated.acceptanceCriteria = acceptanceCriteria
+            }
+            if let priorityLevel = draft.priorityLevel.flatMap(BacklogPriorityLevel.init(rawValue:)) {
+                updated.priorityLevel = priorityLevel
+            }
+            if let category = draft.category?.nonEmptyTrimmed { updated.category = category }
+            if let effort = draft.effort.flatMap(BacklogEffort.init(rawValue:)) { updated.effort = effort }
+            if let risk = draft.risk.flatMap(BacklogRisk.init(rawValue:)) { updated.risk = risk }
+            if let dependencies = draft.dependencies?.nonEmptyTrimmed { updated.dependencies = dependencies }
+            if let nonGoals = draft.nonGoals?.nonEmptyTrimmed { updated.nonGoals = nonGoals }
+            if let suggestedTaskSplit = draft.suggestedTaskSplit?.nonEmptyTrimmed { updated.suggestedTaskSplit = suggestedTaskSplit }
+            if let recommendedNextAction = draft.recommendedNextAction?.nonEmptyTrimmed {
+                updated.recommendedNextAction = recommendedNextAction
+            }
+        } else {
+            updated.recommendedNextAction = result.summary
+        }
+        updated.status = updated.isReadyToPromote ? .readyToPromote : .scoping
+        return updated
+    }
+
+    private func parseBacklogScopingDraft(from output: String) -> BacklogScopingDraft? {
+        guard let start = output.firstIndex(of: "{"), let end = output.lastIndex(of: "}") else { return nil }
+        let json = String(output[start...end])
+        return JSONCoding.decode(json, as: BacklogScopingDraft.self)
+    }
+
     private static func lines(from text: String) -> [String] {
         text
             .split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+}
+
+private struct BacklogScopingDraft: Codable {
+    var title: String?
+    var goal: String?
+    var context: String?
+    var acceptanceCriteria: [String]?
+    var priorityLevel: String?
+    var category: String?
+    var effort: String?
+    var risk: String?
+    var dependencies: String?
+    var nonGoals: String?
+    var suggestedTaskSplit: String?
+    var recommendedNextAction: String?
+}
+
+private extension String {
+    var nonEmptyTrimmed: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

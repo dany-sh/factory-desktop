@@ -5,8 +5,8 @@ struct InspectorView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.openWindow) private var openWindow
     @State private var commitMessage = ""
-    @State private var codexWorkspacePath = ""
-    @State private var codexSessionID = ""
+    @State private var runnerWorkspacePath = ""
+    @State private var runnerSessionID = ""
     @State private var showingCommitConfirmation = false
     @State private var showAllArtifacts = false
 
@@ -42,37 +42,37 @@ struct InspectorView: View {
         }
         .onChange(of: store.selectedProjectID) { _, _ in
             syncCodexWorkspaceDraft()
-            codexSessionID = ""
+            runnerSessionID = ""
         }
-        .onChange(of: store.selectedCodexProjectLink?.workspacePath) { _, _ in
+        .onChange(of: store.selectedRunnerProjectLink?.workspacePath) { _, _ in
             syncCodexWorkspaceDraft()
         }
     }
 
     private var codexCard: some View {
-        InspectorCard(title: "Codex Session") {
+        InspectorCard(title: "Runner Session") {
             if let project = store.selectedProject {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Project Workspace")
+                    Text("Runner Workspace")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
-                    TextField(project.path, text: $codexWorkspacePath)
+                    TextField(project.path, text: $runnerWorkspacePath)
                         .textFieldStyle(.roundedBorder)
                     HStack {
                         Button {
-                            store.linkCodexProject(workspacePath: codexWorkspacePath.isEmpty ? project.path : codexWorkspacePath)
+                            store.linkRunnerProject(workspacePath: runnerWorkspacePath.isEmpty ? project.path : runnerWorkspacePath)
                         } label: {
-                            Label(store.selectedCodexProjectLink == nil ? "Link Project" : "Update Link", systemImage: "link")
+                            Label(store.selectedRunnerProjectLink == nil ? "Link Workspace" : "Update Link", systemImage: "link")
                         }
                         Button {
                             Task { await store.openSelectedProjectInCodex() }
                         } label: {
-                            Label("Open Codex Project", systemImage: "arrow.up.forward.app")
+                            Label("Open Provider App", systemImage: "arrow.up.forward.app")
                         }
                         .disabled(store.isWorking)
-                        if store.selectedCodexProjectLink != nil {
+                        if store.selectedRunnerProjectLink != nil {
                             Button {
-                                store.unlinkCodexProject()
+                                store.unlinkRunnerProject()
                             } label: {
                                 Label("Unlink", systemImage: "link.badge.minus")
                             }
@@ -81,16 +81,16 @@ struct InspectorView: View {
                     }
                     .buttonStyle(.bordered)
 
-                    if let link = store.selectedCodexProjectLink {
+                    if let link = store.selectedRunnerProjectLink {
                         InfoRow(label: "Linked path", value: link.workspacePath)
-                        InfoRow(label: "Preferred mode", value: link.preferredMode.displayName)
+                        InfoRow(label: "Provider", value: link.provider.displayName)
                     }
 
                     Divider()
 
-                    if let session = store.selectedTaskCodexSessionLink {
-                        InfoRow(label: "Session ID", value: session.codexSessionId)
-                        InfoRow(label: "Mode", value: session.mode.displayName)
+                    if let session = store.selectedTaskRunnerSessionLink {
+                        InfoRow(label: "Session ID", value: session.sessionID)
+                        InfoRow(label: "Provider", value: session.provider.displayName)
                         InfoRow(label: "Workspace", value: session.workspacePath)
                         if let branch = session.branchName {
                             InfoRow(label: "Branch", value: branch)
@@ -103,28 +103,28 @@ struct InspectorView: View {
                         if let summary = session.lastSummary, !summary.isEmpty {
                             InfoRow(label: "Summary", value: summary)
                         }
-                        if let recommendation = store.latestCodexSessionRecommendation {
+                        if let recommendation = store.latestRunnerRecommendation ?? store.latestCodexSessionRecommendation.map({ RunnerRecommendation(action: runnerAction(from: $0.action), reason: $0.reason) }) {
                             InfoRow(label: "Next", value: recommendation.action.displayName)
                             InfoRow(label: "Reason", value: recommendation.reason)
                         }
                         HStack {
                             Button {
-                                Task { await store.resumeSelectedTaskCodexSession() }
+                                Task { await store.continueRunnerSession() }
                             } label: {
-                                Label("Resume Session", systemImage: "play.circle")
+                                Label("Continue Run", systemImage: "play.circle")
                             }
                             Button {
-                                Task { await store.refreshSelectedTaskCodexSessionState() }
+                                Task { await store.refreshSelectedTaskRunnerSessionState() }
                             } label: {
                                 Label("Refresh Session", systemImage: "arrow.clockwise")
                             }
                             Button {
-                                Task { await store.runSelectedTaskCodexSessionCheck() }
+                                Task { await store.checkSelectedTaskRunnerSession() }
                             } label: {
-                                Label("Check Session", systemImage: "checkmark.seal")
+                                Label("Check Run State", systemImage: "checkmark.seal")
                             }
                             Button {
-                                store.detachCodexSessionFromSelectedTask()
+                                store.detachRunnerSessionFromSelectedTask()
                             } label: {
                                 Label("Detach", systemImage: "xmark.circle")
                             }
@@ -132,20 +132,27 @@ struct InspectorView: View {
                         .buttonStyle(.bordered)
                         .disabled(store.isWorking)
                     } else if store.selectedTask != nil {
-                        Text("No Codex session linked")
+                        Text("No runner session linked")
                             .foregroundStyle(.secondary)
-                        TextField("Session ID", text: $codexSessionID)
+                        TextField("Session ID", text: $runnerSessionID)
                             .textFieldStyle(.roundedBorder)
-                        Button {
-                            store.attachCodexSessionToSelectedTask(sessionId: codexSessionID)
-                            codexSessionID = ""
-                        } label: {
-                            Label("Attach Session", systemImage: "link.badge.plus")
+                        HStack {
+                            Button {
+                                Task { await store.dispatchTask() }
+                            } label: {
+                                Label("Dispatch", systemImage: "paperplane")
+                            }
+                            Button {
+                                store.attachRunnerSessionToSelectedTask(sessionID: runnerSessionID)
+                                runnerSessionID = ""
+                            } label: {
+                                Label("Attach Session", systemImage: "link.badge.plus")
+                            }
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(codexSessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isWorking)
+                        .disabled(store.isWorking)
                     } else {
-                        Text("Select a task to attach a Codex session.")
+                        Text("Select a task to attach or dispatch a runner session.")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -157,7 +164,17 @@ struct InspectorView: View {
     }
 
     private func syncCodexWorkspaceDraft() {
-        codexWorkspacePath = store.selectedCodexProjectLink?.workspacePath ?? store.selectedProject?.path ?? ""
+        runnerWorkspacePath = store.selectedRunnerProjectLink?.workspacePath ?? store.selectedProject?.path ?? ""
+    }
+
+    private func runnerAction(from action: CodexSessionRecommendedAction) -> RunnerRecommendedAction {
+        switch action {
+        case .reviewDiff: .reviewDiff
+        case .runTests: .runTests
+        case .syncLifecycle: .syncLifecycle
+        case .needsManualReview: .needsManualReview
+        case .noAction: .noAction
+        }
     }
 
     private var worktreeCard: some View {

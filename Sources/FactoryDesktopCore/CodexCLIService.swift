@@ -17,6 +17,7 @@ public enum CodexCLIAction: Equatable {
     case version
     case openApp(workspacePath: String)
     case resume(sessionId: String)
+    case exec(workspacePath: String, instruction: String)
     case execResume(sessionId: String, workspacePath: String, instruction: String)
 }
 
@@ -59,6 +60,13 @@ public final class CodexCLIService {
         try await runCommand(commandRequest(for: .resume(sessionId: sessionId)))
     }
 
+    public func exec(workspacePath: String, instruction: String) async throws -> CommandResult {
+        try await runCommand(commandRequest(for: .exec(
+            workspacePath: workspacePath,
+            instruction: instruction
+        )))
+    }
+
     public func execResume(sessionId: String, workspacePath: String, instruction: String) async throws -> CommandResult {
         try await runCommand(commandRequest(for: .execResume(
             sessionId: sessionId,
@@ -79,6 +87,14 @@ public final class CodexCLIService {
         case .resume(let sessionId):
             try validateSessionID(sessionId)
             return CommandRequest(executable: "codex", arguments: ["resume", sessionId])
+        case .exec(let workspacePath, let instruction):
+            try validateWorkspacePath(workspacePath)
+            let prompt = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalInstruction = prompt.isEmpty ? "Summarize current state." : prompt
+            return CommandRequest(
+                executable: "codex",
+                arguments: ["exec", "-C", workspacePath, "-s", "read-only", finalInstruction]
+            )
         case .execResume(let sessionId, let workspacePath, let instruction):
             try validateSessionID(sessionId)
             try validateWorkspacePath(workspacePath)

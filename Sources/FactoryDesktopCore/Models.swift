@@ -577,6 +577,15 @@ public enum TaskPriority: String, CaseIterable, Codable, Identifiable {
 
     public var id: String { rawValue }
     public var displayName: String { rawValue.capitalized }
+
+    public var sortOrder: Int {
+        switch self {
+        case .urgent: 0
+        case .high: 10
+        case .normal: 20
+        case .low: 30
+        }
+    }
 }
 
 public enum RunStatus: String, CaseIterable, Codable, Identifiable {

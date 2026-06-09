@@ -95,6 +95,31 @@ public final class FactoryRepository {
         try database.execute("DELETE FROM codex_project_links WHERE project_id = ?;", binds: [.text(projectId)])
     }
 
+    public func runnerProjectLink(projectId: String) throws -> RunnerProjectLink? {
+        try codexProjectLink(projectId: projectId)?.asRunnerProjectLink()
+    }
+
+    public func upsert(runnerProjectLink link: RunnerProjectLink) throws {
+        guard link.provider == .codex else {
+            throw FactoryError.commandFailed("Only the Codex runner adapter is implemented in v1.")
+        }
+        let codexLink = CodexProjectLink(
+            id: link.id,
+            projectId: link.projectId,
+            workspacePath: link.workspacePath,
+            preferredMode: link.preferredModelProfile?.location == .cloud ? .cloud : (link.workspacePath.contains("/.factory/worktrees/") ? .worktree : .local),
+            preferredModel: link.preferredModelProfile?.modelName,
+            preferredReasoning: link.preferredModelProfile?.reasoningEffort,
+            createdAt: link.createdAt,
+            updatedAt: link.updatedAt
+        )
+        try upsert(codexProjectLink: codexLink)
+    }
+
+    public func deleteRunnerProjectLink(projectId: String) throws {
+        try deleteCodexProjectLink(projectId: projectId)
+    }
+
     public func tasks(projectId: String? = nil) throws -> [FactoryTask] {
         let rows: [[String: String?]]
         if let projectId {
@@ -175,6 +200,90 @@ public final class FactoryRepository {
         try database.execute("DELETE FROM tasks WHERE id = ?;", binds: [.text(id)])
     }
 
+    public func backlogIdeas(projectId: String? = nil) throws -> [BacklogIdea] {
+        let rows: [[String: String?]]
+        if let projectId {
+            rows = try database.query(
+                """
+                SELECT id, project_id, title, priority_level, category, source, goal, context,
+                       acceptance_criteria_json, effort, risk, dependencies, non_goals, suggested_task_split,
+                       recommended_next_action, status, linked_task_id, created_at, updated_at
+                FROM backlog_ideas
+                WHERE project_id = ?
+                ORDER BY updated_at DESC, created_at DESC;
+                """,
+                binds: [.text(projectId)]
+            )
+        } else {
+            rows = try database.query(
+                """
+                SELECT id, project_id, title, priority_level, category, source, goal, context,
+                       acceptance_criteria_json, effort, risk, dependencies, non_goals, suggested_task_split,
+                       recommended_next_action, status, linked_task_id, created_at, updated_at
+                FROM backlog_ideas
+                ORDER BY updated_at DESC, created_at DESC;
+                """
+            )
+        }
+        return rows.map(backlogIdea(from:))
+    }
+
+    public func upsert(backlogIdea: BacklogIdea) throws {
+        try database.execute(
+            """
+            INSERT INTO backlog_ideas (
+              id, project_id, title, priority_level, category, source, goal, context, acceptance_criteria_json,
+              effort, risk, dependencies, non_goals, suggested_task_split, recommended_next_action, status,
+              linked_task_id, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              project_id = excluded.project_id,
+              title = excluded.title,
+              priority_level = excluded.priority_level,
+              category = excluded.category,
+              source = excluded.source,
+              goal = excluded.goal,
+              context = excluded.context,
+              acceptance_criteria_json = excluded.acceptance_criteria_json,
+              effort = excluded.effort,
+              risk = excluded.risk,
+              dependencies = excluded.dependencies,
+              non_goals = excluded.non_goals,
+              suggested_task_split = excluded.suggested_task_split,
+              recommended_next_action = excluded.recommended_next_action,
+              status = excluded.status,
+              linked_task_id = excluded.linked_task_id,
+              updated_at = excluded.updated_at;
+            """,
+            binds: [
+                .text(backlogIdea.id),
+                .text(backlogIdea.projectId),
+                .text(backlogIdea.title),
+                .text(backlogIdea.priorityLevel.rawValue),
+                .text(backlogIdea.category),
+                .text(backlogIdea.source),
+                .text(backlogIdea.goal),
+                .text(backlogIdea.context),
+                .text(JSONCoding.encodeArray(backlogIdea.acceptanceCriteria)),
+                .text(backlogIdea.effort.rawValue),
+                .text(backlogIdea.risk.rawValue),
+                .text(backlogIdea.dependencies),
+                .text(backlogIdea.nonGoals),
+                .text(backlogIdea.suggestedTaskSplit),
+                .text(backlogIdea.recommendedNextAction),
+                .text(backlogIdea.status.rawValue),
+                .text(backlogIdea.linkedTaskId),
+                .text(DateCoding.string(from: backlogIdea.createdAt)),
+                .text(DateCoding.string(from: backlogIdea.updatedAt))
+            ]
+        )
+    }
+
+    public func deleteBacklogIdea(id: String) throws {
+        try database.execute("DELETE FROM backlog_ideas WHERE id = ?;", binds: [.text(id)])
+    }
+
     public func upsert(codexSessionLink link: CodexSessionLink) throws {
         try database.execute(
             """
@@ -245,6 +354,61 @@ public final class FactoryRepository {
 
     public func latestCodexSessionLink(taskId: String) throws -> CodexSessionLink? {
         try codexSessionLinks(taskId: taskId).first
+    }
+
+    public func runnerSessionLinks(projectId: String) throws -> [RunnerSessionLink] {
+        try codexSessionLinks(projectId: projectId).map { $0.asRunnerSessionLink() }
+    }
+
+    public func runnerSessionLinks(taskId: String) throws -> [RunnerSessionLink] {
+        try codexSessionLinks(taskId: taskId).map { $0.asRunnerSessionLink() }
+    }
+
+    public func latestRunnerSessionLink(taskId: String) throws -> RunnerSessionLink? {
+        try latestCodexSessionLink(taskId: taskId)?.asRunnerSessionLink()
+    }
+
+    public func upsert(runnerSessionLink link: RunnerSessionLink) throws {
+        guard link.provider == .codex else {
+            throw FactoryError.commandFailed("Only the Codex runner adapter is implemented in v1.")
+        }
+        let codexLink = CodexSessionLink(
+            id: link.id,
+            projectId: link.projectId,
+            taskId: link.taskId,
+            codexSessionId: link.sessionID,
+            workspacePath: link.workspacePath,
+            mode: link.workspacePath.contains("/.factory/worktrees/") ? .worktree : .local,
+            branchName: link.branchName,
+            worktreePath: link.worktreePath,
+            status: CodexSessionStatus(rawValue: link.status.rawValue) ?? .unknown,
+            lastSeenAt: link.lastSeenAt,
+            lastSummary: link.lastSummary,
+            transcriptPath: link.transcriptPath,
+            createdAt: link.createdAt,
+            updatedAt: link.updatedAt
+        )
+        try upsert(codexSessionLink: codexLink)
+    }
+
+    public func updateRunnerSessionLink(
+        id: String,
+        status: RunnerSessionStatus,
+        lastSeenAt: Date?,
+        lastSummary: String?,
+        transcriptPath: String?
+    ) throws {
+        try updateCodexSessionLink(
+            id: id,
+            status: CodexSessionStatus(rawValue: status.rawValue) ?? .unknown,
+            lastSeenAt: lastSeenAt,
+            lastSummary: lastSummary,
+            transcriptPath: transcriptPath
+        )
+    }
+
+    public func detachRunnerSessionLinkFromTask(id: String) throws {
+        try detachCodexSessionLinkFromTask(id: id)
     }
 
     public func updateCodexSessionLink(
@@ -486,6 +650,30 @@ public final class FactoryRepository {
             codexWorktreePath: row.optional("codex_worktree_path"),
             localBaseBranchCommit: row.optional("local_base_branch_commit"),
             codexBaseBranchCommit: row.optional("codex_base_branch_commit"),
+            createdAt: DateCoding.date(from: row.required("created_at")),
+            updatedAt: DateCoding.date(from: row.required("updated_at"))
+        )
+    }
+
+    private func backlogIdea(from row: [String: String?]) -> BacklogIdea {
+        BacklogIdea(
+            id: row.required("id"),
+            projectId: row.required("project_id"),
+            title: row.required("title"),
+            priorityLevel: BacklogPriorityLevel(rawValue: row.optional("priority_level") ?? "") ?? .p2,
+            category: row.optional("category") ?? "",
+            source: row.optional("source") ?? "",
+            goal: row.optional("goal") ?? "",
+            context: row.optional("context") ?? "",
+            acceptanceCriteria: JSONCoding.decodeArray(row.optional("acceptance_criteria_json")),
+            effort: BacklogEffort(rawValue: row.optional("effort") ?? "") ?? .unknown,
+            risk: BacklogRisk(rawValue: row.optional("risk") ?? "") ?? .unknown,
+            dependencies: row.optional("dependencies") ?? "",
+            nonGoals: row.optional("non_goals") ?? "",
+            suggestedTaskSplit: row.optional("suggested_task_split") ?? "",
+            recommendedNextAction: row.optional("recommended_next_action") ?? "",
+            status: BacklogIdeaStatus(rawValue: row.optional("status") ?? "") ?? .idea,
+            linkedTaskId: row.optional("linked_task_id"),
             createdAt: DateCoding.date(from: row.required("created_at")),
             updatedAt: DateCoding.date(from: row.required("updated_at"))
         )

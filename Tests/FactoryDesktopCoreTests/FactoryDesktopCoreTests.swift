@@ -200,6 +200,48 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(try decoder.decode(CodexSessionLink.self, from: encoder.encode(sessionLink)), sessionLink)
     }
 
+    func testRunnerAndBacklogModelsRoundTripThroughCodable() throws {
+        let link = RunnerSessionLink(
+            id: "runner-link",
+            projectId: "project",
+            taskId: "task",
+            provider: .codex,
+            sessionID: "session-123",
+            workspacePath: "/tmp/project",
+            lastMode: .coding,
+            branchName: "factory/task",
+            worktreePath: "/tmp/worktree",
+            status: .active,
+            lastSeenAt: Date(timeIntervalSince1970: 1_700_000_002),
+            lastSummary: "Attached.",
+            transcriptPath: "/tmp/transcript.log"
+        )
+        let idea = BacklogIdea(
+            id: "idea",
+            projectId: "project",
+            title: "Queue item",
+            priorityLevel: .p1,
+            category: "product",
+            source: "user",
+            goal: "Ship a queue",
+            context: "Need runner orchestration.",
+            acceptanceCriteria: ["Top 3 next work", "Scope ideas"],
+            effort: .medium,
+            risk: .low,
+            dependencies: "none",
+            nonGoals: "kanban",
+            suggestedTaskSplit: "UI first",
+            recommendedNextAction: "Promote when scoped",
+            status: .readyToPromote
+        )
+
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        XCTAssertEqual(try decoder.decode(RunnerSessionLink.self, from: encoder.encode(link)), link)
+        XCTAssertEqual(try decoder.decode(BacklogIdea.self, from: encoder.encode(idea)), idea)
+    }
+
     func testRunDirectoryUsesFullTaskID() {
         let paths = FactoryPaths(root: URL(fileURLWithPath: "/tmp/factory-test-root"))
         let project = Project(id: "project-1", name: "Demo Project", type: .codeRepo, path: "/tmp/demo")
@@ -2055,6 +2097,43 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertTrue(try fixture.repository.codexSessionLinks(projectId: project.id).contains { $0.id == first.id && $0.taskId == nil && $0.status == .paused })
     }
 
+    func testRepositoryPersistsBacklogIdeasAndNullableRuns() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
+        try fixture.repository.upsert(project: project)
+
+        let idea = BacklogIdea(
+            id: "idea-1",
+            projectId: project.id,
+            title: "Runner orchestration",
+            priorityLevel: .p0,
+            goal: "Scope runner abstraction",
+            acceptanceCriteria: ["Generic provider layer"]
+        )
+        try fixture.repository.upsert(backlogIdea: idea)
+
+        let run = RunRecord(
+            id: "run-1",
+            projectId: project.id,
+            taskId: nil,
+            executor: "codex_runner",
+            status: .succeeded,
+            command: "codex exec",
+            outputPath: fixture.root.appendingPathComponent("run.log").path,
+            summary: "Scoped idea",
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            endedAt: Date(timeIntervalSince1970: 1_700_000_010)
+        )
+        try fixture.repository.upsert(run: run)
+
+        let storedIdea = try XCTUnwrap(fixture.repository.backlogIdeas(projectId: project.id).first)
+        XCTAssertEqual(storedIdea.id, idea.id)
+        XCTAssertEqual(storedIdea.title, idea.title)
+        XCTAssertEqual(storedIdea.priorityLevel, .p0)
+        XCTAssertEqual(storedIdea.acceptanceCriteria, ["Generic provider layer"])
+        XCTAssertEqual(try fixture.repository.runs(projectId: project.id).first?.taskId, nil)
+    }
+
     func testRepositoryPersistsManualStatusChangeEvent() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("factory-desktop-tests-\(UUID().uuidString)", isDirectory: true)
@@ -2142,6 +2221,101 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(session.status, .active)
         XCTAssertEqual(session.lastSummary, "Reviewed current worktree and found changes ready for inspection.")
         XCTAssertNotNil(session.lastSeenAt)
+    }
+
+    func testCodexRunnerAdapterMapsGenericRequest() async throws {
+        let root = makeTemporaryDirectory()
+        let adapter = CodexRunnerAdapter(service: CodexCLIService { request in
+            CommandResult(
+                command: request.displayString,
+                exitCode: 0,
+                standardOutput: "session id: session-789\nReviewed current worktree.\n",
+                standardError: ""
+            )
+        })
+
+        let result = try await adapter.execute(RunnerRequest(
+            provider: .codex,
+            mode: .coding,
+            workspacePath: root.path,
+            taskID: "task",
+            instruction: "Implement the task."
+        ))
+
+        XCTAssertEqual(result.provider, .codex)
+        XCTAssertEqual(result.mode, .coding)
+        XCTAssertEqual(result.sessionMetadata?.sessionID, "session-789")
+        XCTAssertTrue(result.command.displayString.contains("codex exec"))
+    }
+
+    @MainActor
+    func testScopingBacklogIdeaUpdatesStructuredFields() async throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
+        let idea = BacklogIdea(id: "idea", projectId: project.id, title: "Runner queue")
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(backlogIdea: idea)
+
+        let service = CodexCLIService { request in
+            CommandResult(
+                command: request.displayString,
+                exitCode: 0,
+                standardOutput: """
+                {
+                  "title": "Runner queue orchestration",
+                  "goal": "Add a generic runner queue.",
+                  "acceptanceCriteria": ["Top 3 next work", "Dispatch task"],
+                  "priorityLevel": "p1",
+                  "effort": "medium",
+                  "risk": "low",
+                  "recommendedNextAction": "Promote into a task."
+                }
+                """,
+                standardError: ""
+            )
+        }
+
+        let store = AppStore(paths: fixture.paths, codexCLIService: service)
+        store.selectedProjectID = project.id
+        store.selectBacklogIdea(idea.id)
+        await store.scopeBacklogIdea()
+
+        let updated = try XCTUnwrap(fixture.repository.backlogIdeas(projectId: project.id).first)
+        XCTAssertEqual(updated.title, "Runner queue orchestration")
+        XCTAssertEqual(updated.goal, "Add a generic runner queue.")
+        XCTAssertEqual(updated.priorityLevel, .p1)
+        XCTAssertEqual(updated.status, .readyToPromote)
+        XCTAssertEqual(updated.acceptanceCriteria, ["Top 3 next work", "Dispatch task"])
+    }
+
+    @MainActor
+    func testPromotingBacklogIdeaCreatesTask() async throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
+        let idea = BacklogIdea(
+            id: "idea",
+            projectId: project.id,
+            title: "Runner queue",
+            priorityLevel: .p0,
+            goal: "Ship the queue",
+            context: "Need queue and ranking.",
+            acceptanceCriteria: ["Project dashboard top 3"]
+        )
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(backlogIdea: idea)
+
+        let store = AppStore(paths: fixture.paths)
+        store.selectedProjectID = project.id
+        store.selectBacklogIdea(idea.id)
+        await store.promoteSelectedBacklogIdeaToTask()
+
+        let promotedIdea = try XCTUnwrap(fixture.repository.backlogIdeas(projectId: project.id).first)
+        let task = try XCTUnwrap(fixture.repository.tasks(projectId: project.id).first)
+        XCTAssertEqual(promotedIdea.status, .promoted)
+        XCTAssertEqual(promotedIdea.linkedTaskId, task.id)
+        XCTAssertEqual(task.priority, .urgent)
+        XCTAssertEqual(task.goal, idea.goal)
+        XCTAssertEqual(task.acceptanceCriteria, idea.acceptanceCriteria)
     }
 
     @MainActor

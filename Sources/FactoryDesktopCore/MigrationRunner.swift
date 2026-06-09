@@ -240,6 +240,120 @@ public final class MigrationRunner {
             ALTER TABLE tasks ADD COLUMN local_base_branch_commit TEXT;
             ALTER TABLE tasks ADD COLUMN codex_base_branch_commit TEXT;
             """
+        ),
+        Migration(
+            version: 6,
+            name: "backlog_ideas",
+            sql: """
+            CREATE TABLE IF NOT EXISTS backlog_ideas (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              title TEXT NOT NULL,
+              priority_level TEXT NOT NULL DEFAULT 'p2',
+              category TEXT DEFAULT '',
+              source TEXT DEFAULT '',
+              goal TEXT DEFAULT '',
+              context TEXT DEFAULT '',
+              acceptance_criteria_json TEXT DEFAULT '[]',
+              effort TEXT NOT NULL DEFAULT 'unknown',
+              risk TEXT NOT NULL DEFAULT 'unknown',
+              dependencies TEXT DEFAULT '',
+              non_goals TEXT DEFAULT '',
+              suggested_task_split TEXT DEFAULT '',
+              recommended_next_action TEXT DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'idea',
+              linked_task_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+              FOREIGN KEY(linked_task_id) REFERENCES tasks(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_backlog_ideas_project_id ON backlog_ideas(project_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_backlog_ideas_linked_task_id ON backlog_ideas(linked_task_id);
+            """
+        ),
+        Migration(
+            version: 7,
+            name: "runs_allow_null_task_id",
+            sql: """
+            PRAGMA foreign_keys = OFF;
+
+            ALTER TABLE artifacts RENAME TO artifacts_legacy;
+            ALTER TABLE task_events RENAME TO task_events_legacy;
+            ALTER TABLE runs RENAME TO runs_legacy;
+
+            CREATE TABLE runs (
+              id TEXT PRIMARY KEY,
+              task_id TEXT,
+              executor TEXT NOT NULL,
+              model TEXT,
+              status TEXT NOT NULL,
+              prompt_path TEXT,
+              output_path TEXT,
+              summary TEXT DEFAULT '',
+              started_at TEXT NOT NULL,
+              ended_at TEXT,
+              project_id TEXT DEFAULT '',
+              run_type TEXT,
+              command TEXT,
+              exit_code INTEGER,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE artifacts (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              run_id TEXT,
+              type TEXT NOT NULL,
+              path TEXT NOT NULL,
+              description TEXT DEFAULT '',
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE task_events (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              source TEXT NOT NULL,
+              message TEXT DEFAULT '',
+              previous_status TEXT,
+              new_status TEXT,
+              run_id TEXT,
+              artifact_id TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL,
+              FOREIGN KEY(artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL
+            );
+
+            INSERT INTO runs (
+              id, task_id, executor, model, status, prompt_path, output_path, summary, started_at, ended_at, project_id, run_type, command, exit_code
+            )
+            SELECT
+              id, task_id, executor, model, status, prompt_path, output_path, summary, started_at, ended_at, project_id, run_type, command, exit_code
+            FROM runs_legacy;
+
+            INSERT INTO artifacts (id, task_id, run_id, type, path, description, created_at)
+            SELECT id, task_id, run_id, type, path, description, created_at
+            FROM artifacts_legacy;
+
+            INSERT INTO task_events (id, task_id, kind, source, message, previous_status, new_status, run_id, artifact_id, created_at)
+            SELECT id, task_id, kind, source, message, previous_status, new_status, run_id, artifact_id, created_at
+            FROM task_events_legacy;
+
+            DROP TABLE task_events_legacy;
+            DROP TABLE artifacts_legacy;
+            DROP TABLE runs_legacy;
+
+            CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_task_id ON artifacts(task_id);
+            CREATE INDEX IF NOT EXISTS idx_task_events_task_id_created_at ON task_events(task_id, created_at DESC);
+
+            PRAGMA foreign_keys = ON;
+            """
         )
     ]
 }

@@ -138,3 +138,43 @@ struct NewTaskView: View {
         .frame(width: 540)
     }
 }
+
+struct NewBacklogIdeaView: View {
+    @EnvironmentObject private var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var category = ""
+    @State private var source = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("New Backlog Idea")
+                .font(.title.weight(.semibold))
+            if let project = store.selectedProject {
+                Text("Project: \(project.name)")
+                    .foregroundStyle(.secondary)
+            }
+            Form {
+                TextField("Title", text: $title)
+                TextField("Category", text: $category)
+                TextField("Source", text: $source)
+            }
+            HStack {
+                Button("Cancel", role: .cancel) {
+                    dismiss()
+                }
+                Spacer()
+                Button("Create Idea") {
+                    store.createBacklogIdea(title: title, category: category, source: source)
+                    if store.errorMessage == nil {
+                        dismiss()
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 480)
+    }
+}

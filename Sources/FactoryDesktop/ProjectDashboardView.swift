@@ -6,7 +6,11 @@ struct ProjectDashboardView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var showActiveTasks = false
     @State private var showArchivedTasks = false
+    @State private var showNewBacklogIdeaSheet = false
     @State private var projectMarkdownFiles: [ProjectMarkdownFile] = []
+    @State private var backlogDraft = BacklogIdeaDraft()
+    @State private var loadedBacklogIdeaID: String?
+    @State private var acceptanceText = ""
 
     var body: some View {
         Group {
@@ -15,6 +19,8 @@ struct ProjectDashboardView: View {
                     VStack(alignment: .leading, spacing: 18) {
                         header(project: project)
                         summaryPanel(project: project)
+                        topNextWorkPanel
+                        backlogPanel
                         projectDocsPanel(project: project)
                         taskListsPanel
                         LifecycleCleanupView()
@@ -32,9 +38,18 @@ struct ProjectDashboardView: View {
         }
         .onAppear {
             refreshProjectMarkdownFiles()
+            loadBacklogDraft()
         }
         .onChange(of: store.selectedProject?.path) { _, _ in
             refreshProjectMarkdownFiles()
+            loadBacklogDraft()
+        }
+        .onChange(of: store.selectedBacklogIdeaID) { _, _ in
+            loadBacklogDraft()
+        }
+        .sheet(isPresented: $showNewBacklogIdeaSheet) {
+            NewBacklogIdeaView()
+                .environmentObject(store)
         }
     }
 
@@ -149,6 +164,114 @@ struct ProjectDashboardView: View {
                     }
                     .padding(.vertical, 2)
                 }
+            }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
+    private var topNextWorkPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Top 3 Next Work")
+                .font(.headline)
+
+            if store.nextWorkItems.isEmpty {
+                Text("No backlog ideas or active tasks yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(store.nextWorkItems.prefix(3))) { item in
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.title)
+                                .font(.body.weight(.semibold))
+                            Text(item.subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(item.reason)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button(item.primaryAction.displayName) {
+                            trigger(item)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("Open") {
+                            open(item)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(.vertical, 3)
+                    if item.id != store.nextWorkItems.prefix(3).last?.id {
+                        Divider()
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
+    private var backlogPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Backlog Queue + Runner Orchestration")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    showNewBacklogIdeaSheet = true
+                } label: {
+                    Label("New Idea", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            if store.backlogIdeasForSelectedProject.isEmpty {
+                Text("No backlog ideas for this project yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(store.backlogIdeasForSelectedProject) { idea in
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(idea.title)
+                                .font(.body.weight(.semibold))
+                            Text("\(idea.priorityLevel.displayName) · \(idea.status.displayName)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Edit") {
+                            store.selectBacklogIdea(idea.id)
+                        }
+                        .buttonStyle(.bordered)
+                        Button(idea.isReadyToPromote ? "Promote" : "Scope") {
+                            if idea.isReadyToPromote {
+                                Task { await store.promoteSelectedBacklogIdeaToTask() }
+                            } else {
+                                store.selectBacklogIdea(idea.id)
+                                Task { await store.scopeBacklogIdea() }
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding(.vertical, 3)
+                    if idea.id != store.backlogIdeasForSelectedProject.last?.id {
+                        Divider()
+                    }
+                }
+            }
+
+            if store.selectedBacklogIdea != nil {
+                Divider()
+                backlogEditor
             }
         }
         .padding()
@@ -318,6 +441,139 @@ struct ProjectDashboardView: View {
             .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
             .map { ProjectMarkdownFile(path: $0.path) }
     }
+
+    private var backlogEditor: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Backlog Idea Editor")
+                .font(.headline)
+            TextField("Title", text: $backlogDraft.title)
+            HStack {
+                Picker("Priority", selection: $backlogDraft.priorityLevel) {
+                    ForEach(BacklogPriorityLevel.allCases) { level in
+                        Text(level.displayName).tag(level)
+                    }
+                }
+                Picker("Effort", selection: $backlogDraft.effort) {
+                    ForEach(BacklogEffort.allCases) { effort in
+                        Text(effort.displayName).tag(effort)
+                    }
+                }
+                Picker("Risk", selection: $backlogDraft.risk) {
+                    ForEach(BacklogRisk.allCases) { risk in
+                        Text(risk.displayName).tag(risk)
+                    }
+                }
+            }
+            TextField("Category", text: $backlogDraft.category)
+            TextField("Source", text: $backlogDraft.source)
+            labeledEditor("Goal", text: $backlogDraft.goal, minHeight: 80)
+            labeledEditor("Context", text: $backlogDraft.context, minHeight: 110)
+            labeledEditor("Acceptance Criteria (one per line)", text: $acceptanceText, minHeight: 90)
+            labeledEditor("Dependencies", text: $backlogDraft.dependencies, minHeight: 60)
+            labeledEditor("Non-Goals", text: $backlogDraft.nonGoals, minHeight: 60)
+            labeledEditor("Suggested Task Split", text: $backlogDraft.suggestedTaskSplit, minHeight: 60)
+            labeledEditor("Recommended Next Action", text: $backlogDraft.recommendedNextAction, minHeight: 60)
+
+            HStack {
+                Button("Save") {
+                    saveBacklogDraft()
+                }
+                .buttonStyle(.borderedProminent)
+                Button("Scope") {
+                    saveBacklogDraft()
+                    Task { await store.scopeBacklogIdea() }
+                }
+                .buttonStyle(.bordered)
+                Button("Promote") {
+                    saveBacklogDraft()
+                    Task { await store.promoteSelectedBacklogIdeaToTask() }
+                }
+                .buttonStyle(.bordered)
+                .disabled(!draftIdea.isReadyToPromote)
+                Button("Archive") {
+                    store.archiveSelectedBacklogIdea()
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private var draftIdea: BacklogIdea {
+        guard let idea = store.selectedBacklogIdea else {
+            return BacklogIdea(projectId: store.selectedProject?.id ?? "", title: "")
+        }
+        return backlogDraft.idea(updating: idea, acceptanceText: acceptanceText)
+    }
+
+    private func loadBacklogDraft() {
+        guard let idea = store.selectedBacklogIdea else {
+            backlogDraft = BacklogIdeaDraft()
+            acceptanceText = ""
+            loadedBacklogIdeaID = nil
+            return
+        }
+        guard loadedBacklogIdeaID != idea.id else { return }
+        backlogDraft = BacklogIdeaDraft(idea: idea)
+        acceptanceText = idea.acceptanceCriteria.joined(separator: "\n")
+        loadedBacklogIdeaID = idea.id
+    }
+
+    private func saveBacklogDraft() {
+        guard let idea = store.selectedBacklogIdea else { return }
+        let updated = backlogDraft.idea(updating: idea, acceptanceText: acceptanceText)
+        store.saveBacklogIdea(updated)
+        loadedBacklogIdeaID = updated.id
+    }
+
+    private func open(_ item: BacklogNextWorkItem) {
+        switch item.kind {
+        case .idea(let idea):
+            store.selectBacklogIdea(idea.id)
+        case .task(let task):
+            store.selectTask(task.id)
+        }
+    }
+
+    private func trigger(_ item: BacklogNextWorkItem) {
+        switch item.primaryAction {
+        case .scopeIdea:
+            if case .idea(let idea) = item.kind {
+                store.selectBacklogIdea(idea.id)
+                Task { await store.scopeBacklogIdea() }
+            }
+        case .promoteToTask:
+            if case .idea(let idea) = item.kind {
+                store.selectBacklogIdea(idea.id)
+                Task { await store.promoteSelectedBacklogIdeaToTask() }
+            }
+        case .dispatch:
+            if case .task(let task) = item.kind {
+                store.selectTask(task.id)
+                Task { await store.dispatchTask() }
+            }
+        case .continueRun:
+            if case .task(let task) = item.kind {
+                store.selectTask(task.id)
+                Task { await store.continueRunnerSession() }
+            }
+        case .reviewDiff, .runTests, .syncLifecycle, .needsManualReview, .noAction:
+            open(item)
+        }
+    }
+
+    private func labeledEditor(_ title: String, text: Binding<String>, minHeight: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            TextEditor(text: text)
+                .frame(minHeight: minHeight)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(.separator.opacity(0.5))
+                )
+        }
+    }
 }
 
 private struct ProjectMarkdownFile: Identifiable, Equatable {
@@ -325,4 +581,57 @@ private struct ProjectMarkdownFile: Identifiable, Equatable {
 
     var id: String { path }
     var name: String { URL(fileURLWithPath: path).lastPathComponent }
+}
+
+private struct BacklogIdeaDraft {
+    var title = ""
+    var priorityLevel: BacklogPriorityLevel = .p2
+    var category = ""
+    var source = ""
+    var goal = ""
+    var context = ""
+    var effort: BacklogEffort = .unknown
+    var risk: BacklogRisk = .unknown
+    var dependencies = ""
+    var nonGoals = ""
+    var suggestedTaskSplit = ""
+    var recommendedNextAction = ""
+
+    init() {}
+
+    init(idea: BacklogIdea) {
+        title = idea.title
+        priorityLevel = idea.priorityLevel
+        category = idea.category
+        source = idea.source
+        goal = idea.goal
+        context = idea.context
+        effort = idea.effort
+        risk = idea.risk
+        dependencies = idea.dependencies
+        nonGoals = idea.nonGoals
+        suggestedTaskSplit = idea.suggestedTaskSplit
+        recommendedNextAction = idea.recommendedNextAction
+    }
+
+    func idea(updating idea: BacklogIdea, acceptanceText: String) -> BacklogIdea {
+        var updated = idea
+        updated.title = title
+        updated.priorityLevel = priorityLevel
+        updated.category = category
+        updated.source = source
+        updated.goal = goal
+        updated.context = context
+        updated.effort = effort
+        updated.risk = risk
+        updated.dependencies = dependencies
+        updated.nonGoals = nonGoals
+        updated.suggestedTaskSplit = suggestedTaskSplit
+        updated.recommendedNextAction = recommendedNextAction
+        updated.acceptanceCriteria = acceptanceText
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return updated
+    }
 }
