@@ -49,6 +49,7 @@ struct ContentView: View {
             workspaceContent
                 .navigationSplitViewColumnWidth(min: 760, ideal: 1180)
         }
+        .navigationTitle(workspaceTitle)
     }
 
     @ViewBuilder
@@ -60,6 +61,26 @@ struct ContentView: View {
             KanbanView()
         case .task:
             TaskDetailView()
+        }
+    }
+
+    private var workspaceTitle: String {
+        switch store.selectedWorkspaceScope {
+        case .project:
+            if let project = store.selectedProject {
+                return "factory-desktop / Project / \(project.name)"
+            }
+            return "factory-desktop / Project"
+        case .kanban:
+            if let project = store.selectedProject {
+                return "factory-desktop / Kanban / \(project.name)"
+            }
+            return "factory-desktop / Kanban"
+        case .task:
+            if let task = store.selectedTask {
+                return "factory-desktop / Task / \(task.title)"
+            }
+            return "factory-desktop / Task"
         }
     }
 }

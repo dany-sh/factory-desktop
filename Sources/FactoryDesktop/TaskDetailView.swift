@@ -88,35 +88,35 @@ struct TaskDetailView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(task.title)
+                    TextField("Untitled Task", text: $draft.title)
                         .font(.title2.weight(.semibold))
-                        .lineLimit(2)
-                    HStack(spacing: 8) {
-                        statusMenu(task: task)
-                        Button {
-                            store.showProjectWorkspace()
-                        } label: {
-                            StatusPill(text: "Project View")
-                        }
-                        .buttonStyle(.plain)
-                        StatusPill(text: task.type.displayName)
-                        StatusPill(text: task.priority.displayName)
-                        StatusPill(text: task.readiness.displayName)
-                        Text(task.id.shortID)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
+                        .textFieldStyle(.plain)
+                        .focused($focusedField, equals: .title)
+                    metadataHeaderRow(task: task)
                     worktreeSummaryLine
                 }
                 Spacer()
-                if store.isWorking {
-                    ProgressView()
+                VStack(alignment: .trailing, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Button {
+                            store.showProjectWorkspace()
+                        } label: {
+                            Label("Project View", systemImage: "square.grid.2x2")
+                        }
+                        .buttonStyle(.bordered)
                         .controlSize(.small)
-                }
-                if selectedStage == .write {
-                    editorStatusSummary(task: task)
-                } else {
-                    compactPrimaryAction
+
+                        if store.isWorking {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+
+                    if selectedStage == .write {
+                        editorStatusSummary(task: task)
+                    } else {
+                        compactPrimaryAction
+                    }
                 }
             }
         }
@@ -246,6 +246,63 @@ struct TaskDetailView: View {
         .help("Task status")
     }
 
+    private func metadataHeaderRow(task: FactoryTask) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                statusMenu(task: task)
+                metadataMenu("Task type", selection: $draft.type, options: TaskType.allCases.sorted { $0.displayName < $1.displayName }, label: \.displayName)
+                metadataMenu("Priority", selection: $draft.priorityLabel, options: FactoryTaskPriorityLabel.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: \.displayName)
+                metadataMenu("Readiness", selection: $draft.readiness, options: FactoryTaskReadiness.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: \.displayName)
+                metadataMenu("Effort", selection: $draft.effort, options: FactoryTaskEffort.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: effortLabel(for:))
+                metadataMenu("Risk", selection: $draft.risk, options: FactoryTaskRisk.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: riskLabel(for:))
+                Text(task.id.shortID)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 2)
+            }
+        }
+    }
+
+    private func metadataMenu<Value: Identifiable & Hashable>(
+        _ title: String,
+        selection: Binding<Value>,
+        options: [Value],
+        label: @escaping (Value) -> String
+    ) -> some View {
+        Menu {
+            ForEach(options) { option in
+                Button {
+                    selection.wrappedValue = option
+                } label: {
+                    if selection.wrappedValue == option {
+                        Label(label(option), systemImage: "checkmark")
+                    } else {
+                        Text(label(option))
+                    }
+                }
+            }
+        } label: {
+            HeaderMetadataChip(text: label(selection.wrappedValue))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(title)
+    }
+
+    private func effortLabel(for effort: FactoryTaskEffort) -> String {
+        switch effort {
+        case .unknown: "Effort Unknown"
+        default: effort.displayName
+        }
+    }
+
+    private func riskLabel(for risk: FactoryTaskRisk) -> String {
+        switch risk {
+        case .unknown: "Risk Unknown"
+        default: risk.displayName
+        }
+    }
+
     private func editorStatusSummary(task: FactoryTask) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Text("Editor")
@@ -277,18 +334,7 @@ struct TaskDetailView: View {
 
     private var taskEditorCanvas: some View {
         VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Task Editor")
-                    .font(.headline)
-                TextField("Task title", text: $draft.title)
-                    .font(.largeTitle.weight(.semibold))
-                    .textFieldStyle(.plain)
-                    .focused($focusedField, equals: .title)
-                primaryMetadataPickerGrid
-            }
-
             richTaskEditorCanvas
-            // TODO: Clean up advanced task metadata properly instead of exposing raw persistence fields here.
         }
         .padding()
         .background(.background, in: RoundedRectangle(cornerRadius: 16))
@@ -296,50 +342,6 @@ struct TaskDetailView: View {
             RoundedRectangle(cornerRadius: 16)
                 .stroke(.separator.opacity(0.6))
         )
-    }
-
-    private var primaryMetadataPickerGrid: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Picker("Type", selection: $draft.type) {
-                    ForEach(TaskType.allCases) { type in
-                        Text(type.displayName).tag(type)
-                    }
-                }
-                Picker("Kind", selection: $draft.kind) {
-                    ForEach(FactoryTaskKind.allCases) { kind in
-                        Text(kind.displayName).tag(kind)
-                    }
-                }
-            }
-
-            HStack {
-                Picker("Priority", selection: $draft.priorityLabel) {
-                    ForEach(FactoryTaskPriorityLabel.allCases) { level in
-                        Text(level.displayName).tag(level)
-                    }
-                }
-                Picker("Readiness", selection: $draft.readiness) {
-                    ForEach(FactoryTaskReadiness.allCases) { readiness in
-                        Text(readiness.displayName).tag(readiness)
-                    }
-                }
-            }
-
-            HStack {
-                Picker("Effort", selection: $draft.effort) {
-                    ForEach(FactoryTaskEffort.allCases) { effort in
-                        Text(effort.displayName).tag(effort)
-                    }
-                }
-                Picker("Risk", selection: $draft.risk) {
-                    ForEach(FactoryTaskRisk.allCases) { risk in
-                        Text(risk.displayName).tag(risk)
-                    }
-                }
-            }
-        }
-        .controlSize(.small)
     }
 
     private var richTaskEditorCanvas: some View {
@@ -1564,16 +1566,22 @@ private struct LabeledTextEditor: View {
     }
 }
 
-private struct StatusPill: View {
+private struct HeaderMetadataChip: View {
     var text: String
 
     var body: some View {
-        Text(text)
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(Color.accentColor.opacity(0.14), in: Capsule())
-            .foregroundStyle(Color.accentColor)
+        HStack(spacing: 6) {
+            Text(text)
+                .lineLimit(1)
+            Image(systemName: "chevron.down")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption.weight(.semibold))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(.quaternary.opacity(0.6), in: Capsule())
+        .foregroundStyle(.primary)
     }
 }
 
