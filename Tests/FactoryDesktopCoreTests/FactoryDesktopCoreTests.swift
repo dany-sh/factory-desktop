@@ -2299,6 +2299,110 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(events.first?.newStatus, .readyForReview)
     }
 
+    func testRepositoryDeleteTaskCleansRelatedTaskState() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Delete me")
+        let child = FactoryTask(id: "child", projectId: project.id, title: "Child task", parentTaskId: task.id)
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+        try fixture.repository.upsert(task: child)
+        try fixture.repository.upsert(run: RunRecord(
+            id: "run-1",
+            projectId: project.id,
+            taskId: task.id,
+            executor: "local_runner",
+            status: .succeeded,
+            outputPath: fixture.root.appendingPathComponent("run.log").path
+        ))
+        try fixture.repository.insert(artifact: Artifact(
+            id: "artifact-1",
+            taskId: task.id,
+            runId: "run-1",
+            type: .plan,
+            path: fixture.root.appendingPathComponent("plan.md").path,
+            description: "Plan"
+        ))
+        try fixture.repository.insert(taskEvent: TaskEvent(
+            id: "event-1",
+            taskId: task.id,
+            kind: .planGenerated,
+            source: .manual,
+            artifactId: "artifact-1"
+        ))
+        try fixture.repository.upsert(codexSessionLink: CodexSessionLink(
+            id: "session-link",
+            projectId: project.id,
+            taskId: task.id,
+            codexSessionId: "session-1",
+            workspacePath: fixture.root.path,
+            status: .active
+        ))
+
+        try fixture.repository.deleteTask(id: task.id)
+
+        let remainingTasks = try fixture.repository.tasks(projectId: project.id)
+        XCTAssertNil(remainingTasks.first { $0.id == task.id })
+        XCTAssertNil(remainingTasks.first { $0.id == child.id }?.parentTaskId)
+        XCTAssertEqual(try fixture.repository.runs(taskId: task.id), [])
+        XCTAssertEqual(try fixture.repository.artifacts(taskId: task.id), [])
+        XCTAssertEqual(try fixture.repository.taskEvents(taskId: task.id), [])
+        let session = try XCTUnwrap(fixture.repository.codexSessionLinks(projectId: project.id).first)
+        XCTAssertNil(session.taskId)
+    }
+
+    @MainActor
+    func testDeleteSelectedTaskMovesSelectionToRemainingTask() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
+        let first = FactoryTask(
+            id: "first",
+            projectId: project.id,
+            title: "First",
+            updatedAt: Date(timeIntervalSince1970: 100)
+        )
+        let second = FactoryTask(
+            id: "second",
+            projectId: project.id,
+            title: "Second",
+            updatedAt: Date(timeIntervalSince1970: 200)
+        )
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: first)
+        try fixture.repository.upsert(task: second)
+
+        let store = AppStore(paths: fixture.paths)
+        store.selectedProjectID = project.id
+        store.selectedTaskID = second.id
+        store.deleteSelectedTask()
+
+        XCTAssertEqual(store.selectedTaskID, first.id)
+        XCTAssertEqual(try fixture.repository.tasks(projectId: project.id).map(\.id), [first.id])
+        XCTAssertEqual(store.statusMessage, "Deleted task.")
+        XCTAssertNil(store.errorMessage)
+    }
+
+    @MainActor
+    func testUpdateTaskStatusByIDKeepsTriageAndWritesEvent() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Move card", status: .backlog)
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        let store = AppStore(paths: fixture.paths)
+        store.selectedProjectID = project.id
+        store.updateTaskStatus(taskID: task.id, status: .readyForReview)
+
+        let storedTask = try XCTUnwrap(fixture.repository.tasks(projectId: project.id).first)
+        let event = try XCTUnwrap(fixture.repository.taskEvents(taskId: task.id).first)
+        XCTAssertEqual(storedTask.status, .readyForReview)
+        XCTAssertEqual(storedTask.triageStatus, .review)
+        XCTAssertEqual(event.previousStatus, .backlog)
+        XCTAssertEqual(event.newStatus, .readyForReview)
+        XCTAssertEqual(store.statusMessage, "Moved task to Ready for Review.")
+    }
+
     @MainActor
     func testAttachingCodexSessionDoesNotMutateTaskStatus() throws {
         let fixture = try makeRepositoryFixture()

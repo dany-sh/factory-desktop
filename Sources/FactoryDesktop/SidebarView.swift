@@ -4,7 +4,6 @@ import SwiftUI
 struct SidebarView: View {
     @EnvironmentObject private var store: AppStore
     @EnvironmentObject private var router: AppRouter
-    @Binding var showingProjectSheet: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -88,28 +87,6 @@ struct SidebarView: View {
             .listStyle(.sidebar)
 
             VStack(spacing: 8) {
-                Button {
-                    showingProjectSheet = true
-                } label: {
-                    Label("Register Project", systemImage: "folder.badge.plus")
-                        .frame(maxWidth: .infinity)
-                }
-
-                Button {
-                    store.registerSelfProject()
-                } label: {
-                    Label("Register This App", systemImage: "app.badge")
-                        .frame(maxWidth: .infinity)
-                }
-
-                Button {
-                    Task { await store.createTask() }
-                } label: {
-                    Label("New Task", systemImage: "plus.circle")
-                        .frame(maxWidth: .infinity)
-                }
-                .disabled(store.selectedProject == nil)
-
                 Button {
                     router.openSettings(.general)
                 } label: {

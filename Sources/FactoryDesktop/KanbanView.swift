@@ -1,46 +1,25 @@
 import FactoryDesktopCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct KanbanView: View {
     @EnvironmentObject private var store: AppStore
-    @State private var showingTaskPanel = false
+    @State private var dragTargetColumn: KanbanColumn?
 
     var body: some View {
         Group {
             if let project = store.selectedProject {
-                ZStack(alignment: .trailing) {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 18) {
-                            header(project: project)
-                            nextTasksPanel
-                            taskQueuePanel
-                            kanbanPanel
-                        }
-                        .padding(24)
-                        .padding(.trailing, showingTaskPanel ? 556 : 24)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .animation(.easeInOut(duration: 0.2), value: showingTaskPanel)
-                    }
-
-                    if showingTaskPanel, let task = selectedKanbanTask {
-                        taskPanel(task: task)
-                            .transition(.move(edge: .trailing).combined(with: .opacity))
-                    }
+                VStack(alignment: .leading, spacing: 16) {
+                    header(project: project)
+                    kanbanPanel
                 }
-                .animation(.easeInOut(duration: 0.2), value: showingTaskPanel)
-                .onChange(of: store.selectedProjectID) { _, _ in
-                    dismissTaskPanel()
-                }
-                .onChange(of: store.selectedTaskID) { _, _ in
-                    if showingTaskPanel, selectedKanbanTask == nil {
-                        dismissTaskPanel()
-                    }
-                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 ContentUnavailableView(
                     "No Project Selected",
                     systemImage: "square.grid.3x3.topleft.filled",
-                    description: Text("Select a project to review its queue and kanban flow.")
+                    description: Text("Select a project to review its task flow.")
                 )
             }
         }
@@ -63,7 +42,7 @@ struct KanbanView: View {
                         badge(project.name)
                         badge(project.type.displayName)
                     }
-                    Text("Showing tasks for the selected project only.")
+                    Text("Project tasks grouped by work state.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -86,108 +65,7 @@ struct KanbanView: View {
                 }
             }
         }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(.separator.opacity(0.6))
-        )
-    }
-
-    private var nextTasksPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Top 3 Next Tasks")
-                .font(.headline)
-
-            if store.nextWorkItems.isEmpty {
-                Text("No queued tasks yet.")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(Array(store.nextWorkItems.prefix(3))) { item in
-                    HStack(alignment: .top, spacing: 12) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(item.title)
-                                .font(.body.weight(.semibold))
-                            Text(item.subtitle)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(item.reason)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button(item.primaryAction.displayName) {
-                            trigger(item)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        Button("Details") {
-                            open(item)
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    .padding(.vertical, 3)
-                    if item.id != store.nextWorkItems.prefix(3).last?.id {
-                        Divider()
-                    }
-                }
-            }
-        }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(.separator.opacity(0.6))
-        )
-    }
-
-    private var taskQueuePanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Task Queue")
-                .font(.headline)
-
-            if store.backlogTasksForSelectedProject.isEmpty {
-                Text("No queued tasks for this project yet.")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(store.backlogTasksForSelectedProject) { task in
-                    HStack(alignment: .top, spacing: 10) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(task.title)
-                                .font(.body.weight(.semibold))
-                            Text("\(task.kind.displayName) · \(task.priorityLabel.displayName) · \(task.triageStatus.displayName) · \(task.readiness.displayName)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            if !task.recommendedNextAction.isEmpty {
-                                Text(task.recommendedNextAction)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        Spacer()
-                        Button("Details") {
-                            open(task)
-                        }
-                        .buttonStyle(.bordered)
-
-                        Button(nextActionTitle(for: task)) {
-                            selectForKanban(task.id)
-                            if task.readiness == .executable {
-                                Task { await store.dispatchTask() }
-                            } else {
-                                Task { await store.scopeWorkItem() }
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(task.triageStatus == .done || task.triageStatus == .archived)
-                    }
-                    .padding(.vertical, 3)
-                    if task.id != store.backlogTasksForSelectedProject.last?.id {
-                        Divider()
-                    }
-                }
-            }
-        }
-        .padding()
+        .padding(14)
         .background(.background, in: RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
@@ -197,43 +75,78 @@ struct KanbanView: View {
 
     private var kanbanPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Board")
-                .font(.headline)
+            HStack {
+                Text("Board")
+                    .font(.headline)
+                Spacer()
+                Text("\(visibleTasks.count) tasks")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
             ScrollView(.horizontal, showsIndicators: true) {
                 HStack(alignment: .top, spacing: 12) {
-                    ForEach(FactoryTaskTriageStatus.kanbanColumns) { status in
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text(status.displayName)
-                                    .font(.subheadline.weight(.semibold))
-                                Spacer()
-                                Text("\(tasks(for: status).count)")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                            }
-                            ForEach(tasks(for: status)) { task in
-                                kanbanCard(task)
-                            }
-                            if tasks(for: status).isEmpty {
-                                Text("No cards")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(10)
-                            }
-                        }
-                        .frame(width: 220, alignment: .topLeading)
-                        .padding(10)
-                        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+                    ForEach(KanbanColumn.allCases) { column in
+                        kanbanColumn(column)
                     }
                 }
+                .frame(minWidth: 1320, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.bottom, 8)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(.background, in: RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator.opacity(0.6))
+        )
+    }
+
+    private func kanbanColumn(_ column: KanbanColumn) -> some View {
+        let columnTasks = tasks(for: column)
+        let isDropTarget = dragTargetColumn == column
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(column.title)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(columnTasks.count)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(columnTasks) { task in
+                        kanbanCard(task)
+                    }
+                    if columnTasks.isEmpty {
+                        Text("Drop cards here")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, minHeight: 72, alignment: .center)
+                            .padding(10)
+                            .background(.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(.bottom, 10)
+            }
+        }
+        .frame(minWidth: 240, idealWidth: 240, maxWidth: 240, maxHeight: .infinity, alignment: .topLeading)
+        .padding(10)
+        .background((isDropTarget ? Color.accentColor.opacity(0.16) : Color.secondary.opacity(0.10)), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(isDropTarget ? Color.accentColor.opacity(0.75) : Color.secondary.opacity(0.18), lineWidth: isDropTarget ? 2 : 1)
+        )
+        .onDrop(
+            of: [UTType.text],
+            delegate: KanbanDropDelegate(
+                column: column,
+                dragTargetColumn: $dragTargetColumn,
+                moveTask: moveTask
+            )
         )
     }
 
@@ -251,9 +164,15 @@ struct KanbanView: View {
                 Text("\(task.kind.displayName) · \(task.priorityLabel.displayName)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Text("\(task.readiness.displayName) · \(nextActionTitle(for: task))")
+                Text(task.status.displayName)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                if !task.recommendedNextAction.isEmpty {
+                    Text(task.recommendedNextAction)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
@@ -264,52 +183,9 @@ struct KanbanView: View {
             )
         }
         .buttonStyle(.plain)
-    }
-
-    private func taskPanel(task: FactoryTask) -> some View {
-        VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Task Details")
-                        .font(.headline)
-                    Text(task.title)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
-                Button {
-                    store.showTaskWorkspace()
-                } label: {
-                    Label("Open Full View", systemImage: "arrow.right.square")
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    dismissTaskPanel()
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.bordered)
-            }
-            .padding(16)
-            .background(.bar)
-
-            Divider()
-
-            TaskDetailView()
-                .environmentObject(store)
+        .onDrag {
+            NSItemProvider(object: task.id as NSString)
         }
-        .frame(width: 520)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 18))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(.separator.opacity(0.6))
-        )
-        .shadow(color: .black.opacity(0.12), radius: 18, x: -4, y: 0)
-        .padding(.trailing, 20)
-        .padding(.vertical, 20)
     }
 
     private func badge(_ text: String) -> some View {
@@ -320,9 +196,14 @@ struct KanbanView: View {
             .background(.quaternary.opacity(0.5), in: Capsule())
     }
 
-    private func tasks(for triageStatus: FactoryTaskTriageStatus) -> [FactoryTask] {
+    private var visibleTasks: [FactoryTask] {
         store.tasksForSelectedProject
-            .filter { $0.triageStatus == triageStatus }
+            .filter { $0.status != .archived }
+    }
+
+    private func tasks(for column: KanbanColumn) -> [FactoryTask] {
+        visibleTasks
+            .filter { column.contains($0.status) }
             .sorted { left, right in
                 if left.priorityLabel.sortOrder != right.priorityLabel.sortOrder {
                     return left.priorityLabel.sortOrder < right.priorityLabel.sortOrder
@@ -331,58 +212,108 @@ struct KanbanView: View {
             }
     }
 
-    private func nextActionTitle(for task: FactoryTask) -> String {
-        if store.runnerSessionLinks.contains(where: { $0.taskId == task.id }) {
-            return "Continue Run"
-        }
-        switch task.readiness {
-        case .executable:
-            return "Dispatch"
-        case .raw, .needsScoping, .scoped:
-            return "Scope"
-        }
-    }
-
-    private func open(_ item: BacklogNextWorkItem) {
-        switch item.kind {
-        case .task(let task):
-            open(task)
-        }
-    }
-
     private func open(_ task: FactoryTask) {
-        selectForKanban(task.id)
-        showingTaskPanel = true
+        store.selectTask(task.id)
     }
 
-    private func selectForKanban(_ taskID: String?) {
-        store.selectTask(taskID, openWorkspace: false)
+    private func moveTask(taskID: String, to column: KanbanColumn) {
+        guard let task = store.tasksForSelectedProject.first(where: { $0.id == taskID }) else { return }
+        let status = column.targetStatus
+        guard task.status != status else { return }
+        store.updateTaskStatus(taskID: taskID, status: status)
     }
+}
 
-    private func dismissTaskPanel() {
-        showingTaskPanel = false
-        store.selectTask(nil, openWorkspace: false)
-    }
+private enum KanbanColumn: String, CaseIterable, Identifiable {
+    case backlog
+    case ready
+    case inProgress
+    case needsReview
+    case blocked
+    case done
 
-    private func trigger(_ item: BacklogNextWorkItem) {
-        switch item.primaryAction {
-        case .scope:
-            if case .task(let task) = item.kind {
-                open(task)
-                Task { await store.scopeWorkItem() }
-            }
-        case .dispatch:
-            if case .task(let task) = item.kind {
-                open(task)
-                Task { await store.dispatchTask() }
-            }
-        case .continueRun:
-            if case .task(let task) = item.kind {
-                open(task)
-                Task { await store.continueRunnerSession() }
-            }
-        case .reviewDiff, .runTests, .syncLifecycle, .needsManualReview, .noAction:
-            open(item)
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .backlog: "Backlog"
+        case .ready: "Ready"
+        case .inProgress: "In Progress"
+        case .needsReview: "Needs Review"
+        case .blocked: "Blocked"
+        case .done: "Done"
         }
+    }
+
+    func contains(_ status: TaskStatus) -> Bool {
+        switch self {
+        case .backlog:
+            return status == .backlog
+        case .ready:
+            return status == .ready || status == .planning || status == .planReview || status == .approved
+        case .inProgress:
+            return status == .building || status == .testing
+        case .needsReview:
+            return status == .readyForReview
+        case .blocked:
+            return status == .needsFixes || status == .blocked
+        case .done:
+            return status == .done
+        }
+    }
+
+    var targetStatus: TaskStatus {
+        switch self {
+        case .backlog: .backlog
+        case .ready: .ready
+        case .inProgress: .building
+        case .needsReview: .readyForReview
+        case .blocked: .blocked
+        case .done: .done
+        }
+    }
+}
+
+private struct KanbanDropDelegate: DropDelegate {
+    var column: KanbanColumn
+    @Binding var dragTargetColumn: KanbanColumn?
+    var moveTask: (String, KanbanColumn) -> Void
+
+    func dropEntered(info: DropInfo) {
+        dragTargetColumn = column
+    }
+
+    func dropExited(info: DropInfo) {
+        if dragTargetColumn == column {
+            dragTargetColumn = nil
+        }
+    }
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [UTType.text])
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        dragTargetColumn = nil
+        guard let provider = info.itemProviders(for: [UTType.text]).first else {
+            return false
+        }
+        provider.loadItem(forTypeIdentifier: UTType.text.identifier, options: nil) { item, _ in
+            let taskID: String?
+            if let data = item as? Data {
+                taskID = String(data: data, encoding: .utf8)
+            } else if let text = item as? String {
+                taskID = text
+            } else if let text = item as? NSString {
+                taskID = text as String
+            } else {
+                taskID = nil
+            }
+            guard let taskID else { return }
+            Task { @MainActor in
+                moveTask(taskID, column)
+            }
+        }
+        return true
     }
 }

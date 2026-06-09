@@ -47,6 +47,7 @@ enum AppScreen: Equatable {
 @MainActor
 final class AppRouter: ObservableObject {
     @Published var screen: AppScreen = .main
+    @Published var isRegisterProjectPresented = false
 
     var selectedSettingsSection: SettingsSection {
         get {
@@ -62,6 +63,10 @@ final class AppRouter: ObservableObject {
 
     func openSettings(_ section: SettingsSection = .general) {
         screen = .settings(section)
+    }
+
+    func showRegisterProject() {
+        isRegisterProjectPresented = true
     }
 
     func showMain() {

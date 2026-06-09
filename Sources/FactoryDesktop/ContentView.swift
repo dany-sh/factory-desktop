@@ -4,7 +4,6 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
     @EnvironmentObject private var router: AppRouter
-    @State private var showingProjectSheet = false
 
     var body: some View {
         Group {
@@ -16,7 +15,7 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 1040, minHeight: 680)
-        .sheet(isPresented: $showingProjectSheet) {
+        .sheet(isPresented: $router.isRegisterProjectPresented) {
             RegisterProjectView()
                 .environmentObject(store)
         }
@@ -39,35 +38,16 @@ struct ContentView: View {
     }
 
     private var mainView: some View {
-        Group {
-            if store.selectedWorkspaceScope == .task {
-                taskSplitView
-            } else {
-                workspaceSplitView
-            }
-        }
+        workspaceSplitView
     }
 
     private var workspaceSplitView: some View {
         NavigationSplitView {
-            SidebarView(showingProjectSheet: $showingProjectSheet)
+            SidebarView()
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
         } detail: {
             workspaceContent
-                .navigationSplitViewColumnWidth(min: 760, ideal: 1120)
-        }
-    }
-
-    private var taskSplitView: some View {
-        NavigationSplitView {
-            SidebarView(showingProjectSheet: $showingProjectSheet)
-                .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
-        } content: {
-            TaskDetailView()
-                .navigationSplitViewColumnWidth(min: 460, ideal: 680)
-        } detail: {
-            InspectorView()
-                .navigationSplitViewColumnWidth(min: 300, ideal: 360, max: 440)
+                .navigationSplitViewColumnWidth(min: 760, ideal: 1180)
         }
     }
 

@@ -40,6 +40,26 @@ struct FactoryDesktopApp: App {
         .defaultSize(width: 940, height: 760)
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("New Task") {
+                    Task { await store.createTask() }
+                }
+                .keyboardShortcut("n", modifiers: [.command])
+                .disabled(store.selectedProject == nil)
+
+                Divider()
+
+                Button("Register Project...") {
+                    router.showRegisterProject()
+                }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+
+                Button("Register This App") {
+                    store.registerSelfProject()
+                }
+                .keyboardShortcut("n", modifiers: [.command, .option])
+            }
+
             CommandGroup(replacing: .appSettings) {
                 Button("Settings") {
                     router.openSettings(.general)

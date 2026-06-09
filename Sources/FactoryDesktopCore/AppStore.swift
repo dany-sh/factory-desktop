@@ -258,6 +258,9 @@ public final class AppStore: ObservableObject {
         if selectedProjectID == nil {
             selectedProjectID = projects.first?.id
         }
+        if let selectedProjectID, selectedTaskID != nil, selectedTask == nil {
+            selectedTaskID = tasks.first { $0.projectId == selectedProjectID }?.id
+        }
         if let selectedProjectID, selectedTaskID == nil {
             selectedTaskID = tasks.first { $0.projectId == selectedProjectID }?.id
         }
@@ -484,12 +487,34 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    public func updateTaskStatus(taskID: String, status: TaskStatus) {
+        perform {
+            guard let task = self.tasks.first(where: { $0.id == taskID }) else {
+                throw FactoryError.missingSelection
+            }
+            try self.updateStatus(
+                for: task,
+                to: status,
+                source: .manual,
+                eventKind: .statusChangedManually,
+                message: "Manual status changed to \(status.displayName)."
+            )
+            self.statusMessage = "Moved task to \(status.displayName)."
+        }
+    }
+
     public func deleteSelectedTask() {
         perform {
             guard let repository = self.repository, let task = self.selectedTask else {
                 throw FactoryError.missingSelection
             }
+            let projectID = task.projectId
             try repository.deleteTask(id: task.id)
+            self.selectedTaskID = self.tasks
+                .filter { $0.projectId == projectID && $0.id != task.id }
+                .sorted { $0.updatedAt > $1.updatedAt }
+                .first?
+                .id
             try self.reload()
             self.statusMessage = "Deleted task."
         }
@@ -2623,6 +2648,7 @@ public final class AppStore: ObservableObject {
         let previousStatus = task.status
         if let status {
             task.status = status
+            task.triageStatus = FactoryTaskTriageStatus.fromLegacyStatus(status)
         }
         task.updatedAt = Date()
         try repository.upsert(task: task)

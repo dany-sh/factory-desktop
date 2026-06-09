@@ -231,7 +231,21 @@ public final class FactoryRepository {
     }
 
     public func deleteTask(id: String) throws {
-        try database.execute("DELETE FROM tasks WHERE id = ?;", binds: [.text(id)])
+        try database.transaction {
+            try database.execute(
+                "UPDATE codex_session_links SET task_id = NULL, updated_at = ? WHERE task_id = ?;",
+                binds: [.text(DateCoding.string(from: Date())), .text(id)]
+            )
+            try database.execute(
+                "UPDATE backlog_ideas SET linked_task_id = NULL, updated_at = ? WHERE linked_task_id = ?;",
+                binds: [.text(DateCoding.string(from: Date())), .text(id)]
+            )
+            try database.execute("UPDATE tasks SET parent_task_id = NULL WHERE parent_task_id = ?;", binds: [.text(id)])
+            try database.execute("DELETE FROM task_events WHERE task_id = ?;", binds: [.text(id)])
+            try database.execute("DELETE FROM artifacts WHERE task_id = ?;", binds: [.text(id)])
+            try database.execute("DELETE FROM runs WHERE task_id = ?;", binds: [.text(id)])
+            try database.execute("DELETE FROM tasks WHERE id = ?;", binds: [.text(id)])
+        }
     }
 
     public func upsert(codexSessionLink link: CodexSessionLink) throws {
