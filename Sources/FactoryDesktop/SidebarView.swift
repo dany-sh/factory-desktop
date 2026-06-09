@@ -5,7 +5,6 @@ struct SidebarView: View {
     @EnvironmentObject private var store: AppStore
     @EnvironmentObject private var router: AppRouter
     @Binding var showingProjectSheet: Bool
-    @Binding var showingTaskSheet: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,6 +37,19 @@ struct SidebarView: View {
                             store.selectProject(project.id)
                         }
                     }
+                }
+
+                Section("Views") {
+                    workspaceRow(title: "Project", subtitle: "Repo health, docs, cleanup", scope: .project) {
+                        store.showProjectWorkspace()
+                    }
+                    workspaceRow(title: "Kanban", subtitle: "Queue, backlog, task flow", scope: .kanban) {
+                        store.showKanbanWorkspace()
+                    }
+                    workspaceRow(title: "Task", subtitle: store.selectedTask?.title ?? "Open the selected task", scope: .task) {
+                        store.showTaskWorkspace()
+                    }
+                    .disabled(store.selectedTask == nil)
                 }
 
                 Section("Active Tasks") {
@@ -91,7 +103,7 @@ struct SidebarView: View {
                 }
 
                 Button {
-                    showingTaskSheet = true
+                    Task { await store.createTask() }
                 } label: {
                     Label("New Task", systemImage: "plus.circle")
                         .frame(maxWidth: .infinity)
@@ -137,6 +149,21 @@ struct SidebarView: View {
 
     private func isArchivedLike(_ task: FactoryTask) -> Bool {
         task.status == .archived || task.status == .done
+    }
+
+    @ViewBuilder
+    private func workspaceRow(
+        title: String,
+        subtitle: String,
+        scope: WorkspaceSelectionScope,
+        action: @escaping () -> Void
+    ) -> some View {
+        SidebarRow(
+            title: title,
+            subtitle: subtitle,
+            isSelected: store.selectedWorkspaceScope == scope,
+            action: action
+        )
     }
 }
 

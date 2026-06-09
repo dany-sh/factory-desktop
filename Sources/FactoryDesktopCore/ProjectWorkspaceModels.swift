@@ -2,6 +2,7 @@ import Foundation
 
 public enum WorkspaceSelectionScope: String, Codable, Equatable, Identifiable {
     case project
+    case kanban
     case task
 
     public var id: String { rawValue }
@@ -9,6 +10,7 @@ public enum WorkspaceSelectionScope: String, Codable, Equatable, Identifiable {
     public var displayName: String {
         switch self {
         case .project: "Project View"
+        case .kanban: "Kanban View"
         case .task: "Task View"
         }
     }

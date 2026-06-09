@@ -319,9 +319,11 @@ public final class AppStore: ObservableObject {
         }
     }
 
-    public func selectTask(_ taskID: String?) {
+    public func selectTask(_ taskID: String?, openWorkspace: Bool = true) {
         selectedTaskID = taskID
-        selectedWorkspaceScope = taskID == nil ? .project : .task
+        if openWorkspace {
+            selectedWorkspaceScope = taskID == nil ? .project : .task
+        }
         selectedRunOutput = ""
         latestPreflightReport = nil
         latestLifecycleReport = nil
@@ -394,6 +396,10 @@ public final class AppStore: ObservableObject {
         selectedWorkspaceScope = .project
     }
 
+    public func showKanbanWorkspace() {
+        selectedWorkspaceScope = .kanban
+    }
+
     public func showTaskWorkspace() {
         guard selectedTask != nil else {
             selectedWorkspaceScope = .project
@@ -402,7 +408,7 @@ public final class AppStore: ObservableObject {
         selectedWorkspaceScope = .task
     }
 
-    public func createTask(title: String, type: TaskType, goal: String = "") async {
+    public func createTask(title: String = "", type: TaskType = .planning, goal: String = "") async {
         guard let repository, let project = selectedProject else {
             errorMessage = FactoryError.missingSelection.localizedDescription
             return
@@ -434,6 +440,7 @@ public final class AppStore: ObservableObject {
             try self.reload()
             self.selectedProjectID = project.id
             self.selectedTaskID = task.id
+            self.selectedWorkspaceScope = .task
             self.statusMessage = "Created task \(task.title)."
         }
     }
@@ -485,59 +492,6 @@ public final class AppStore: ObservableObject {
             try repository.deleteTask(id: task.id)
             try self.reload()
             self.statusMessage = "Deleted task."
-        }
-    }
-
-    public func createWorkItem(
-        title: String,
-        kind: FactoryTaskKind = .idea,
-        priorityLabel: FactoryTaskPriorityLabel = .normal,
-        category: String = "",
-        source: String = ""
-    ) {
-        perform {
-            guard let repository = self.repository, let project = self.selectedProject else {
-                throw FactoryError.missingSelection
-            }
-            let task = FactoryTask(
-                projectId: project.id,
-                title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled work item" : title,
-                type: .planning,
-                status: .backlog,
-                priority: priorityLabel.taskPriority,
-                kind: kind,
-                triageStatus: .backlog,
-                readiness: .raw,
-                priorityLabel: priorityLabel,
-                source: source,
-                category: category
-            )
-            try repository.upsert(task: task)
-            try repository.insert(taskEvent: TaskEvent(
-                taskId: task.id,
-                kind: .statusChangedManually,
-                source: .manual,
-                message: "Work item created.",
-                previousStatus: nil,
-                newStatus: task.status
-            ))
-            try self.reload()
-            self.selectedTaskID = task.id
-            self.statusMessage = "Created work item \(task.title)."
-        }
-    }
-
-    public func archiveSelectedWorkItem() {
-        perform {
-            guard var task = self.selectedTask else {
-                throw FactoryError.missingSelection
-            }
-            task.triageStatus = .archived
-            task.updatedAt = Date()
-            try self.repository?.upsert(task: task)
-            try self.reload()
-            self.selectedTaskID = self.backlogTasksForSelectedProject.first?.id
-            self.statusMessage = "Archived work item."
         }
     }
 
@@ -1313,7 +1267,7 @@ public final class AppStore: ObservableObject {
             return
         }
         guard var task = (taskID.flatMap { id in tasks.first { $0.id == id } }) ?? selectedTask else {
-            errorMessage = "Select a work item first."
+            errorMessage = "Select a task first."
             return
         }
         guard let adapter = runnerAdapters[provider] else {
@@ -1337,7 +1291,7 @@ public final class AppStore: ObservableObject {
             command: nil,
             promptPath: promptURL.path,
             outputPath: outputURL.path,
-            summary: "Scoping work item"
+            summary: "Scoping task"
         )
 
         do {
@@ -1380,7 +1334,7 @@ public final class AppStore: ObservableObject {
                 action: action,
                 reason: task.recommendedNextAction.isEmpty ? result.summary : task.recommendedNextAction
             )
-            statusMessage = result.succeeded ? "Scoped work item." : "Work item scoping failed."
+            statusMessage = result.succeeded ? "Scoped task." : "Task scoping failed."
             if !result.succeeded {
                 errorMessage = result.output
             }
@@ -1407,7 +1361,7 @@ public final class AppStore: ObservableObject {
             return
         }
         guard task.readiness == .executable else {
-            errorMessage = "Scope this work item until readiness is executable before dispatch."
+            errorMessage = "Scope this task until readiness is executable before dispatch."
             return
         }
         if project.type == .codeRepo {
@@ -3354,7 +3308,7 @@ public final class AppStore: ObservableObject {
     private func workItemScopingPrompt(project: Project, task: FactoryTask) -> String {
         """
         You are Factory Desktop's runner-agnostic scoping assistant.
-        Scope this work item without editing code.
+        Scope this task without editing code.
 
         Return JSON only with this shape:
         {
@@ -3380,7 +3334,7 @@ public final class AppStore: ObservableObject {
         - Type: \(project.type.rawValue)
         - Path: \(project.path)
 
-        Work item:
+        Task:
         - Title: \(task.title)
         - Kind: \(task.kind.rawValue)
         - Triage status: \(task.triageStatus.rawValue)
@@ -3395,8 +3349,8 @@ public final class AppStore: ObservableObject {
         - Non-goals: \(task.nonGoals.isEmpty ? "none" : task.nonGoals)
 
         Prefer practical scoping. Keep the title concise, acceptance criteria testable, and the next action explicit.
-        Mark readiness executable only when the work item is small and clear enough for coding-mode dispatch.
-        If it is too broad, keep readiness scoped or needs_scoping and use suggestedSplit to describe child work items.
+        Mark readiness executable only when the task is small and clear enough for coding-mode dispatch.
+        If it is too broad, keep readiness scoped or needs_scoping and use suggestedSplit to describe child tasks.
         """
     }
 

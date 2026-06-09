@@ -6,11 +6,7 @@ struct ProjectDashboardView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var showActiveTasks = false
     @State private var showArchivedTasks = false
-    @State private var showNewWorkItemSheet = false
     @State private var projectMarkdownFiles: [ProjectMarkdownFile] = []
-    @State private var workItemDraft = WorkItemDraft()
-    @State private var loadedWorkItemID: String?
-    @State private var acceptanceText = ""
 
     var body: some View {
         Group {
@@ -18,11 +14,8 @@ struct ProjectDashboardView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         header(project: project)
-                        summaryPanel(project: project)
-                        topNextWorkPanel
-                        backlogPanel
-                        kanbanPanel
-                        projectDocsPanel(project: project)
+                        summaryPanel
+                        projectDocsPanel
                         taskListsPanel
                         LifecycleCleanupView()
                     }
@@ -33,24 +26,13 @@ struct ProjectDashboardView: View {
                 ContentUnavailableView(
                     "No Project Selected",
                     systemImage: "folder",
-                    description: Text("Register or select a project to review repo health, hygiene, and task history.")
+                    description: Text("Register or select a project to review repo health, docs, cleanup, and task history.")
                 )
             }
         }
-        .onAppear {
-            refreshProjectMarkdownFiles()
-            loadBacklogDraft()
-        }
+        .onAppear(perform: refreshProjectMarkdownFiles)
         .onChange(of: store.selectedProject?.path) { _, _ in
             refreshProjectMarkdownFiles()
-            loadBacklogDraft()
-        }
-        .onChange(of: store.selectedTaskID) { _, _ in
-            loadBacklogDraft()
-        }
-        .sheet(isPresented: $showNewWorkItemSheet) {
-            NewWorkItemView()
-                .environmentObject(store)
         }
     }
 
@@ -61,7 +43,7 @@ struct ProjectDashboardView: View {
                     Text(project.name)
                         .font(.title2.weight(.semibold))
                     HStack(spacing: 8) {
-                        projectBadge("Project View")
+                        projectBadge("Project")
                         projectBadge(project.type.displayName)
                         Text(project.id.shortID)
                             .font(.caption.monospaced())
@@ -81,6 +63,13 @@ struct ProjectDashboardView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(store.isWorking)
+
+                    Button {
+                        store.showKanbanWorkspace()
+                    } label: {
+                        Label("Open Kanban", systemImage: "square.grid.3x3.topleft.filled")
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
         }
@@ -92,7 +81,7 @@ struct ProjectDashboardView: View {
         )
     }
 
-    private func summaryPanel(project: Project) -> some View {
+    private var summaryPanel: some View {
         let summary = store.projectStatusSummary
         return VStack(alignment: .leading, spacing: 12) {
             Text("Project Summary")
@@ -124,241 +113,7 @@ struct ProjectDashboardView: View {
         )
     }
 
-    private var taskListsPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Project Tasks")
-                .font(.headline)
-
-            if activeTasks.isEmpty && archivedTasks.isEmpty {
-                Text("No tasks registered for this project.")
-                    .foregroundStyle(.secondary)
-            } else {
-                if !activeTasks.isEmpty {
-                    DisclosureGroup(isExpanded: $showActiveTasks) {
-                        taskList(tasks: activeTasks)
-                            .padding(.top, 8)
-                    } label: {
-                        HStack {
-                            Text("Active Tasks")
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Text("\(activeTasks.count)")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.vertical, 2)
-                }
-                if !archivedTasks.isEmpty {
-                    DisclosureGroup(isExpanded: $showArchivedTasks) {
-                        taskList(tasks: archivedTasks)
-                            .padding(.top, 8)
-                    } label: {
-                        HStack {
-                            Text("Archived / Completed")
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Text("\(archivedTasks.count)")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.vertical, 2)
-                }
-            }
-        }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(.separator.opacity(0.6))
-        )
-    }
-
-    private var topNextWorkPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Top 3 Next Work")
-                .font(.headline)
-
-            if store.nextWorkItems.isEmpty {
-                Text("No backlog work items or active tasks yet.")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(Array(store.nextWorkItems.prefix(3))) { item in
-                    HStack(alignment: .top, spacing: 12) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(item.title)
-                                .font(.body.weight(.semibold))
-                            Text(item.subtitle)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(item.reason)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button(item.primaryAction.displayName) {
-                            trigger(item)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        Button("Open") {
-                            open(item)
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    .padding(.vertical, 3)
-                    if item.id != store.nextWorkItems.prefix(3).last?.id {
-                        Divider()
-                    }
-                }
-            }
-        }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(.separator.opacity(0.6))
-        )
-    }
-
-    private var backlogPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Backlog Queue")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    showNewWorkItemSheet = true
-                } label: {
-                    Label("New Work Item", systemImage: "plus")
-                }
-                .buttonStyle(.borderedProminent)
-            }
-
-            if store.backlogTasksForSelectedProject.isEmpty {
-                Text("No backlog work items for this project yet.")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(store.backlogTasksForSelectedProject) { task in
-                    HStack(alignment: .top, spacing: 10) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(task.title)
-                                .font(.body.weight(.semibold))
-                            Text("\(task.kind.displayName) · \(task.priorityLabel.displayName) · \(task.triageStatus.displayName) · \(task.readiness.displayName)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            if !task.recommendedNextAction.isEmpty {
-                                Text(task.recommendedNextAction)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        Spacer()
-                        Button("Edit") {
-                            store.selectTask(task.id)
-                        }
-                        .buttonStyle(.bordered)
-                        Button(nextActionTitle(for: task)) {
-                            store.selectTask(task.id)
-                            if task.readiness == .executable {
-                                Task { await store.dispatchTask() }
-                            } else {
-                                Task { await store.scopeWorkItem() }
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(task.triageStatus == .done || task.triageStatus == .archived)
-                    }
-                    .padding(.vertical, 3)
-                    if task.id != store.backlogTasksForSelectedProject.last?.id {
-                        Divider()
-                    }
-                }
-            }
-
-            if selectedEditableWorkItem != nil {
-                Divider()
-                workItemEditor
-            }
-        }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(.separator.opacity(0.6))
-        )
-    }
-
-    private var kanbanPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Kanban")
-                .font(.headline)
-            ScrollView(.horizontal, showsIndicators: true) {
-                HStack(alignment: .top, spacing: 12) {
-                    ForEach(FactoryTaskTriageStatus.kanbanColumns) { status in
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text(status.displayName)
-                                    .font(.subheadline.weight(.semibold))
-                                Spacer()
-                                Text("\(tasks(for: status).count)")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                            }
-                            ForEach(tasks(for: status)) { task in
-                                kanbanCard(task)
-                            }
-                            if tasks(for: status).isEmpty {
-                                Text("No cards")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(10)
-                            }
-                        }
-                        .frame(width: 220, alignment: .topLeading)
-                        .padding(10)
-                        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
-                    }
-                }
-            }
-        }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(.separator.opacity(0.6))
-        )
-    }
-
-    private func kanbanCard(_ task: FactoryTask) -> some View {
-        Button {
-            store.selectTask(task.id)
-        } label: {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(task.title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-                Text("\(task.kind.displayName) · \(task.priorityLabel.displayName)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Text("\(task.readiness.displayName) · \(nextActionTitle(for: task))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(10)
-            .background(.background, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(.separator.opacity(0.45))
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func projectDocsPanel(project: Project) -> some View {
+    private var projectDocsPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Project Docs")
@@ -409,6 +164,65 @@ struct ProjectDashboardView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator.opacity(0.6))
         )
+    }
+
+    private var taskListsPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Project Tasks")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    Task { await store.createTask() }
+                } label: {
+                    Label("New Task", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.selectedProject == nil)
+            }
+
+            if activeTasks.isEmpty && archivedTasks.isEmpty {
+                Text("No tasks registered for this project.")
+                    .foregroundStyle(.secondary)
+            } else {
+                if !activeTasks.isEmpty {
+                    DisclosureGroup(isExpanded: $showActiveTasks) {
+                        taskList(tasks: activeTasks)
+                            .padding(.top, 8)
+                    } label: {
+                        taskGroupHeader(title: "Active Tasks", count: activeTasks.count)
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                if !archivedTasks.isEmpty {
+                    DisclosureGroup(isExpanded: $showArchivedTasks) {
+                        taskList(tasks: archivedTasks)
+                            .padding(.top, 8)
+                    } label: {
+                        taskGroupHeader(title: "Archived / Completed", count: archivedTasks.count)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
+    private func taskGroupHeader(title: String, count: Int) -> some View {
+        HStack {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            Spacer()
+            Text("\(count)")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
     }
 
     private func taskList(tasks: [FactoryTask]) -> some View {
@@ -488,29 +302,6 @@ struct ProjectDashboardView: View {
         }
     }
 
-    private func tasks(for triageStatus: FactoryTaskTriageStatus) -> [FactoryTask] {
-        store.tasksForSelectedProject
-            .filter { $0.triageStatus == triageStatus }
-            .sorted { left, right in
-                if left.priorityLabel.sortOrder != right.priorityLabel.sortOrder {
-                    return left.priorityLabel.sortOrder < right.priorityLabel.sortOrder
-                }
-                return left.updatedAt > right.updatedAt
-            }
-    }
-
-    private func nextActionTitle(for task: FactoryTask) -> String {
-        if store.runnerSessionLinks.contains(where: { $0.taskId == task.id }) {
-            return "Continue Run"
-        }
-        switch task.readiness {
-        case .executable:
-            return "Dispatch"
-        case .raw, .needsScoping, .scoped:
-            return "Scope"
-        }
-    }
-
     private var activeTasks: [FactoryTask] {
         store.tasksForSelectedProject.filter { $0.status != .done && $0.status != .archived }
     }
@@ -540,157 +331,6 @@ struct ProjectDashboardView: View {
             .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
             .map { ProjectMarkdownFile(path: $0.path) }
     }
-
-    private var workItemEditor: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Work Item Editor")
-                .font(.headline)
-            TextField("Title", text: $workItemDraft.title)
-            HStack {
-                Picker("Kind", selection: $workItemDraft.kind) {
-                    ForEach(FactoryTaskKind.allCases) { kind in
-                        Text(kind.displayName).tag(kind)
-                    }
-                }
-                Picker("Triage", selection: $workItemDraft.triageStatus) {
-                    ForEach(FactoryTaskTriageStatus.allCases) { status in
-                        Text(status.displayName).tag(status)
-                    }
-                }
-                Picker("Readiness", selection: $workItemDraft.readiness) {
-                    ForEach(FactoryTaskReadiness.allCases) { readiness in
-                        Text(readiness.displayName).tag(readiness)
-                    }
-                }
-            }
-            HStack {
-                Picker("Priority", selection: $workItemDraft.priorityLabel) {
-                    ForEach(FactoryTaskPriorityLabel.allCases) { level in
-                        Text(level.displayName).tag(level)
-                    }
-                }
-                Picker("Effort", selection: $workItemDraft.effort) {
-                    ForEach(FactoryTaskEffort.allCases) { effort in
-                        Text(effort.displayName).tag(effort)
-                    }
-                }
-                Picker("Risk", selection: $workItemDraft.risk) {
-                    ForEach(FactoryTaskRisk.allCases) { risk in
-                        Text(risk.displayName).tag(risk)
-                    }
-                }
-            }
-            TextField("Category", text: $workItemDraft.category)
-            TextField("Source", text: $workItemDraft.source)
-            labeledEditor("Goal", text: $workItemDraft.goal, minHeight: 80)
-            labeledEditor("Context", text: $workItemDraft.context, minHeight: 110)
-            labeledEditor("Acceptance Criteria (one per line)", text: $acceptanceText, minHeight: 90)
-            labeledEditor("Scoping Notes", text: $workItemDraft.scopingNotes, minHeight: 60)
-            labeledEditor("Dependencies", text: $workItemDraft.dependencies, minHeight: 60)
-            labeledEditor("Non-Goals", text: $workItemDraft.nonGoals, minHeight: 60)
-            labeledEditor("Suggested Split", text: $workItemDraft.suggestedSplit, minHeight: 60)
-            labeledEditor("Recommended Next Action", text: $workItemDraft.recommendedNextAction, minHeight: 60)
-
-            HStack {
-                Button("Save") {
-                    saveWorkItemDraft()
-                }
-                .buttonStyle(.borderedProminent)
-                Button("Scope") {
-                    saveWorkItemDraft()
-                    Task { await store.scopeWorkItem() }
-                }
-                .buttonStyle(.bordered)
-                Button("Dispatch") {
-                    saveWorkItemDraft()
-                    Task { await store.dispatchTask() }
-                }
-                .buttonStyle(.bordered)
-                .disabled(draftWorkItem.readiness != .executable)
-                Button("Archive") {
-                    store.archiveSelectedWorkItem()
-                }
-                .buttonStyle(.bordered)
-            }
-        }
-    }
-
-    private var selectedEditableWorkItem: FactoryTask? {
-        guard let task = store.selectedTask, task.projectId == store.selectedProject?.id else {
-            return nil
-        }
-        return task
-    }
-
-    private var draftWorkItem: FactoryTask {
-        guard let task = selectedEditableWorkItem else {
-            return FactoryTask(projectId: store.selectedProject?.id ?? "", title: "")
-        }
-        return workItemDraft.task(updating: task, acceptanceText: acceptanceText)
-    }
-
-    private func loadBacklogDraft() {
-        guard let task = selectedEditableWorkItem else {
-            workItemDraft = WorkItemDraft()
-            acceptanceText = ""
-            loadedWorkItemID = nil
-            return
-        }
-        guard loadedWorkItemID != task.id else { return }
-        workItemDraft = WorkItemDraft(task: task)
-        acceptanceText = task.acceptanceCriteria.joined(separator: "\n")
-        loadedWorkItemID = task.id
-    }
-
-    private func saveWorkItemDraft() {
-        guard let task = selectedEditableWorkItem else { return }
-        let updated = workItemDraft.task(updating: task, acceptanceText: acceptanceText)
-        store.saveTask(updated)
-        loadedWorkItemID = updated.id
-    }
-
-    private func open(_ item: BacklogNextWorkItem) {
-        switch item.kind {
-        case .task(let task):
-            store.selectTask(task.id)
-        }
-    }
-
-    private func trigger(_ item: BacklogNextWorkItem) {
-        switch item.primaryAction {
-        case .scope:
-            if case .task(let task) = item.kind {
-                store.selectTask(task.id)
-                Task { await store.scopeWorkItem() }
-            }
-        case .dispatch:
-            if case .task(let task) = item.kind {
-                store.selectTask(task.id)
-                Task { await store.dispatchTask() }
-            }
-        case .continueRun:
-            if case .task(let task) = item.kind {
-                store.selectTask(task.id)
-                Task { await store.continueRunnerSession() }
-            }
-        case .reviewDiff, .runTests, .syncLifecycle, .needsManualReview, .noAction:
-            open(item)
-        }
-    }
-
-    private func labeledEditor(_ title: String, text: Binding<String>, minHeight: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            TextEditor(text: text)
-                .frame(minHeight: minHeight)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(.separator.opacity(0.5))
-                )
-        }
-    }
 }
 
 private struct ProjectMarkdownFile: Identifiable, Equatable {
@@ -698,70 +338,4 @@ private struct ProjectMarkdownFile: Identifiable, Equatable {
 
     var id: String { path }
     var name: String { URL(fileURLWithPath: path).lastPathComponent }
-}
-
-private struct WorkItemDraft {
-    var title = ""
-    var kind: FactoryTaskKind = .idea
-    var triageStatus: FactoryTaskTriageStatus = .backlog
-    var readiness: FactoryTaskReadiness = .raw
-    var priorityLabel: FactoryTaskPriorityLabel = .normal
-    var category = ""
-    var source = ""
-    var goal = ""
-    var context = ""
-    var effort: FactoryTaskEffort = .unknown
-    var risk: FactoryTaskRisk = .unknown
-    var scopingNotes = ""
-    var dependencies = ""
-    var nonGoals = ""
-    var suggestedSplit = ""
-    var recommendedNextAction = ""
-
-    init() {}
-
-    init(task: FactoryTask) {
-        title = task.title
-        kind = task.kind
-        triageStatus = task.triageStatus
-        readiness = task.readiness
-        priorityLabel = task.priorityLabel
-        category = task.category
-        source = task.source
-        goal = task.goal
-        context = task.context
-        effort = task.effort
-        risk = task.risk
-        scopingNotes = task.scopingNotes
-        dependencies = task.dependencies
-        nonGoals = task.nonGoals
-        suggestedSplit = task.suggestedSplit
-        recommendedNextAction = task.recommendedNextAction
-    }
-
-    func task(updating task: FactoryTask, acceptanceText: String) -> FactoryTask {
-        var updated = task
-        updated.title = title
-        updated.kind = kind
-        updated.triageStatus = triageStatus
-        updated.readiness = readiness
-        updated.priorityLabel = priorityLabel
-        updated.priority = priorityLabel.taskPriority
-        updated.category = category
-        updated.source = source
-        updated.goal = goal
-        updated.context = context
-        updated.effort = effort
-        updated.risk = risk
-        updated.scopingNotes = scopingNotes
-        updated.dependencies = dependencies
-        updated.nonGoals = nonGoals
-        updated.suggestedSplit = suggestedSplit
-        updated.recommendedNextAction = recommendedNextAction
-        updated.acceptanceCriteria = acceptanceText
-            .split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        return updated
-    }
 }

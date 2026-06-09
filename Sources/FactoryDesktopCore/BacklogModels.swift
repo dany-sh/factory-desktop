@@ -268,11 +268,11 @@ public enum BacklogQueueRanking {
                         readinessBucket = 1
                     } else if task.readiness == .executable {
                         action = .dispatch
-                        reason = "Work item is executable and ready for dispatch."
+                        reason = "Task is executable and ready for dispatch."
                         readinessBucket = 1
                     } else {
                         action = .scope
-                        reason = task.recommendedNextAction.isEmpty ? "Work item needs runner-assisted scoping." : task.recommendedNextAction
+                        reason = task.recommendedNextAction.isEmpty ? "Task needs runner-assisted scoping." : task.recommendedNextAction
                         readinessBucket = task.readiness.sortOrder
                     }
                 }

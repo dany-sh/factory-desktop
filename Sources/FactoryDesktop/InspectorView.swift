@@ -13,7 +13,7 @@ struct InspectorView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                if store.selectedWorkspaceScope == .project {
+                if store.selectedWorkspaceScope != .task {
                     projectScopePlaceholder
                 } else {
                     codexCard
@@ -22,7 +22,6 @@ struct InspectorView: View {
                     taskStateCard
                     lifecycleSyncCard
                     preflightCard
-                    compactProjectStatusCard
                     gitCard
                     artifactsCard
                 }
@@ -501,7 +500,7 @@ struct InspectorView: View {
 
     private var projectScopePlaceholder: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Project view is focused in the main workspace.")
+            Text("Project and kanban views stay focused in the main workspace.")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             Text("Select a task to see task-specific inspector details.")
@@ -510,26 +509,6 @@ struct InspectorView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(.top, 4)
-    }
-
-    private var compactProjectStatusCard: some View {
-        let summary = store.taskProjectStatusSummary
-        return InspectorCard(title: "Project Status") {
-            Text(summary.message)
-                .font(.caption)
-                .foregroundStyle(summary.blockerCount > 0 ? .red : .secondary)
-            HStack(spacing: 12) {
-                TaskStateMetric(label: "Cleanup", value: "\(summary.projectCleanupCount)")
-                TaskStateMetric(label: "Blockers", value: "\(summary.blockerCount)")
-                TaskStateMetric(label: "Preflight", value: store.projectStatusSummary.preflightStatus)
-            }
-            Button {
-                store.showProjectWorkspace()
-            } label: {
-                Label("Open Project Workspace", systemImage: "folder")
-            }
-            .buttonStyle(.bordered)
-        }
     }
 
     @ViewBuilder

@@ -2461,7 +2461,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
         store.selectTask(task.id)
         await store.dispatchTask()
 
-        XCTAssertEqual(store.errorMessage, "Scope this work item until readiness is executable before dispatch.")
+        XCTAssertEqual(store.errorMessage, "Scope this task until readiness is executable before dispatch.")
         XCTAssertEqual(try fixture.repository.tasks(projectId: project.id).count, 1)
         XCTAssertTrue(try fixture.repository.runs(taskId: task.id).isEmpty)
     }

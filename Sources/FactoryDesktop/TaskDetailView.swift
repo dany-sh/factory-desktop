@@ -9,7 +9,7 @@ struct TaskDetailView: View {
     @State private var acceptanceText = ""
     @State private var loadedTaskID: String?
     @State private var selectedStage: TaskWorkspaceStage = .overview
-    @State private var isTaskBriefExpanded = false
+    @State private var showTaskMetadata = false
     @State private var showAllArtifacts = false
     @FocusState private var focusedField: TaskEditorField?
 
@@ -151,47 +151,123 @@ struct TaskDetailView: View {
         .help("Task status")
     }
 
-    private func taskForm(task: FactoryTask) -> some View {
+    private var taskBriefPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
-            TextField("Title", text: $draft.title)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Task Brief")
+                    .font(.headline)
+                Text("Capture the task goal, context, and scoping in one working brief. Use `## Goal`, `## Context`, and `## Scoping` headings as needed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            TextField("Task title", text: $draft.title)
                 .font(.title3)
                 .focused($focusedField, equals: .title)
 
-            HStack {
-                Picker("Type", selection: $draft.type) {
-                    ForEach(TaskType.allCases) { type in
-                        Text(type.displayName).tag(type)
-                    }
-                }
-                Picker("Priority", selection: $draft.priority) {
-                    ForEach(TaskPriority.allCases) { priority in
-                        Text(priority.displayName).tag(priority)
-                    }
-                }
-            }
+            LabeledTextEditor(
+                title: "Brief",
+                text: $draft.brief,
+                minHeight: 240,
+                focusedField: $focusedField,
+                field: .brief
+            )
 
-            LabeledTextEditor(
-                title: "Goal",
-                text: $draft.goal,
-                minHeight: 90,
-                focusedField: $focusedField,
-                field: .goal
-            )
-            LabeledTextEditor(
-                title: "Context",
-                text: $draft.context,
-                minHeight: 110,
-                focusedField: $focusedField,
-                field: .context
-            )
             LabeledTextEditor(
                 title: "Acceptance criteria (one per line)",
                 text: $acceptanceText,
-                minHeight: 90,
+                minHeight: 100,
                 focusedField: $focusedField,
                 field: .acceptanceCriteria
             )
+
+            DisclosureGroup("Task Metadata", isExpanded: $showTaskMetadata) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Picker("Type", selection: $draft.type) {
+                            ForEach(TaskType.allCases) { type in
+                                Text(type.displayName).tag(type)
+                            }
+                        }
+                        Picker("Kind", selection: $draft.kind) {
+                            ForEach(FactoryTaskKind.allCases) { kind in
+                                Text(kind.displayName).tag(kind)
+                            }
+                        }
+                    }
+
+                    HStack {
+                        Picker("Priority", selection: $draft.priorityLabel) {
+                            ForEach(FactoryTaskPriorityLabel.allCases) { level in
+                                Text(level.displayName).tag(level)
+                            }
+                        }
+                        Picker("Triage", selection: $draft.triageStatus) {
+                            ForEach(FactoryTaskTriageStatus.allCases) { status in
+                                Text(status.displayName).tag(status)
+                            }
+                        }
+                        Picker("Readiness", selection: $draft.readiness) {
+                            ForEach(FactoryTaskReadiness.allCases) { readiness in
+                                Text(readiness.displayName).tag(readiness)
+                            }
+                        }
+                    }
+
+                    HStack {
+                        Picker("Effort", selection: $draft.effort) {
+                            ForEach(FactoryTaskEffort.allCases) { effort in
+                                Text(effort.displayName).tag(effort)
+                            }
+                        }
+                        Picker("Risk", selection: $draft.risk) {
+                            ForEach(FactoryTaskRisk.allCases) { risk in
+                                Text(risk.displayName).tag(risk)
+                            }
+                        }
+                    }
+
+                    TextField("Category", text: $draft.category)
+                    TextField("Source", text: $draft.source)
+
+                    LabeledTextEditor(
+                        title: "Dependencies",
+                        text: $draft.dependencies,
+                        minHeight: 80,
+                        focusedField: $focusedField,
+                        field: .dependencies
+                    )
+                    LabeledTextEditor(
+                        title: "Non-goals",
+                        text: $draft.nonGoals,
+                        minHeight: 80,
+                        focusedField: $focusedField,
+                        field: .nonGoals
+                    )
+                    LabeledTextEditor(
+                        title: "Suggested split",
+                        text: $draft.suggestedSplit,
+                        minHeight: 80,
+                        focusedField: $focusedField,
+                        field: .suggestedSplit
+                    )
+                    LabeledTextEditor(
+                        title: "Recommended next action",
+                        text: $draft.recommendedNextAction,
+                        minHeight: 80,
+                        focusedField: $focusedField,
+                        field: .recommendedNextAction
+                    )
+                }
+                .padding(.top, 12)
+            }
         }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
     }
 
     private func save(_ task: FactoryTask) {
@@ -280,80 +356,9 @@ struct TaskDetailView: View {
             taskStatePanel
             workflowHealthPanel
             recentEventsPanel
-            projectStatusPanel
             taskWorktreePanel
             preflightPanel
-            DisclosureGroup("Task Brief", isExpanded: $isTaskBriefExpanded) {
-                taskForm(task: task)
-            }
-            .padding()
-            .background(.background, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(.separator.opacity(0.6))
-            )
-        }
-    }
-
-    private var projectStatusPanel: some View {
-        let summary = store.taskProjectStatusSummary
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Project Status")
-                        .font(.headline)
-                    Text("Task view stays focused on task execution. Open the project workspace for repo-wide cleanup, archived references, branches, and artifact waste.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text(summary.hygieneSeverity.displayName)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(hygieneSeverityColor(summary.hygieneSeverity))
-            }
-
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 10)], spacing: 10) {
-                InfoChip(label: "Project Cleanup", value: "\(summary.projectCleanupCount)")
-                InfoChip(label: "Blockers", value: "\(summary.blockerCount)")
-                InfoChip(label: "Preflight", value: store.projectStatusSummary.preflightStatus)
-                InfoChip(label: "Repo", value: store.projectStatusSummary.workingTreeState)
-            }
-
-            Text(summary.message)
-                .font(summary.hasProjectIssue ? .subheadline.weight(.semibold) : .caption)
-                .foregroundStyle(summary.blockerCount > 0 ? .red : .secondary)
-
-            HStack {
-                Button {
-                    store.showProjectWorkspace()
-                } label: {
-                    Label("Open Project Workspace", systemImage: "folder")
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    Task { await store.refreshLifecycleScan() }
-                } label: {
-                    Label("Refresh Scan", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-                .disabled(store.selectedProject == nil || store.isWorking)
-            }
-        }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(.separator.opacity(0.6))
-        )
-    }
-
-    private func hygieneSeverityColor(_ severity: HygieneSeverity) -> Color {
-        switch severity {
-        case .safe: .green
-        case .warning: .orange
-        case .blocked: .red
-        case .informational: .secondary
+            taskBriefPanel
         }
     }
 
@@ -1183,9 +1188,12 @@ struct TaskDetailView: View {
 
 private enum TaskEditorField: Hashable {
     case title
-    case goal
-    case context
+    case brief
     case acceptanceCriteria
+    case dependencies
+    case nonGoals
+    case suggestedSplit
+    case recommendedNextAction
 }
 
 private enum TaskWorkspaceStage: String, CaseIterable, Identifiable {
@@ -1351,28 +1359,62 @@ private extension RunRecord {
 
 private struct TaskDraft {
     var title = ""
-    var type: TaskType = .coding
-    var priority: TaskPriority = .normal
-    var goal = ""
-    var context = ""
+    var type: TaskType = .planning
+    var kind: FactoryTaskKind = .task
+    var triageStatus: FactoryTaskTriageStatus = .backlog
+    var readiness: FactoryTaskReadiness = .needsScoping
+    var priorityLabel: FactoryTaskPriorityLabel = .normal
+    var category = ""
+    var source = ""
+    var effort: FactoryTaskEffort = .unknown
+    var risk: FactoryTaskRisk = .unknown
+    var brief = ""
+    var dependencies = ""
+    var nonGoals = ""
+    var suggestedSplit = ""
+    var recommendedNextAction = ""
 
     init() {}
 
     init(task: FactoryTask) {
         title = task.title
         type = task.type
-        priority = task.priority
-        goal = task.goal
-        context = task.context
+        kind = task.kind
+        triageStatus = task.triageStatus
+        readiness = task.readiness
+        priorityLabel = task.priorityLabel
+        category = task.category
+        source = task.source
+        effort = task.effort
+        risk = task.risk
+        brief = Self.briefText(goal: task.goal, context: task.context, scopingNotes: task.scopingNotes)
+        dependencies = task.dependencies
+        nonGoals = task.nonGoals
+        suggestedSplit = task.suggestedSplit
+        recommendedNextAction = task.recommendedNextAction
     }
 
     func task(updating task: FactoryTask, acceptanceText: String) -> FactoryTask {
         var updated = task
+        let sections = Self.parseBrief(brief)
         updated.title = title
         updated.type = type
-        updated.priority = priority
-        updated.goal = goal
-        updated.context = context
+        updated.kind = kind
+        updated.triageStatus = triageStatus
+        updated.readiness = readiness
+        updated.priorityLabel = priorityLabel
+        updated.priority = priorityLabel.taskPriority
+        updated.category = category
+        updated.source = source
+        updated.effort = effort
+        updated.risk = risk
+        updated.goal = sections.goal
+        updated.context = sections.context
+        updated.scopingNotes = sections.scopingNotes
+        updated.dependencies = dependencies
+        updated.nonGoals = nonGoals
+        updated.suggestedSplit = suggestedSplit
+        updated.recommendedNextAction = recommendedNextAction
         updated.acceptanceCriteria = Self.acceptanceCriteria(from: acceptanceText)
         return updated
     }
@@ -1380,9 +1422,19 @@ private struct TaskDraft {
     func hasChanges(comparedTo task: FactoryTask, acceptanceText: String) -> Bool {
         title != task.title ||
             type != task.type ||
-            priority != task.priority ||
-            goal != task.goal ||
-            context != task.context ||
+            kind != task.kind ||
+            triageStatus != task.triageStatus ||
+            readiness != task.readiness ||
+            priorityLabel != task.priorityLabel ||
+            category != task.category ||
+            source != task.source ||
+            effort != task.effort ||
+            risk != task.risk ||
+            brief != Self.briefText(goal: task.goal, context: task.context, scopingNotes: task.scopingNotes) ||
+            dependencies != task.dependencies ||
+            nonGoals != task.nonGoals ||
+            suggestedSplit != task.suggestedSplit ||
+            recommendedNextAction != task.recommendedNextAction ||
             Self.acceptanceCriteria(from: acceptanceText) != task.acceptanceCriteria
     }
 
@@ -1392,4 +1444,70 @@ private struct TaskDraft {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
     }
+
+    private static func briefText(goal: String, context: String, scopingNotes: String) -> String {
+        [
+            briefSection(title: "Goal", body: goal),
+            briefSection(title: "Context", body: context),
+            briefSection(title: "Scoping", body: scopingNotes)
+        ]
+        .filter { !$0.isEmpty }
+        .joined(separator: "\n\n")
+    }
+
+    private static func briefSection(title: String, body: String) -> String {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return "## \(title)\n\(trimmed)"
+    }
+
+    private static func parseBrief(_ brief: String) -> (goal: String, context: String, scopingNotes: String) {
+        var parsed = ParsedBrief()
+        var currentHeading: String?
+        var currentBody: [String] = []
+
+        func flush() {
+            guard let currentHeading else { return }
+            let body = currentBody
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            switch currentHeading {
+            case "Goal":
+                parsed.goal = body
+            case "Context":
+                parsed.context = body
+            case "Scoping":
+                parsed.scopingNotes = body
+            default:
+                break
+            }
+        }
+
+        for rawLine in brief.components(separatedBy: .newlines) {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("## ") {
+                flush()
+                let heading = String(trimmed.dropFirst(3))
+                if heading == "Goal" || heading == "Context" || heading == "Scoping" {
+                    currentHeading = heading
+                    currentBody = []
+                    continue
+                }
+            }
+
+            if currentHeading == nil {
+                currentHeading = "Goal"
+            }
+            currentBody.append(rawLine)
+        }
+
+        flush()
+        return (parsed.goal, parsed.context, parsed.scopingNotes)
+    }
+}
+
+private struct ParsedBrief {
+    var goal = ""
+    var context = ""
+    var scopingNotes = ""
 }
