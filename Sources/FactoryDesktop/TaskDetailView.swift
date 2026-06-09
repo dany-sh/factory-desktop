@@ -9,7 +9,6 @@ struct TaskDetailView: View {
     @State private var acceptanceText = ""
     @State private var loadedTaskID: String?
     @State private var selectedStage: TaskWorkspaceStage = .write
-    @State private var showTaskMetadata = false
     @State private var showAllArtifacts = false
     @State private var editorSelectionText = ""
     @FocusState private var focusedField: TaskEditorField?
@@ -289,11 +288,7 @@ struct TaskDetailView: View {
             }
 
             richTaskEditorCanvas
-
-            DisclosureGroup("Details, dependencies, and scope guards", isExpanded: $showTaskMetadata) {
-                taskMetadataEditor
-                    .padding(.top, 12)
-            }
+            // TODO: Clean up advanced task metadata properly instead of exposing raw persistence fields here.
         }
         .padding()
         .background(.background, in: RoundedRectangle(cornerRadius: 16))
@@ -345,42 +340,6 @@ struct TaskDetailView: View {
             }
         }
         .controlSize(.small)
-    }
-
-    private var taskMetadataEditor: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            TextField("Category", text: $draft.category)
-            TextField("Source", text: $draft.source)
-
-            LabeledTextEditor(
-                title: "Dependencies",
-                text: $draft.dependencies,
-                minHeight: 80,
-                focusedField: $focusedField,
-                field: .dependencies
-            )
-            LabeledTextEditor(
-                title: "Non-goals",
-                text: $draft.nonGoals,
-                minHeight: 80,
-                focusedField: $focusedField,
-                field: .nonGoals
-            )
-            LabeledTextEditor(
-                title: "Suggested split",
-                text: $draft.suggestedSplit,
-                minHeight: 80,
-                focusedField: $focusedField,
-                field: .suggestedSplit
-            )
-            LabeledTextEditor(
-                title: "Recommended next action",
-                text: $draft.recommendedNextAction,
-                minHeight: 80,
-                focusedField: $focusedField,
-                field: .recommendedNextAction
-            )
-        }
     }
 
     private var richTaskEditorCanvas: some View {
@@ -1561,10 +1520,6 @@ private enum TaskEditorField: Hashable {
     case title
     case brief
     case acceptanceCriteria
-    case dependencies
-    case nonGoals
-    case suggestedSplit
-    case recommendedNextAction
 }
 
 private enum TaskWorkspaceStage: String, CaseIterable, Identifiable {
