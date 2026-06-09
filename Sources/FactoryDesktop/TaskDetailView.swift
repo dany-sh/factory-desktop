@@ -285,11 +285,12 @@ struct TaskDetailView: View {
                     .font(.largeTitle.weight(.semibold))
                     .textFieldStyle(.plain)
                     .focused($focusedField, equals: .title)
+                primaryMetadataPickerGrid
             }
 
             richTaskEditorCanvas
 
-            DisclosureGroup("Metadata, dependencies, and scope guards", isExpanded: $showTaskMetadata) {
+            DisclosureGroup("Details, dependencies, and scope guards", isExpanded: $showTaskMetadata) {
                 taskMetadataEditor
                     .padding(.top, 12)
             }
@@ -302,7 +303,7 @@ struct TaskDetailView: View {
         )
     }
 
-    private var taskMetadataEditor: some View {
+    private var primaryMetadataPickerGrid: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Picker("Type", selection: $draft.type) {
@@ -342,7 +343,12 @@ struct TaskDetailView: View {
                     }
                 }
             }
+        }
+        .controlSize(.small)
+    }
 
+    private var taskMetadataEditor: some View {
+        VStack(alignment: .leading, spacing: 12) {
             TextField("Category", text: $draft.category)
             TextField("Source", text: $draft.source)
 

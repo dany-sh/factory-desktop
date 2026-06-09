@@ -221,7 +221,7 @@
     height: "100%",
     skin: "oxide",
     content_css: "default",
-    plugins: "advlist autolink autoresize code link lists preview quickbars searchreplace wordcount",
+    plugins: "advlist autolink code link lists preview quickbars searchreplace wordcount",
     toolbar: "undo redo | blocks | bold italic blockquote code | bullist numlist | link searchreplace | insertGoal insertContext insertScoping insertAcceptance | preview code",
     quickbars_selection_toolbar: "bold italic | quicklink blockquote",
     setup: function (editor) {

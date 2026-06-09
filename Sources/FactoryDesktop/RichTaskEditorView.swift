@@ -42,6 +42,7 @@ struct RichTaskEditorView: NSViewRepresentable {
         private var isReady = false
         private var isApplyingWebChange = false
         private var lastAppliedMarkdown: String?
+        private var shouldSkipNextSwiftUpdate = false
 
         init(_ parent: RichTaskEditorView) {
             self.parent = parent
@@ -71,6 +72,7 @@ struct RichTaskEditorView: NSViewRepresentable {
                     guard let markdown = body["markdown"] as? String else { return }
                     self.isApplyingWebChange = true
                     self.lastAppliedMarkdown = markdown
+                    self.shouldSkipNextSwiftUpdate = true
                     if self.parent.markdown != markdown {
                         self.parent.markdown = markdown
                     }
@@ -83,6 +85,11 @@ struct RichTaskEditorView: NSViewRepresentable {
 
         func apply(markdown: String, to webView: WKWebView, force: Bool = false) {
             guard isReady, !isApplyingWebChange else { return }
+            if shouldSkipNextSwiftUpdate, !force {
+                shouldSkipNextSwiftUpdate = false
+                lastAppliedMarkdown = markdown
+                return
+            }
             guard force || markdown != lastAppliedMarkdown else { return }
             lastAppliedMarkdown = markdown
             let script = "window.FactoryEditor && window.FactoryEditor.setMarkdown(\(Self.javascriptLiteral(markdown)));"
