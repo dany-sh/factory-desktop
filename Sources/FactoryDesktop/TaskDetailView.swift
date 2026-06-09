@@ -12,6 +12,7 @@ struct TaskDetailView: View {
     @State private var showAllArtifacts = false
     @State private var editorSelectionText = ""
     @FocusState private var focusedField: TaskEditorField?
+    @StateObject private var editorBridge = RichTaskEditorBridge()
 
     var body: some View {
         Group {
@@ -19,30 +20,24 @@ struct TaskDetailView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     header(task: task)
                     taskCommandBar(task: task)
-                    Picker("Stage", selection: $selectedStage) {
+                    Picker("Stage", selection: stageSelection) {
                         ForEach(TaskWorkspaceStage.allCases) { stage in
                             Text(stage.title).tag(stage)
                         }
                     }
                     .pickerStyle(.segmented)
-
-                    if selectedStage == .write {
-                        taskWorkspaceContent(task: task)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    } else {
-                        ScrollView {
-                            taskWorkspaceContent(task: task)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .scrollDismissesKeyboard(.never)
-                    }
+                    taskWorkspaceLayout(task: task)
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .safeAreaInset(edge: .bottom) {
                     HStack {
                         Button("Save Task") {
-                            save(task)
+                            syncEditorStateIfNeeded {
+                                if let currentTask = store.selectedTask {
+                                    save(currentTask)
+                                }
+                            }
                         }
                         .keyboardShortcut("s", modifiers: [.command])
 
@@ -82,6 +77,18 @@ struct TaskDetailView: View {
                 }
             }
         }
+    }
+
+    private var stageSelection: Binding<TaskWorkspaceStage> {
+        Binding(
+            get: { selectedStage },
+            set: { nextStage in
+                guard nextStage != selectedStage else { return }
+                syncEditorStateIfNeeded {
+                    selectedStage = nextStage
+                }
+            }
+        )
     }
 
     private func header(task: FactoryTask) -> some View {
@@ -322,16 +329,6 @@ struct TaskDetailView: View {
         .frame(minWidth: 190, alignment: .leading)
     }
 
-    private var taskBriefPanel: some View {
-        HStack(alignment: .top, spacing: 18) {
-            taskEditorCanvas
-                .frame(minWidth: 430, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            writingAssistPanel
-                .frame(width: 250, alignment: .topLeading)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
     private var taskEditorCanvas: some View {
         VStack(alignment: .leading, spacing: 14) {
             richTaskEditorCanvas
@@ -361,7 +358,7 @@ struct TaskDetailView: View {
                         .foregroundStyle(.green)
                 }
             }
-            RichTaskEditorView(markdown: editorDocumentBinding, selectedText: $editorSelectionText)
+            RichTaskEditorView(markdown: editorDocumentBinding, selectedText: $editorSelectionText, bridge: editorBridge)
                 .frame(minHeight: 520)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay {
@@ -375,7 +372,6 @@ struct TaskDetailView: View {
         VStack(alignment: .leading, spacing: 14) {
             editorAssistCard
             writingScoreCard
-            sectionStarterCard
         }
     }
 
@@ -419,13 +415,17 @@ struct TaskDetailView: View {
                 Divider()
                 Text(suggestion.summary)
                     .font(.caption.weight(.semibold))
+                Text("Generated Result")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
                 ScrollView {
-                    Text(suggestion.replacementMarkdown)
+                    Text(editorAssistPreviewText(for: suggestion))
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .frame(maxHeight: 120)
+                .frame(minHeight: 88, maxHeight: 160, alignment: .top)
                 .padding(8)
                 .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
                 HStack {
@@ -489,31 +489,6 @@ struct TaskDetailView: View {
         )
     }
 
-    private var sectionStarterCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Fast Inserts")
-                .font(.headline)
-            assistButton("Goal", systemImage: "scope") {
-                appendBriefSection("Goal", body: "Define the outcome in one sentence.")
-            }
-            assistButton("Context", systemImage: "text.book.closed") {
-                appendBriefSection("Context", body: "What changed, what exists today, and why this matters.")
-            }
-            assistButton("Scoping", systemImage: "ruler") {
-                appendBriefSection("Scoping", body: "In scope:\n- \n\nOut of scope:\n- ")
-            }
-            assistButton("Acceptance", systemImage: "checklist") {
-                appendAcceptanceCriteria()
-            }
-        }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(.separator.opacity(0.55))
-        )
-    }
-
     private var editorDocumentMarkdown: String {
         TaskEditorDocument.markdown(brief: draft.brief, acceptanceText: acceptanceText)
     }
@@ -567,7 +542,54 @@ struct TaskDetailView: View {
     }
 
     private func save(_ task: FactoryTask) {
-        store.saveTask(draft.task(updating: task, acceptanceText: acceptanceText))
+        let updated = draft.task(updating: task, acceptanceText: acceptanceText)
+        store.saveTask(updated)
+        load(updated)
+    }
+
+    private func editorAssistPreviewText(for suggestion: EditorAssistSuggestion) -> String {
+        let replacement = suggestion.replacementMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !replacement.isEmpty {
+            return replacement
+        }
+        let rawOutput = suggestion.rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return rawOutput.isEmpty ? "No generated result was returned." : rawOutput
+    }
+
+    private func syncEditorStateIfNeeded(_ completion: @escaping () -> Void) {
+        guard selectedStage == .write else {
+            completion()
+            return
+        }
+        guard let requestLatestMarkdown = editorBridge.requestLatestMarkdown else {
+            completion()
+            return
+        }
+        requestLatestMarkdown { markdown in
+            updateEditorDocumentMarkdown(markdown)
+            completion()
+        }
+    }
+
+    @ViewBuilder
+    private func taskWorkspaceLayout(task: FactoryTask) -> some View {
+        HStack(alignment: .top, spacing: 18) {
+            Group {
+                if selectedStage == .write {
+                    taskWorkspaceContent(task: task)
+                } else {
+                    ScrollView {
+                        taskWorkspaceContent(task: task)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .scrollDismissesKeyboard(.never)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            writingAssistPanel
+                .frame(width: 300, alignment: .topLeading)
+        }
     }
 
     @ViewBuilder
@@ -649,7 +671,7 @@ struct TaskDetailView: View {
 
     private func writeSection(task: FactoryTask) -> some View {
         VStack(alignment: .leading, spacing: 18) {
-            taskBriefPanel
+            taskEditorCanvas
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -984,8 +1006,13 @@ struct TaskDetailView: View {
                 }
 
                 if store.currentPlanText.isEmpty {
-                    Text("No saved plan yet.")
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("No saved plan yet.")
+                            .foregroundStyle(.secondary)
+                        Text("Current Task Brief")
+                            .font(.subheadline.weight(.semibold))
+                        primaryMarkdownBox(editorDocumentMarkdown, minHeight: 220)
+                    }
                 } else {
                     primaryMarkdownBox(store.currentPlanText, minHeight: 320)
                 }
@@ -1476,36 +1503,6 @@ struct TaskDetailView: View {
         loadedTaskID = task.id
         focusedField = nil
         editorSelectionText = ""
-    }
-
-    private func appendBriefSection(_ title: String, body: String) {
-        let heading = "## \(title)"
-        if draft.brief.localizedCaseInsensitiveContains(heading) {
-            focusedField = .brief
-            return
-        }
-        let separator = draft.brief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
-        draft.brief += "\(separator)\(heading)\n\(body)"
-        focusedField = .brief
-    }
-
-    private func appendAcceptanceCriteria() {
-        let starter = [
-            "User-facing behavior is clear and task-centered.",
-            "No duplicate inspector/main-panel status blocks.",
-            "Changes are verified with the relevant local checks."
-        ]
-        let existing = acceptanceText
-            .split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let additions = starter.filter { !existing.contains($0) }
-        guard !additions.isEmpty else {
-            focusedField = .acceptanceCriteria
-            return
-        }
-        let separator = acceptanceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n"
-        acceptanceText += "\(separator)\(additions.joined(separator: "\n"))"
-        focusedField = .acceptanceCriteria
     }
 
     private func assistButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {

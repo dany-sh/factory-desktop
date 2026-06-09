@@ -1,6 +1,5 @@
 (function () {
   var currentMarkdown = "";
-  var changeTimer = null;
 
   function post(message) {
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.factoryEditor) {
@@ -169,10 +168,7 @@
   }
 
   function scheduleChange(editor) {
-    window.clearTimeout(changeTimer);
-    changeTimer = window.setTimeout(function () {
-      postChange(editor);
-    }, 120);
+    postChange(editor);
   }
 
   function insertSection(editor, heading, body) {

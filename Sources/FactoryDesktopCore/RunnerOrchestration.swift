@@ -2,7 +2,7 @@ import Foundation
 
 public final class CodexRunnerAdapter: RunnerProviderAdapter {
     public let provider: RunnerProvider = .codex
-    public let supportedModes: Set<RunnerMode> = [.scoping, .planning, .coding, .review, .summary, .testDebug]
+    public let supportedModes: Set<RunnerMode> = [.scoping, .planning, .coding, .review, .summary, .testDebug, .editorAssist]
 
     private let service: CodexCLIService
 

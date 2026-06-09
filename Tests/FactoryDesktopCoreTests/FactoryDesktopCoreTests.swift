@@ -142,6 +142,40 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(suggestion.replacementMarkdown, "## Goal\nShip a review-first TinyMCE editor.")
     }
 
+    func testEditorAssistSuggestionIgnoresCodexTranscriptTrailer() {
+        let output = """
+        Clarified the requirement timing.
+
+        ```markdown
+        ## Context
+        Add concrete timing for when the worktree becomes required.
+        ```
+
+        OpenAI Codex v0.137.0
+        --------
+        user
+        prompt text
+        codex
+        repeated transcript
+        """
+
+        let suggestion = EditorAssistSuggestion.parse(provider: .codex, action: .findAmbiguity, output: output)
+
+        XCTAssertEqual(suggestion.summary, "Clarified the requirement timing.")
+        XCTAssertEqual(suggestion.replacementMarkdown, "## Context\nAdd concrete timing for when the worktree becomes required.")
+    }
+
+    @MainActor
+    func testEditorAssistProviderOptionsIncludeRunnableProviders() throws {
+        let fixture = try makeRepositoryFixture()
+        let store = AppStore(paths: fixture.paths)
+
+        let options = store.editorAssistProviderOptions
+
+        XCTAssertTrue(options.contains { $0.provider == RunnerProvider.codex && $0.isAvailable })
+        XCTAssertTrue(options.contains { $0.provider == RunnerProvider.localOllama && $0.isAvailable })
+    }
+
     func testEditorAssistPromptUsesEditorAssistRunnerModeVocabulary() {
         XCTAssertEqual(RunnerMode.editorAssist.rawValue, "editor_assist")
 

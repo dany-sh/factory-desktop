@@ -4,6 +4,7 @@ import WebKit
 struct RichTaskEditorView: NSViewRepresentable {
     @Binding var markdown: String
     @Binding var selectedText: String
+    @ObservedObject var bridge: RichTaskEditorBridge
     var isEditable = true
 
     func makeCoordinator() -> Coordinator {
@@ -29,11 +30,13 @@ struct RichTaskEditorView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.registerBridge(bridge)
         context.coordinator.apply(markdown: markdown, to: webView)
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "factoryEditor")
+        coordinator.unregisterBridge()
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
@@ -46,6 +49,16 @@ struct RichTaskEditorView: NSViewRepresentable {
 
         init(_ parent: RichTaskEditorView) {
             self.parent = parent
+        }
+
+        func registerBridge(_ bridge: RichTaskEditorBridge) {
+            bridge.requestLatestMarkdown = { [weak self] completion in
+                self?.readMarkdown(completion: completion)
+            }
+        }
+
+        func unregisterBridge() {
+            parent.bridge.requestLatestMarkdown = nil
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -96,6 +109,21 @@ struct RichTaskEditorView: NSViewRepresentable {
             webView.evaluateJavaScript(script)
         }
 
+        private func readMarkdown(completion: @escaping (String) -> Void) {
+            guard let webView, isReady else {
+                completion(parent.markdown)
+                return
+            }
+            webView.evaluateJavaScript("window.FactoryEditor && window.FactoryEditor.getMarkdown();") { result, _ in
+                let markdown = (result as? String) ?? self.parent.markdown
+                DispatchQueue.main.async {
+                    self.parent.markdown = markdown
+                    self.lastAppliedMarkdown = markdown
+                    completion(markdown)
+                }
+            }
+        }
+
         private static func javascriptLiteral(_ value: String) -> String {
             guard let data = try? JSONEncoder().encode(value),
                   let literal = String(data: data, encoding: .utf8) else {
@@ -104,4 +132,8 @@ struct RichTaskEditorView: NSViewRepresentable {
             return literal
         }
     }
+}
+
+final class RichTaskEditorBridge: ObservableObject {
+    var requestLatestMarkdown: (((@escaping (String) -> Void) -> Void))?
 }

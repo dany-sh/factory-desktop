@@ -234,15 +234,40 @@ public final class AppStore: ObservableObject {
     }
 
     public var editorAssistProviderOptions: [EditorAssistProviderOption] {
-        RunnerProvider.allCases
-            .filter { $0 != .manual && $0 != .unknown }
-            .map { provider in
-                if runnerAdapters[provider] != nil {
-                    EditorAssistProviderOption(provider: provider, isAvailable: true, detail: "Available")
-                } else {
-                    EditorAssistProviderOption(provider: provider, isAvailable: false, detail: "Not configured")
-                }
+        var providers: [RunnerProvider] = [.localOllama]
+
+        for provider in runnerAdapters.keys.sorted(by: { $0.displayName < $1.displayName }) {
+            guard provider != .manual, provider != .unknown else { continue }
+            guard runnerAdapters[provider]?.supportedModes.contains(.editorAssist) == true else { continue }
+            if !providers.contains(provider) {
+                providers.append(provider)
             }
+        }
+
+        if let configuredProvider = selectedRunnerProjectLink?.preferredModelProfile?.provider,
+           configuredProvider != .manual,
+           configuredProvider != .unknown,
+           !providers.contains(configuredProvider) {
+            providers.append(configuredProvider)
+        }
+
+        return providers.map { provider in
+            switch provider {
+            case .localOllama:
+                return EditorAssistProviderOption(
+                    provider: provider,
+                    isAvailable: true,
+                    detail: selectedModel.isEmpty ? "Uses local model settings" : selectedModel
+                )
+            default:
+                let isAvailable = runnerAdapters[provider]?.supportedModes.contains(.editorAssist) == true
+                return EditorAssistProviderOption(
+                    provider: provider,
+                    isAvailable: isAvailable,
+                    detail: isAvailable ? "Available" : "Not configured"
+                )
+            }
+        }
     }
 
     public init(
@@ -1487,10 +1512,6 @@ public final class AppStore: ObservableObject {
             return
         }
         let provider = selectedEditorAssistProvider
-        guard let adapter = runnerAdapters[provider] else {
-            errorMessage = "AI assist provider \(provider.displayName) is not configured."
-            return
-        }
 
         isEditorAssistRunning = true
         isWorking = true
@@ -1512,7 +1533,7 @@ public final class AppStore: ObservableObject {
             projectId: project.id,
             taskId: task.id,
             executor: "\(provider.rawValue)_editor_assist",
-            model: selectedRunnerProjectLink?.preferredModelProfile?.modelName,
+            model: editorAssistModelName(for: provider),
             status: .running,
             promptPath: promptURL.path,
             outputPath: outputURL.path,
@@ -1534,7 +1555,8 @@ public final class AppStore: ObservableObject {
                 modelProfile: selectedRunnerProjectLink?.preferredModelProfile,
                 sandboxMode: .readOnly
             )
-            let result = try await adapter.execute(request)
+            latestEditorAssistSuggestion = nil
+            let result = try await executeEditorAssistRequest(request)
             try result.output.write(to: outputURL, atomically: true, encoding: .utf8)
 
             run.status = result.succeeded ? .succeeded : .failed
@@ -1559,6 +1581,56 @@ public final class AppStore: ObservableObject {
             run.endedAt = Date()
             try? repository.upsert(run: run)
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func editorAssistModelName(for provider: RunnerProvider) -> String? {
+        switch provider {
+        case .localOllama:
+            return selectedModel
+        default:
+            return selectedRunnerProjectLink?.preferredModelProfile?.modelName
+        }
+    }
+
+    private func executeEditorAssistRequest(_ request: RunnerRequest) async throws -> RunnerResult {
+        switch request.provider {
+        case .localOllama:
+            let startedAt = Date()
+            let output = try await ollamaClient.generate(
+                model: selectedModel,
+                prompt: request.instruction,
+                contextTokens: ModelPolicy.effectiveContext(for: selectedModel)
+            )
+            let endedAt = Date()
+            return RunnerResult(
+                provider: .localOllama,
+                mode: .editorAssist,
+                command: RunnerCommand(executable: "ollama", arguments: ["generate", selectedModel]),
+                standardOutput: output,
+                standardError: "",
+                exitCode: 0,
+                startedAt: startedAt,
+                endedAt: endedAt,
+                summary: "Editor assist suggestion ready.",
+                sessionMetadata: RunnerSessionMetadata()
+            )
+        default:
+            guard let adapter = runnerAdapters[request.provider] else {
+                throw NSError(
+                    domain: "FactoryDesktop.EditorAssist",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "AI assist provider \(request.provider.displayName) is not configured."]
+                )
+            }
+            guard adapter.supportedModes.contains(.editorAssist) else {
+                throw NSError(
+                    domain: "FactoryDesktop.EditorAssist",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "AI assist provider \(request.provider.displayName) does not support editor assist."]
+                )
+            }
+            return try await adapter.execute(request)
         }
     }
 
