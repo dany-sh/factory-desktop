@@ -5,13 +5,11 @@ import Foundation
 public final class AppStore: ObservableObject {
     @Published public private(set) var projects: [Project] = []
     @Published public private(set) var tasks: [FactoryTask] = []
-    @Published public private(set) var backlogIdeas: [BacklogIdea] = []
     @Published public private(set) var runs: [RunRecord] = []
     @Published public private(set) var artifacts: [Artifact] = []
     @Published public private(set) var taskEvents: [TaskEvent] = []
     @Published public var selectedProjectID: String?
     @Published public var selectedTaskID: String?
-    @Published public var selectedBacklogIdeaID: String?
     @Published public var selectedModel: String = ModelPolicy.plannerDefault
     @Published public var gitSnapshot: GitSnapshot = GitSnapshot()
     @Published public var latestPreflightReport: PreflightReport?
@@ -57,19 +55,23 @@ public final class AppStore: ObservableObject {
         return tasks.first { $0.id == selectedTaskID }
     }
 
-    public var selectedBacklogIdea: BacklogIdea? {
-        guard let selectedBacklogIdeaID else { return nil }
-        return backlogIdeas.first { $0.id == selectedBacklogIdeaID }
-    }
-
     public var tasksForSelectedProject: [FactoryTask] {
         guard let project = selectedProject else { return [] }
         return tasks.filter { $0.projectId == project.id }
     }
 
-    public var backlogIdeasForSelectedProject: [BacklogIdea] {
-        guard let project = selectedProject else { return [] }
-        return backlogIdeas.filter { $0.projectId == project.id }
+    public var backlogTasksForSelectedProject: [FactoryTask] {
+        tasksForSelectedProject
+            .filter { $0.triageStatus != .done && $0.triageStatus != .archived }
+            .sorted { left, right in
+                if left.triageStatus.sortOrder != right.triageStatus.sortOrder {
+                    return left.triageStatus.sortOrder < right.triageStatus.sortOrder
+                }
+                if left.priorityLabel.sortOrder != right.priorityLabel.sortOrder {
+                    return left.priorityLabel.sortOrder < right.priorityLabel.sortOrder
+                }
+                return left.updatedAt > right.updatedAt
+            }
     }
 
     public var nextWorkItems: [BacklogNextWorkItem] {
@@ -83,7 +85,6 @@ public final class AppStore: ObservableObject {
             recommendationsByTaskID = [:]
         }
         return BacklogQueueRanking.rank(
-            ideas: backlogIdeasForSelectedProject,
             tasks: tasksForSelectedProject,
             runnerLinksByTaskID: runnerLinksByTaskID,
             recommendationsByTaskID: recommendationsByTaskID
@@ -254,7 +255,6 @@ public final class AppStore: ObservableObject {
         guard let repository else { return }
         projects = try repository.projects()
         tasks = try repository.tasks()
-        backlogIdeas = try repository.backlogIdeas()
         if selectedProjectID == nil {
             selectedProjectID = projects.first?.id
         }
@@ -304,7 +304,6 @@ public final class AppStore: ObservableObject {
     public func selectProject(_ projectID: String?) {
         selectedProjectID = projectID
         selectedTaskID = tasks.first { $0.projectId == projectID }?.id
-        selectedBacklogIdeaID = backlogIdeas.first { $0.projectId == projectID }?.id
         selectedWorkspaceScope = .project
         latestPreflightReport = nil
         latestLifecycleReport = nil
@@ -322,9 +321,6 @@ public final class AppStore: ObservableObject {
 
     public func selectTask(_ taskID: String?) {
         selectedTaskID = taskID
-        if taskID != nil {
-            selectedBacklogIdeaID = nil
-        }
         selectedWorkspaceScope = taskID == nil ? .project : .task
         selectedRunOutput = ""
         latestPreflightReport = nil
@@ -421,6 +417,9 @@ public final class AppStore: ObservableObject {
                 title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled task" : title,
                 type: type,
                 status: .backlog,
+                kind: .task,
+                triageStatus: .backlog,
+                readiness: goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .needsScoping : .scoped,
                 goal: goal
             )
             try repository.upsert(task: task)
@@ -489,116 +488,56 @@ public final class AppStore: ObservableObject {
         }
     }
 
-    public func selectBacklogIdea(_ ideaID: String?) {
-        selectedBacklogIdeaID = ideaID
-        if ideaID != nil {
-            selectedTaskID = nil
-        }
-        selectedWorkspaceScope = .project
-        selectedRunOutput = ""
-        latestRunnerRecommendation = nil
-        latestCodexSessionRecommendation = nil
-    }
-
-    public func createBacklogIdea(title: String, category: String = "", source: String = "") {
+    public func createWorkItem(
+        title: String,
+        kind: FactoryTaskKind = .idea,
+        priorityLabel: FactoryTaskPriorityLabel = .normal,
+        category: String = "",
+        source: String = ""
+    ) {
         perform {
             guard let repository = self.repository, let project = self.selectedProject else {
                 throw FactoryError.missingSelection
             }
-            let idea = BacklogIdea(
-                projectId: project.id,
-                title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled idea" : title,
-                category: category,
-                source: source
-            )
-            try repository.upsert(backlogIdea: idea)
-            try self.reload()
-            self.selectedBacklogIdeaID = idea.id
-            self.selectedTaskID = nil
-            self.statusMessage = "Created backlog idea \(idea.title)."
-        }
-    }
-
-    public func saveBacklogIdea(_ idea: BacklogIdea) {
-        perform {
-            guard let repository = self.repository else {
-                throw FactoryError.missingSelection
-            }
-            var updated = idea
-            updated.updatedAt = Date()
-            if updated.status != .promoted && updated.status != .archived {
-                updated.status = updated.isReadyToPromote ? .readyToPromote : (updated.goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .idea : .scoping)
-            }
-            try repository.upsert(backlogIdea: updated)
-            try self.reload()
-            self.selectedBacklogIdeaID = updated.id
-            self.statusMessage = "Saved backlog idea."
-        }
-    }
-
-    public func deleteSelectedBacklogIdea() {
-        perform {
-            guard let repository = self.repository, let idea = self.selectedBacklogIdea else {
-                throw FactoryError.missingSelection
-            }
-            try repository.deleteBacklogIdea(id: idea.id)
-            try self.reload()
-            self.selectedBacklogIdeaID = self.backlogIdeasForSelectedProject.first?.id
-            self.statusMessage = "Deleted backlog idea."
-        }
-    }
-
-    public func archiveSelectedBacklogIdea() {
-        perform {
-            guard var idea = self.selectedBacklogIdea else {
-                throw FactoryError.missingSelection
-            }
-            idea.status = .archived
-            self.saveBacklogIdea(idea)
-        }
-    }
-
-    public func promoteSelectedBacklogIdeaToTask() async {
-        guard let repository, let project = selectedProject, var idea = selectedBacklogIdea else {
-            errorMessage = FactoryError.missingSelection.localizedDescription
-            return
-        }
-        guard idea.isReadyToPromote else {
-            errorMessage = "A backlog idea needs a goal and at least one acceptance criterion before promotion."
-            return
-        }
-        if project.type == .codeRepo {
-            guard await ensureLifecycleGateAllowsStart(project: project, selectedTask: nil) else { return }
-        }
-
-        perform {
             let task = FactoryTask(
                 projectId: project.id,
-                title: idea.title,
-                type: .coding,
+                title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled work item" : title,
+                type: .planning,
                 status: .backlog,
-                priority: idea.priorityLevel.taskPriority,
-                goal: idea.goal,
-                context: idea.context,
-                acceptanceCriteria: idea.acceptanceCriteria
+                priority: priorityLabel.taskPriority,
+                kind: kind,
+                triageStatus: .backlog,
+                readiness: .raw,
+                priorityLabel: priorityLabel,
+                source: source,
+                category: category
             )
             try repository.upsert(task: task)
             try repository.insert(taskEvent: TaskEvent(
                 taskId: task.id,
                 kind: .statusChangedManually,
                 source: .manual,
-                message: "Task created from backlog idea.",
+                message: "Work item created.",
                 previousStatus: nil,
                 newStatus: task.status
             ))
-            idea.linkedTaskId = task.id
-            idea.status = .promoted
-            idea.updatedAt = Date()
-            try repository.upsert(backlogIdea: idea)
             try self.reload()
             self.selectedTaskID = task.id
-            self.selectedBacklogIdeaID = idea.id
-            self.statusMessage = "Promoted backlog idea to task."
+            self.statusMessage = "Created work item \(task.title)."
+        }
+    }
+
+    public func archiveSelectedWorkItem() {
+        perform {
+            guard var task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            task.triageStatus = .archived
+            task.updatedAt = Date()
+            try self.repository?.upsert(task: task)
+            try self.reload()
+            self.selectedTaskID = self.backlogTasksForSelectedProject.first?.id
+            self.statusMessage = "Archived work item."
         }
     }
 
@@ -1368,13 +1307,13 @@ public final class AppStore: ObservableObject {
         }
     }
 
-    public func scopeBacklogIdea(ideaID: String? = nil, provider: RunnerProvider = .codex) async {
+    public func scopeWorkItem(taskID: String? = nil, provider: RunnerProvider = .codex) async {
         guard let repository, let project = selectedProject else {
             errorMessage = FactoryError.missingSelection.localizedDescription
             return
         }
-        guard var idea = (ideaID.flatMap { id in backlogIdeas.first { $0.id == id } }) ?? selectedBacklogIdea else {
-            errorMessage = "Select a backlog idea first."
+        guard var task = (taskID.flatMap { id in tasks.first { $0.id == id } }) ?? selectedTask else {
+            errorMessage = "Select a work item first."
             return
         }
         guard let adapter = runnerAdapters[provider] else {
@@ -1385,37 +1324,38 @@ public final class AppStore: ObservableObject {
         isWorking = true
         defer { isWorking = false }
 
-        let directory = paths.backlogIdeaRunDirectory(project: project, idea: idea)
-        let promptURL = directory.appendingPathComponent("\(idea.id.shortID)-scoping-prompt.md")
-        let outputURL = directory.appendingPathComponent("\(idea.id.shortID)-scoping-output.log")
-        let prompt = backlogScopingPrompt(project: project, idea: idea)
+        let directory = paths.runDirectory(project: project, task: task)
+        let promptURL = directory.appendingPathComponent("\(task.id.shortID)-scoping-prompt.md")
+        let outputURL = directory.appendingPathComponent("\(task.id.shortID)-scoping-output.log")
+        let prompt = workItemScopingPrompt(project: project, task: task)
         var run = RunRecord(
             projectId: project.id,
-            taskId: nil,
+            taskId: task.id,
             executor: "\(provider.rawValue)_runner",
             model: selectedRunnerProjectLink?.preferredModelProfile?.modelName,
             status: .running,
             command: nil,
             promptPath: promptURL.path,
             outputPath: outputURL.path,
-            summary: "Scoping backlog idea"
+            summary: "Scoping work item"
         )
 
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try prompt.write(to: promptURL, atomically: true, encoding: .utf8)
             try repository.upsert(run: run)
-            idea.status = .scoping
-            idea.updatedAt = Date()
-            try repository.upsert(backlogIdea: idea)
+            task.triageStatus = .needsScoping
+            task.readiness = .needsScoping
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
             try reload()
-            selectedBacklogIdeaID = idea.id
+            selectedTaskID = task.id
 
             let request = RunnerRequest(
                 provider: provider,
                 mode: .scoping,
                 workspacePath: selectedRunnerProjectLink?.workspacePath ?? project.path,
-                backlogIdeaID: idea.id,
+                taskID: task.id,
                 instruction: prompt,
                 modelProfile: selectedRunnerProjectLink?.preferredModelProfile,
                 sandboxMode: .readOnly
@@ -1429,18 +1369,18 @@ public final class AppStore: ObservableObject {
             run.endedAt = result.endedAt
             try repository.upsert(run: run)
 
-            idea = mergeScopingResult(result, into: idea)
-            idea.updatedAt = Date()
-            try repository.upsert(backlogIdea: idea)
+            task = mergeScopingResult(result, into: task)
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
             try reload()
-            selectedBacklogIdeaID = idea.id
+            selectedTaskID = task.id
             selectedRunOutput = result.output
-            let action: RunnerRecommendedAction = idea.isReadyToPromote ? .promoteToTask : .scopeIdea
+            let action: RunnerRecommendedAction = task.readiness == .executable ? .dispatch : .scope
             latestRunnerRecommendation = RunnerRecommendation(
                 action: action,
-                reason: idea.recommendedNextAction.isEmpty ? result.summary : idea.recommendedNextAction
+                reason: task.recommendedNextAction.isEmpty ? result.summary : task.recommendedNextAction
             )
-            statusMessage = result.succeeded ? "Scoped backlog idea." : "Backlog idea scoping failed."
+            statusMessage = result.succeeded ? "Scoped work item." : "Work item scoping failed."
             if !result.succeeded {
                 errorMessage = result.output
             }
@@ -1464,6 +1404,10 @@ public final class AppStore: ObservableObject {
         }
         guard let adapter = runnerAdapters[provider] else {
             errorMessage = "Runner provider \(provider.displayName) is not configured."
+            return
+        }
+        guard task.readiness == .executable else {
+            errorMessage = "Scope this work item until readiness is executable before dispatch."
             return
         }
         if project.type == .codeRepo {
@@ -3407,24 +3351,27 @@ public final class AppStore: ObservableObject {
         """
     }
 
-    private func backlogScopingPrompt(project: Project, idea: BacklogIdea) -> String {
+    private func workItemScopingPrompt(project: Project, task: FactoryTask) -> String {
         """
         You are Factory Desktop's runner-agnostic scoping assistant.
-        Scope this backlog idea without editing code.
+        Scope this work item without editing code.
 
         Return JSON only with this shape:
         {
           "title": "...",
+          "kind": "idea|bug|feature|task|chore|tech_debt",
           "goal": "...",
           "context": "...",
           "acceptanceCriteria": ["..."],
-          "priorityLevel": "p0|p1|p2|p3",
+          "priorityLabel": "critical|high|normal|low|someday",
+          "readiness": "raw|needs_scoping|scoped|executable",
           "category": "...",
           "effort": "unknown|small|medium|large",
           "risk": "unknown|low|medium|high",
           "dependencies": "...",
           "nonGoals": "...",
-          "suggestedTaskSplit": "...",
+          "scopingNotes": "...",
+          "suggestedSplit": "...",
           "recommendedNextAction": "..."
         }
 
@@ -3433,18 +3380,23 @@ public final class AppStore: ObservableObject {
         - Type: \(project.type.rawValue)
         - Path: \(project.path)
 
-        Backlog idea:
-        - Title: \(idea.title)
-        - Priority: \(idea.priorityLevel.rawValue)
-        - Category: \(idea.category.isEmpty ? "unknown" : idea.category)
-        - Source: \(idea.source.isEmpty ? "unknown" : idea.source)
-        - Goal: \(idea.goal.isEmpty ? "missing" : idea.goal)
-        - Context: \(idea.context.isEmpty ? "missing" : idea.context)
-        - Acceptance criteria: \(idea.acceptanceCriteria.isEmpty ? "missing" : idea.acceptanceCriteria.joined(separator: " | "))
-        - Dependencies: \(idea.dependencies.isEmpty ? "none" : idea.dependencies)
-        - Non-goals: \(idea.nonGoals.isEmpty ? "none" : idea.nonGoals)
+        Work item:
+        - Title: \(task.title)
+        - Kind: \(task.kind.rawValue)
+        - Triage status: \(task.triageStatus.rawValue)
+        - Readiness: \(task.readiness.rawValue)
+        - Priority: \(task.priorityLabel.rawValue)
+        - Category: \(task.category.isEmpty ? "unknown" : task.category)
+        - Source: \(task.source.isEmpty ? "unknown" : task.source)
+        - Goal: \(task.goal.isEmpty ? "missing" : task.goal)
+        - Context: \(task.context.isEmpty ? "missing" : task.context)
+        - Acceptance criteria: \(task.acceptanceCriteria.isEmpty ? "missing" : task.acceptanceCriteria.joined(separator: " | "))
+        - Dependencies: \(task.dependencies.isEmpty ? "none" : task.dependencies)
+        - Non-goals: \(task.nonGoals.isEmpty ? "none" : task.nonGoals)
 
         Prefer practical scoping. Keep the title concise, acceptance criteria testable, and the next action explicit.
+        Mark readiness executable only when the work item is small and clear enough for coding-mode dispatch.
+        If it is too broad, keep readiness scoped or needs_scoping and use suggestedSplit to describe child work items.
         """
     }
 
@@ -3461,7 +3413,10 @@ public final class AppStore: ObservableObject {
         - Title: \(task.title)
         - ID: \(task.id)
         - Status: \(task.status.rawValue)
-        - Priority: \(task.priority.rawValue)
+        - Triage status: \(task.triageStatus.rawValue)
+        - Kind: \(task.kind.rawValue)
+        - Readiness: \(task.readiness.rawValue)
+        - Priority: \(task.priorityLabel.rawValue)
 
         Goal:
         \(task.goal.isEmpty ? task.title : task.goal)
@@ -3482,31 +3437,42 @@ public final class AppStore: ObservableObject {
         """
     }
 
-    private func mergeScopingResult(_ result: RunnerResult, into idea: BacklogIdea) -> BacklogIdea {
-        var updated = idea
+    private func mergeScopingResult(_ result: RunnerResult, into task: FactoryTask) -> FactoryTask {
+        var updated = task
         if let draft = parseBacklogScopingDraft(from: result.output) {
             if let title = draft.title?.nonEmptyTrimmed { updated.title = title }
+            if let kind = draft.kind.flatMap(FactoryTaskKind.init(rawValue:)) { updated.kind = kind }
             if let goal = draft.goal?.nonEmptyTrimmed { updated.goal = goal }
             if let context = draft.context?.nonEmptyTrimmed { updated.context = context }
             if let acceptanceCriteria = draft.acceptanceCriteria?.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }).filter({ !$0.isEmpty }), !acceptanceCriteria.isEmpty {
                 updated.acceptanceCriteria = acceptanceCriteria
             }
-            if let priorityLevel = draft.priorityLevel.flatMap(BacklogPriorityLevel.init(rawValue:)) {
-                updated.priorityLevel = priorityLevel
+            if let priorityLabel = draft.priorityLabel.flatMap(FactoryTaskPriorityLabel.init(rawValue:)) {
+                updated.priorityLabel = priorityLabel
+                updated.priority = priorityLabel.taskPriority
             }
+            if let readiness = draft.readiness.flatMap(FactoryTaskReadiness.init(rawValue:)) { updated.readiness = readiness }
             if let category = draft.category?.nonEmptyTrimmed { updated.category = category }
-            if let effort = draft.effort.flatMap(BacklogEffort.init(rawValue:)) { updated.effort = effort }
-            if let risk = draft.risk.flatMap(BacklogRisk.init(rawValue:)) { updated.risk = risk }
+            if let effort = draft.effort.flatMap(FactoryTaskEffort.init(rawValue:)) { updated.effort = effort }
+            if let risk = draft.risk.flatMap(FactoryTaskRisk.init(rawValue:)) { updated.risk = risk }
             if let dependencies = draft.dependencies?.nonEmptyTrimmed { updated.dependencies = dependencies }
             if let nonGoals = draft.nonGoals?.nonEmptyTrimmed { updated.nonGoals = nonGoals }
-            if let suggestedTaskSplit = draft.suggestedTaskSplit?.nonEmptyTrimmed { updated.suggestedTaskSplit = suggestedTaskSplit }
+            if let scopingNotes = draft.scopingNotes?.nonEmptyTrimmed { updated.scopingNotes = scopingNotes }
+            if let suggestedSplit = draft.suggestedSplit?.nonEmptyTrimmed { updated.suggestedSplit = suggestedSplit }
             if let recommendedNextAction = draft.recommendedNextAction?.nonEmptyTrimmed {
                 updated.recommendedNextAction = recommendedNextAction
             }
         } else {
             updated.recommendedNextAction = result.summary
         }
-        updated.status = updated.isReadyToPromote ? .readyToPromote : .scoping
+        switch updated.readiness {
+        case .executable:
+            updated.triageStatus = .ready
+        case .scoped:
+            updated.triageStatus = .backlog
+        case .needsScoping, .raw:
+            updated.triageStatus = .needsScoping
+        }
         return updated
     }
 
@@ -3526,16 +3492,19 @@ public final class AppStore: ObservableObject {
 
 private struct BacklogScopingDraft: Codable {
     var title: String?
+    var kind: String?
     var goal: String?
     var context: String?
     var acceptanceCriteria: [String]?
-    var priorityLevel: String?
+    var priorityLabel: String?
+    var readiness: String?
     var category: String?
     var effort: String?
     var risk: String?
     var dependencies: String?
     var nonGoals: String?
-    var suggestedTaskSplit: String?
+    var scopingNotes: String?
+    var suggestedSplit: String?
     var recommendedNextAction: String?
 }
 

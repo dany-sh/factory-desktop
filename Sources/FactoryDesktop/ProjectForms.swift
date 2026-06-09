@@ -139,16 +139,18 @@ struct NewTaskView: View {
     }
 }
 
-struct NewBacklogIdeaView: View {
+struct NewWorkItemView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
+    @State private var kind: FactoryTaskKind = .idea
+    @State private var priorityLabel: FactoryTaskPriorityLabel = .normal
     @State private var category = ""
     @State private var source = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("New Backlog Idea")
+            Text("New Work Item")
                 .font(.title.weight(.semibold))
             if let project = store.selectedProject {
                 Text("Project: \(project.name)")
@@ -156,6 +158,16 @@ struct NewBacklogIdeaView: View {
             }
             Form {
                 TextField("Title", text: $title)
+                Picker("Kind", selection: $kind) {
+                    ForEach(FactoryTaskKind.allCases) { kind in
+                        Text(kind.displayName).tag(kind)
+                    }
+                }
+                Picker("Priority", selection: $priorityLabel) {
+                    ForEach(FactoryTaskPriorityLabel.allCases) { priority in
+                        Text(priority.displayName).tag(priority)
+                    }
+                }
                 TextField("Category", text: $category)
                 TextField("Source", text: $source)
             }
@@ -164,8 +176,14 @@ struct NewBacklogIdeaView: View {
                     dismiss()
                 }
                 Spacer()
-                Button("Create Idea") {
-                    store.createBacklogIdea(title: title, category: category, source: source)
+                Button("Create Work Item") {
+                    store.createWorkItem(
+                        title: title,
+                        kind: kind,
+                        priorityLabel: priorityLabel,
+                        category: category,
+                        source: source
+                    )
                     if store.errorMessage == nil {
                         dismiss()
                     }

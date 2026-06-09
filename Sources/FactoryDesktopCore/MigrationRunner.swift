@@ -354,6 +354,115 @@ public final class MigrationRunner {
 
             PRAGMA foreign_keys = ON;
             """
+        ),
+        Migration(
+            version: 8,
+            name: "factory_task_work_item_metadata",
+            sql: """
+            ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'task';
+            ALTER TABLE tasks ADD COLUMN triage_status TEXT NOT NULL DEFAULT 'backlog';
+            ALTER TABLE tasks ADD COLUMN readiness TEXT NOT NULL DEFAULT 'scoped';
+            ALTER TABLE tasks ADD COLUMN priority_label TEXT NOT NULL DEFAULT 'normal';
+            ALTER TABLE tasks ADD COLUMN effort TEXT NOT NULL DEFAULT 'unknown';
+            ALTER TABLE tasks ADD COLUMN risk TEXT NOT NULL DEFAULT 'unknown';
+            ALTER TABLE tasks ADD COLUMN source TEXT DEFAULT '';
+            ALTER TABLE tasks ADD COLUMN category TEXT DEFAULT '';
+            ALTER TABLE tasks ADD COLUMN scoping_notes TEXT DEFAULT '';
+            ALTER TABLE tasks ADD COLUMN dependencies TEXT DEFAULT '';
+            ALTER TABLE tasks ADD COLUMN non_goals TEXT DEFAULT '';
+            ALTER TABLE tasks ADD COLUMN suggested_split TEXT DEFAULT '';
+            ALTER TABLE tasks ADD COLUMN recommended_next_action TEXT DEFAULT '';
+            ALTER TABLE tasks ADD COLUMN parent_task_id TEXT;
+
+            UPDATE tasks
+            SET
+              triage_status = CASE
+                WHEN status = 'ready' OR status = 'planning' OR status = 'plan_review' OR status = 'approved' THEN 'ready'
+                WHEN status = 'building' OR status = 'testing' THEN 'running'
+                WHEN status = 'needs_fixes' OR status = 'blocked' THEN 'needs_scoping'
+                WHEN status = 'ready_for_review' THEN 'review'
+                WHEN status = 'done' THEN 'done'
+                WHEN status = 'archived' THEN 'archived'
+                ELSE 'backlog'
+              END,
+              priority_label = CASE
+                WHEN priority = 'urgent' THEN 'critical'
+                WHEN priority = 'high' THEN 'high'
+                WHEN priority = 'low' THEN 'low'
+                ELSE 'normal'
+              END;
+
+            INSERT OR IGNORE INTO tasks (
+              id, project_id, title, type, status, priority, kind, triage_status, readiness, priority_label,
+              effort, risk, source, category, scoping_notes, dependencies, non_goals, suggested_split,
+              recommended_next_action, goal, context, acceptance_criteria_json, created_at, updated_at
+            )
+            SELECT
+              COALESCE(linked_task_id, id),
+              project_id,
+              title,
+              'planning',
+              CASE
+                WHEN status = 'archived' THEN 'archived'
+                WHEN status = 'ready_to_promote' OR status = 'promoted' THEN 'ready'
+                ELSE 'backlog'
+              END,
+              CASE
+                WHEN priority_level = 'p0' THEN 'urgent'
+                WHEN priority_level = 'p1' THEN 'high'
+                WHEN priority_level = 'p3' THEN 'low'
+                ELSE 'normal'
+              END,
+              'idea',
+              CASE
+                WHEN status = 'archived' THEN 'archived'
+                WHEN status = 'scoping' THEN 'needs_scoping'
+                WHEN status = 'ready_to_promote' OR status = 'promoted' THEN 'ready'
+                ELSE 'backlog'
+              END,
+              CASE
+                WHEN status = 'ready_to_promote' OR status = 'promoted' THEN 'executable'
+                WHEN status = 'scoping' THEN 'needs_scoping'
+                ELSE 'raw'
+              END,
+              CASE
+                WHEN priority_level = 'p0' THEN 'critical'
+                WHEN priority_level = 'p1' THEN 'high'
+                WHEN priority_level = 'p3' THEN 'low'
+                ELSE 'normal'
+              END,
+              effort,
+              risk,
+              source,
+              category,
+              '',
+              dependencies,
+              non_goals,
+              suggested_task_split,
+              recommended_next_action,
+              goal,
+              context,
+              acceptance_criteria_json,
+              created_at,
+              updated_at
+            FROM backlog_ideas;
+
+            UPDATE tasks
+            SET
+              kind = 'idea',
+              source = COALESCE((SELECT source FROM backlog_ideas WHERE linked_task_id = tasks.id LIMIT 1), source),
+              category = COALESCE((SELECT category FROM backlog_ideas WHERE linked_task_id = tasks.id LIMIT 1), category),
+              effort = COALESCE((SELECT effort FROM backlog_ideas WHERE linked_task_id = tasks.id LIMIT 1), effort),
+              risk = COALESCE((SELECT risk FROM backlog_ideas WHERE linked_task_id = tasks.id LIMIT 1), risk),
+              dependencies = COALESCE((SELECT dependencies FROM backlog_ideas WHERE linked_task_id = tasks.id LIMIT 1), dependencies),
+              non_goals = COALESCE((SELECT non_goals FROM backlog_ideas WHERE linked_task_id = tasks.id LIMIT 1), non_goals),
+              suggested_split = COALESCE((SELECT suggested_task_split FROM backlog_ideas WHERE linked_task_id = tasks.id LIMIT 1), suggested_split),
+              recommended_next_action = COALESCE((SELECT recommended_next_action FROM backlog_ideas WHERE linked_task_id = tasks.id LIMIT 1), recommended_next_action)
+            WHERE id IN (SELECT linked_task_id FROM backlog_ideas WHERE linked_task_id IS NOT NULL);
+
+            CREATE INDEX IF NOT EXISTS idx_tasks_project_triage ON tasks(project_id, triage_status, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_tasks_parent_task_id ON tasks(parent_task_id);
+            """
         )
     ]
 }

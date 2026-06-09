@@ -6,10 +6,10 @@ struct ProjectDashboardView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var showActiveTasks = false
     @State private var showArchivedTasks = false
-    @State private var showNewBacklogIdeaSheet = false
+    @State private var showNewWorkItemSheet = false
     @State private var projectMarkdownFiles: [ProjectMarkdownFile] = []
-    @State private var backlogDraft = BacklogIdeaDraft()
-    @State private var loadedBacklogIdeaID: String?
+    @State private var workItemDraft = WorkItemDraft()
+    @State private var loadedWorkItemID: String?
     @State private var acceptanceText = ""
 
     var body: some View {
@@ -21,6 +21,7 @@ struct ProjectDashboardView: View {
                         summaryPanel(project: project)
                         topNextWorkPanel
                         backlogPanel
+                        kanbanPanel
                         projectDocsPanel(project: project)
                         taskListsPanel
                         LifecycleCleanupView()
@@ -44,11 +45,11 @@ struct ProjectDashboardView: View {
             refreshProjectMarkdownFiles()
             loadBacklogDraft()
         }
-        .onChange(of: store.selectedBacklogIdeaID) { _, _ in
+        .onChange(of: store.selectedTaskID) { _, _ in
             loadBacklogDraft()
         }
-        .sheet(isPresented: $showNewBacklogIdeaSheet) {
-            NewBacklogIdeaView()
+        .sheet(isPresented: $showNewWorkItemSheet) {
+            NewWorkItemView()
                 .environmentObject(store)
         }
     }
@@ -180,7 +181,7 @@ struct ProjectDashboardView: View {
                 .font(.headline)
 
             if store.nextWorkItems.isEmpty {
-                Text("No backlog ideas or active tasks yet.")
+                Text("No backlog work items or active tasks yet.")
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(Array(store.nextWorkItems.prefix(3))) { item in
@@ -223,55 +224,61 @@ struct ProjectDashboardView: View {
     private var backlogPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Backlog Queue + Runner Orchestration")
+                Text("Backlog Queue")
                     .font(.headline)
                 Spacer()
                 Button {
-                    showNewBacklogIdeaSheet = true
+                    showNewWorkItemSheet = true
                 } label: {
-                    Label("New Idea", systemImage: "plus")
+                    Label("New Work Item", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
             }
 
-            if store.backlogIdeasForSelectedProject.isEmpty {
-                Text("No backlog ideas for this project yet.")
+            if store.backlogTasksForSelectedProject.isEmpty {
+                Text("No backlog work items for this project yet.")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(store.backlogIdeasForSelectedProject) { idea in
+                ForEach(store.backlogTasksForSelectedProject) { task in
                     HStack(alignment: .top, spacing: 10) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(idea.title)
+                            Text(task.title)
                                 .font(.body.weight(.semibold))
-                            Text("\(idea.priorityLevel.displayName) · \(idea.status.displayName)")
+                            Text("\(task.kind.displayName) · \(task.priorityLabel.displayName) · \(task.triageStatus.displayName) · \(task.readiness.displayName)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            if !task.recommendedNextAction.isEmpty {
+                                Text(task.recommendedNextAction)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         Spacer()
                         Button("Edit") {
-                            store.selectBacklogIdea(idea.id)
+                            store.selectTask(task.id)
                         }
                         .buttonStyle(.bordered)
-                        Button(idea.isReadyToPromote ? "Promote" : "Scope") {
-                            if idea.isReadyToPromote {
-                                Task { await store.promoteSelectedBacklogIdeaToTask() }
+                        Button(nextActionTitle(for: task)) {
+                            store.selectTask(task.id)
+                            if task.readiness == .executable {
+                                Task { await store.dispatchTask() }
                             } else {
-                                store.selectBacklogIdea(idea.id)
-                                Task { await store.scopeBacklogIdea() }
+                                Task { await store.scopeWorkItem() }
                             }
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(task.triageStatus == .done || task.triageStatus == .archived)
                     }
                     .padding(.vertical, 3)
-                    if idea.id != store.backlogIdeasForSelectedProject.last?.id {
+                    if task.id != store.backlogTasksForSelectedProject.last?.id {
                         Divider()
                     }
                 }
             }
 
-            if store.selectedBacklogIdea != nil {
+            if selectedEditableWorkItem != nil {
                 Divider()
-                backlogEditor
+                workItemEditor
             }
         }
         .padding()
@@ -280,6 +287,75 @@ struct ProjectDashboardView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator.opacity(0.6))
         )
+    }
+
+    private var kanbanPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Kanban")
+                .font(.headline)
+            ScrollView(.horizontal, showsIndicators: true) {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(FactoryTaskTriageStatus.kanbanColumns) { status in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(status.displayName)
+                                    .font(.subheadline.weight(.semibold))
+                                Spacer()
+                                Text("\(tasks(for: status).count)")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            ForEach(tasks(for: status)) { task in
+                                kanbanCard(task)
+                            }
+                            if tasks(for: status).isEmpty {
+                                Text("No cards")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(10)
+                            }
+                        }
+                        .frame(width: 220, alignment: .topLeading)
+                        .padding(10)
+                        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
+    private func kanbanCard(_ task: FactoryTask) -> some View {
+        Button {
+            store.selectTask(task.id)
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(task.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                Text("\(task.kind.displayName) · \(task.priorityLabel.displayName)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text("\(task.readiness.displayName) · \(nextActionTitle(for: task))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(.background, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(.separator.opacity(0.45))
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     private func projectDocsPanel(project: Project) -> some View {
@@ -412,6 +488,29 @@ struct ProjectDashboardView: View {
         }
     }
 
+    private func tasks(for triageStatus: FactoryTaskTriageStatus) -> [FactoryTask] {
+        store.tasksForSelectedProject
+            .filter { $0.triageStatus == triageStatus }
+            .sorted { left, right in
+                if left.priorityLabel.sortOrder != right.priorityLabel.sortOrder {
+                    return left.priorityLabel.sortOrder < right.priorityLabel.sortOrder
+                }
+                return left.updatedAt > right.updatedAt
+            }
+    }
+
+    private func nextActionTitle(for task: FactoryTask) -> String {
+        if store.runnerSessionLinks.contains(where: { $0.taskId == task.id }) {
+            return "Continue Run"
+        }
+        switch task.readiness {
+        case .executable:
+            return "Dispatch"
+        case .raw, .needsScoping, .scoped:
+            return "Scope"
+        }
+    }
+
     private var activeTasks: [FactoryTask] {
         store.tasksForSelectedProject.filter { $0.status != .done && $0.status != .archived }
     }
@@ -442,93 +541,116 @@ struct ProjectDashboardView: View {
             .map { ProjectMarkdownFile(path: $0.path) }
     }
 
-    private var backlogEditor: some View {
+    private var workItemEditor: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Backlog Idea Editor")
+            Text("Work Item Editor")
                 .font(.headline)
-            TextField("Title", text: $backlogDraft.title)
+            TextField("Title", text: $workItemDraft.title)
             HStack {
-                Picker("Priority", selection: $backlogDraft.priorityLevel) {
-                    ForEach(BacklogPriorityLevel.allCases) { level in
+                Picker("Kind", selection: $workItemDraft.kind) {
+                    ForEach(FactoryTaskKind.allCases) { kind in
+                        Text(kind.displayName).tag(kind)
+                    }
+                }
+                Picker("Triage", selection: $workItemDraft.triageStatus) {
+                    ForEach(FactoryTaskTriageStatus.allCases) { status in
+                        Text(status.displayName).tag(status)
+                    }
+                }
+                Picker("Readiness", selection: $workItemDraft.readiness) {
+                    ForEach(FactoryTaskReadiness.allCases) { readiness in
+                        Text(readiness.displayName).tag(readiness)
+                    }
+                }
+            }
+            HStack {
+                Picker("Priority", selection: $workItemDraft.priorityLabel) {
+                    ForEach(FactoryTaskPriorityLabel.allCases) { level in
                         Text(level.displayName).tag(level)
                     }
                 }
-                Picker("Effort", selection: $backlogDraft.effort) {
-                    ForEach(BacklogEffort.allCases) { effort in
+                Picker("Effort", selection: $workItemDraft.effort) {
+                    ForEach(FactoryTaskEffort.allCases) { effort in
                         Text(effort.displayName).tag(effort)
                     }
                 }
-                Picker("Risk", selection: $backlogDraft.risk) {
-                    ForEach(BacklogRisk.allCases) { risk in
+                Picker("Risk", selection: $workItemDraft.risk) {
+                    ForEach(FactoryTaskRisk.allCases) { risk in
                         Text(risk.displayName).tag(risk)
                     }
                 }
             }
-            TextField("Category", text: $backlogDraft.category)
-            TextField("Source", text: $backlogDraft.source)
-            labeledEditor("Goal", text: $backlogDraft.goal, minHeight: 80)
-            labeledEditor("Context", text: $backlogDraft.context, minHeight: 110)
+            TextField("Category", text: $workItemDraft.category)
+            TextField("Source", text: $workItemDraft.source)
+            labeledEditor("Goal", text: $workItemDraft.goal, minHeight: 80)
+            labeledEditor("Context", text: $workItemDraft.context, minHeight: 110)
             labeledEditor("Acceptance Criteria (one per line)", text: $acceptanceText, minHeight: 90)
-            labeledEditor("Dependencies", text: $backlogDraft.dependencies, minHeight: 60)
-            labeledEditor("Non-Goals", text: $backlogDraft.nonGoals, minHeight: 60)
-            labeledEditor("Suggested Task Split", text: $backlogDraft.suggestedTaskSplit, minHeight: 60)
-            labeledEditor("Recommended Next Action", text: $backlogDraft.recommendedNextAction, minHeight: 60)
+            labeledEditor("Scoping Notes", text: $workItemDraft.scopingNotes, minHeight: 60)
+            labeledEditor("Dependencies", text: $workItemDraft.dependencies, minHeight: 60)
+            labeledEditor("Non-Goals", text: $workItemDraft.nonGoals, minHeight: 60)
+            labeledEditor("Suggested Split", text: $workItemDraft.suggestedSplit, minHeight: 60)
+            labeledEditor("Recommended Next Action", text: $workItemDraft.recommendedNextAction, minHeight: 60)
 
             HStack {
                 Button("Save") {
-                    saveBacklogDraft()
+                    saveWorkItemDraft()
                 }
                 .buttonStyle(.borderedProminent)
                 Button("Scope") {
-                    saveBacklogDraft()
-                    Task { await store.scopeBacklogIdea() }
+                    saveWorkItemDraft()
+                    Task { await store.scopeWorkItem() }
                 }
                 .buttonStyle(.bordered)
-                Button("Promote") {
-                    saveBacklogDraft()
-                    Task { await store.promoteSelectedBacklogIdeaToTask() }
+                Button("Dispatch") {
+                    saveWorkItemDraft()
+                    Task { await store.dispatchTask() }
                 }
                 .buttonStyle(.bordered)
-                .disabled(!draftIdea.isReadyToPromote)
+                .disabled(draftWorkItem.readiness != .executable)
                 Button("Archive") {
-                    store.archiveSelectedBacklogIdea()
+                    store.archiveSelectedWorkItem()
                 }
                 .buttonStyle(.bordered)
             }
         }
     }
 
-    private var draftIdea: BacklogIdea {
-        guard let idea = store.selectedBacklogIdea else {
-            return BacklogIdea(projectId: store.selectedProject?.id ?? "", title: "")
+    private var selectedEditableWorkItem: FactoryTask? {
+        guard let task = store.selectedTask, task.projectId == store.selectedProject?.id else {
+            return nil
         }
-        return backlogDraft.idea(updating: idea, acceptanceText: acceptanceText)
+        return task
+    }
+
+    private var draftWorkItem: FactoryTask {
+        guard let task = selectedEditableWorkItem else {
+            return FactoryTask(projectId: store.selectedProject?.id ?? "", title: "")
+        }
+        return workItemDraft.task(updating: task, acceptanceText: acceptanceText)
     }
 
     private func loadBacklogDraft() {
-        guard let idea = store.selectedBacklogIdea else {
-            backlogDraft = BacklogIdeaDraft()
+        guard let task = selectedEditableWorkItem else {
+            workItemDraft = WorkItemDraft()
             acceptanceText = ""
-            loadedBacklogIdeaID = nil
+            loadedWorkItemID = nil
             return
         }
-        guard loadedBacklogIdeaID != idea.id else { return }
-        backlogDraft = BacklogIdeaDraft(idea: idea)
-        acceptanceText = idea.acceptanceCriteria.joined(separator: "\n")
-        loadedBacklogIdeaID = idea.id
+        guard loadedWorkItemID != task.id else { return }
+        workItemDraft = WorkItemDraft(task: task)
+        acceptanceText = task.acceptanceCriteria.joined(separator: "\n")
+        loadedWorkItemID = task.id
     }
 
-    private func saveBacklogDraft() {
-        guard let idea = store.selectedBacklogIdea else { return }
-        let updated = backlogDraft.idea(updating: idea, acceptanceText: acceptanceText)
-        store.saveBacklogIdea(updated)
-        loadedBacklogIdeaID = updated.id
+    private func saveWorkItemDraft() {
+        guard let task = selectedEditableWorkItem else { return }
+        let updated = workItemDraft.task(updating: task, acceptanceText: acceptanceText)
+        store.saveTask(updated)
+        loadedWorkItemID = updated.id
     }
 
     private func open(_ item: BacklogNextWorkItem) {
         switch item.kind {
-        case .idea(let idea):
-            store.selectBacklogIdea(idea.id)
         case .task(let task):
             store.selectTask(task.id)
         }
@@ -536,15 +658,10 @@ struct ProjectDashboardView: View {
 
     private func trigger(_ item: BacklogNextWorkItem) {
         switch item.primaryAction {
-        case .scopeIdea:
-            if case .idea(let idea) = item.kind {
-                store.selectBacklogIdea(idea.id)
-                Task { await store.scopeBacklogIdea() }
-            }
-        case .promoteToTask:
-            if case .idea(let idea) = item.kind {
-                store.selectBacklogIdea(idea.id)
-                Task { await store.promoteSelectedBacklogIdeaToTask() }
+        case .scope:
+            if case .task(let task) = item.kind {
+                store.selectTask(task.id)
+                Task { await store.scopeWorkItem() }
             }
         case .dispatch:
             if case .task(let task) = item.kind {
@@ -583,50 +700,63 @@ private struct ProjectMarkdownFile: Identifiable, Equatable {
     var name: String { URL(fileURLWithPath: path).lastPathComponent }
 }
 
-private struct BacklogIdeaDraft {
+private struct WorkItemDraft {
     var title = ""
-    var priorityLevel: BacklogPriorityLevel = .p2
+    var kind: FactoryTaskKind = .idea
+    var triageStatus: FactoryTaskTriageStatus = .backlog
+    var readiness: FactoryTaskReadiness = .raw
+    var priorityLabel: FactoryTaskPriorityLabel = .normal
     var category = ""
     var source = ""
     var goal = ""
     var context = ""
-    var effort: BacklogEffort = .unknown
-    var risk: BacklogRisk = .unknown
+    var effort: FactoryTaskEffort = .unknown
+    var risk: FactoryTaskRisk = .unknown
+    var scopingNotes = ""
     var dependencies = ""
     var nonGoals = ""
-    var suggestedTaskSplit = ""
+    var suggestedSplit = ""
     var recommendedNextAction = ""
 
     init() {}
 
-    init(idea: BacklogIdea) {
-        title = idea.title
-        priorityLevel = idea.priorityLevel
-        category = idea.category
-        source = idea.source
-        goal = idea.goal
-        context = idea.context
-        effort = idea.effort
-        risk = idea.risk
-        dependencies = idea.dependencies
-        nonGoals = idea.nonGoals
-        suggestedTaskSplit = idea.suggestedTaskSplit
-        recommendedNextAction = idea.recommendedNextAction
+    init(task: FactoryTask) {
+        title = task.title
+        kind = task.kind
+        triageStatus = task.triageStatus
+        readiness = task.readiness
+        priorityLabel = task.priorityLabel
+        category = task.category
+        source = task.source
+        goal = task.goal
+        context = task.context
+        effort = task.effort
+        risk = task.risk
+        scopingNotes = task.scopingNotes
+        dependencies = task.dependencies
+        nonGoals = task.nonGoals
+        suggestedSplit = task.suggestedSplit
+        recommendedNextAction = task.recommendedNextAction
     }
 
-    func idea(updating idea: BacklogIdea, acceptanceText: String) -> BacklogIdea {
-        var updated = idea
+    func task(updating task: FactoryTask, acceptanceText: String) -> FactoryTask {
+        var updated = task
         updated.title = title
-        updated.priorityLevel = priorityLevel
+        updated.kind = kind
+        updated.triageStatus = triageStatus
+        updated.readiness = readiness
+        updated.priorityLabel = priorityLabel
+        updated.priority = priorityLabel.taskPriority
         updated.category = category
         updated.source = source
         updated.goal = goal
         updated.context = context
         updated.effort = effort
         updated.risk = risk
+        updated.scopingNotes = scopingNotes
         updated.dependencies = dependencies
         updated.nonGoals = nonGoals
-        updated.suggestedTaskSplit = suggestedTaskSplit
+        updated.suggestedSplit = suggestedSplit
         updated.recommendedNextAction = recommendedNextAction
         updated.acceptanceCriteria = acceptanceText
             .split(separator: "\n")
