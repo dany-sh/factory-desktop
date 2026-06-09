@@ -118,7 +118,6 @@ public struct RunnerRequest: Equatable, Codable, Sendable {
     public var mode: RunnerMode
     public var workspacePath: String
     public var taskID: String?
-    public var backlogIdeaID: String?
     public var instruction: String
     public var modelProfile: ModelProfile?
     public var linkedSessionID: String?
@@ -129,7 +128,6 @@ public struct RunnerRequest: Equatable, Codable, Sendable {
         mode: RunnerMode,
         workspacePath: String,
         taskID: String? = nil,
-        backlogIdeaID: String? = nil,
         instruction: String,
         modelProfile: ModelProfile? = nil,
         linkedSessionID: String? = nil,
@@ -139,7 +137,6 @@ public struct RunnerRequest: Equatable, Codable, Sendable {
         self.mode = mode
         self.workspacePath = workspacePath
         self.taskID = taskID
-        self.backlogIdeaID = backlogIdeaID
         self.instruction = instruction
         self.modelProfile = modelProfile
         self.linkedSessionID = linkedSessionID
@@ -205,8 +202,7 @@ public struct RunnerAvailability: Equatable, Sendable {
 }
 
 public enum RunnerRecommendedAction: String, CaseIterable, Codable, Identifiable, Sendable {
-    case scopeIdea = "scope_idea"
-    case promoteToTask = "promote_to_task"
+    case scope = "scope"
     case dispatch = "dispatch"
     case continueRun = "continue_run"
     case reviewDiff = "review_diff"
@@ -219,8 +215,7 @@ public enum RunnerRecommendedAction: String, CaseIterable, Codable, Identifiable
 
     public var displayName: String {
         switch self {
-        case .scopeIdea: "Scope"
-        case .promoteToTask: "Promote"
+        case .scope: "Scope"
         case .dispatch: "Dispatch"
         case .continueRun: "Continue Run"
         case .reviewDiff: "Review Diff"

@@ -658,6 +658,20 @@ public struct FactoryTask: Identifiable, Equatable, Codable {
     public var type: TaskType
     public var status: TaskStatus
     public var priority: TaskPriority
+    public var kind: FactoryTaskKind
+    public var triageStatus: FactoryTaskTriageStatus
+    public var readiness: FactoryTaskReadiness
+    public var priorityLabel: FactoryTaskPriorityLabel
+    public var effort: FactoryTaskEffort
+    public var risk: FactoryTaskRisk
+    public var source: String
+    public var category: String
+    public var scopingNotes: String
+    public var dependencies: String
+    public var nonGoals: String
+    public var suggestedSplit: String
+    public var recommendedNextAction: String
+    public var parentTaskId: String?
     public var goal: String
     public var context: String
     public var acceptanceCriteria: [String]
@@ -677,6 +691,20 @@ public struct FactoryTask: Identifiable, Equatable, Codable {
         type: TaskType = .coding,
         status: TaskStatus = .backlog,
         priority: TaskPriority = .normal,
+        kind: FactoryTaskKind = .task,
+        triageStatus: FactoryTaskTriageStatus? = nil,
+        readiness: FactoryTaskReadiness = .scoped,
+        priorityLabel: FactoryTaskPriorityLabel? = nil,
+        effort: FactoryTaskEffort = .unknown,
+        risk: FactoryTaskRisk = .unknown,
+        source: String = "",
+        category: String = "",
+        scopingNotes: String = "",
+        dependencies: String = "",
+        nonGoals: String = "",
+        suggestedSplit: String = "",
+        recommendedNextAction: String = "",
+        parentTaskId: String? = nil,
         goal: String = "",
         context: String = "",
         acceptanceCriteria: [String] = [],
@@ -695,6 +723,20 @@ public struct FactoryTask: Identifiable, Equatable, Codable {
         self.type = type
         self.status = status
         self.priority = priority
+        self.kind = kind
+        self.triageStatus = triageStatus ?? FactoryTaskTriageStatus.fromLegacyStatus(status)
+        self.readiness = readiness
+        self.priorityLabel = priorityLabel ?? FactoryTaskPriorityLabel.fromLegacyPriority(priority)
+        self.effort = effort
+        self.risk = risk
+        self.source = source
+        self.category = category
+        self.scopingNotes = scopingNotes
+        self.dependencies = dependencies
+        self.nonGoals = nonGoals
+        self.suggestedSplit = suggestedSplit
+        self.recommendedNextAction = recommendedNextAction
+        self.parentTaskId = parentTaskId
         self.goal = goal
         self.context = context
         self.acceptanceCriteria = acceptanceCriteria

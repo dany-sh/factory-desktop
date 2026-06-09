@@ -125,7 +125,9 @@ public final class FactoryRepository {
         if let projectId {
             rows = try database.query(
                 """
-                SELECT id, project_id, title, type, status, priority, goal, context, acceptance_criteria_json,
+                SELECT id, project_id, title, type, status, priority, kind, triage_status, readiness, priority_label,
+                       effort, risk, source, category, scoping_notes, dependencies, non_goals, suggested_split,
+                       recommended_next_action, parent_task_id, goal, context, acceptance_criteria_json,
                        local_branch, codex_branch, local_worktree_path, codex_worktree_path,
                        local_base_branch_commit, codex_base_branch_commit, created_at, updated_at
                 FROM tasks
@@ -137,7 +139,9 @@ public final class FactoryRepository {
         } else {
             rows = try database.query(
                 """
-                SELECT id, project_id, title, type, status, priority, goal, context, acceptance_criteria_json,
+                SELECT id, project_id, title, type, status, priority, kind, triage_status, readiness, priority_label,
+                       effort, risk, source, category, scoping_notes, dependencies, non_goals, suggested_split,
+                       recommended_next_action, parent_task_id, goal, context, acceptance_criteria_json,
                        local_branch, codex_branch, local_worktree_path, codex_worktree_path,
                        local_base_branch_commit, codex_base_branch_commit, created_at, updated_at
                 FROM tasks
@@ -152,17 +156,33 @@ public final class FactoryRepository {
         try database.execute(
             """
             INSERT INTO tasks (
-              id, project_id, title, type, status, priority, goal, context, acceptance_criteria_json,
+              id, project_id, title, type, status, priority, kind, triage_status, readiness, priority_label,
+              effort, risk, source, category, scoping_notes, dependencies, non_goals, suggested_split,
+              recommended_next_action, parent_task_id, goal, context, acceptance_criteria_json,
               local_branch, codex_branch, local_worktree_path, codex_worktree_path,
               local_base_branch_commit, codex_base_branch_commit, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               project_id = excluded.project_id,
               title = excluded.title,
               type = excluded.type,
               status = excluded.status,
               priority = excluded.priority,
+              kind = excluded.kind,
+              triage_status = excluded.triage_status,
+              readiness = excluded.readiness,
+              priority_label = excluded.priority_label,
+              effort = excluded.effort,
+              risk = excluded.risk,
+              source = excluded.source,
+              category = excluded.category,
+              scoping_notes = excluded.scoping_notes,
+              dependencies = excluded.dependencies,
+              non_goals = excluded.non_goals,
+              suggested_split = excluded.suggested_split,
+              recommended_next_action = excluded.recommended_next_action,
+              parent_task_id = excluded.parent_task_id,
               goal = excluded.goal,
               context = excluded.context,
               acceptance_criteria_json = excluded.acceptance_criteria_json,
@@ -181,6 +201,20 @@ public final class FactoryRepository {
                 .text(task.type.rawValue),
                 .text(task.status.rawValue),
                 .text(task.priority.rawValue),
+                .text(task.kind.rawValue),
+                .text(task.triageStatus.rawValue),
+                .text(task.readiness.rawValue),
+                .text(task.priorityLabel.rawValue),
+                .text(task.effort.rawValue),
+                .text(task.risk.rawValue),
+                .text(task.source),
+                .text(task.category),
+                .text(task.scopingNotes),
+                .text(task.dependencies),
+                .text(task.nonGoals),
+                .text(task.suggestedSplit),
+                .text(task.recommendedNextAction),
+                .text(task.parentTaskId),
                 .text(task.goal),
                 .text(task.context),
                 .text(JSONCoding.encodeArray(task.acceptanceCriteria)),
@@ -198,90 +232,6 @@ public final class FactoryRepository {
 
     public func deleteTask(id: String) throws {
         try database.execute("DELETE FROM tasks WHERE id = ?;", binds: [.text(id)])
-    }
-
-    public func backlogIdeas(projectId: String? = nil) throws -> [BacklogIdea] {
-        let rows: [[String: String?]]
-        if let projectId {
-            rows = try database.query(
-                """
-                SELECT id, project_id, title, priority_level, category, source, goal, context,
-                       acceptance_criteria_json, effort, risk, dependencies, non_goals, suggested_task_split,
-                       recommended_next_action, status, linked_task_id, created_at, updated_at
-                FROM backlog_ideas
-                WHERE project_id = ?
-                ORDER BY updated_at DESC, created_at DESC;
-                """,
-                binds: [.text(projectId)]
-            )
-        } else {
-            rows = try database.query(
-                """
-                SELECT id, project_id, title, priority_level, category, source, goal, context,
-                       acceptance_criteria_json, effort, risk, dependencies, non_goals, suggested_task_split,
-                       recommended_next_action, status, linked_task_id, created_at, updated_at
-                FROM backlog_ideas
-                ORDER BY updated_at DESC, created_at DESC;
-                """
-            )
-        }
-        return rows.map(backlogIdea(from:))
-    }
-
-    public func upsert(backlogIdea: BacklogIdea) throws {
-        try database.execute(
-            """
-            INSERT INTO backlog_ideas (
-              id, project_id, title, priority_level, category, source, goal, context, acceptance_criteria_json,
-              effort, risk, dependencies, non_goals, suggested_task_split, recommended_next_action, status,
-              linked_task_id, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              project_id = excluded.project_id,
-              title = excluded.title,
-              priority_level = excluded.priority_level,
-              category = excluded.category,
-              source = excluded.source,
-              goal = excluded.goal,
-              context = excluded.context,
-              acceptance_criteria_json = excluded.acceptance_criteria_json,
-              effort = excluded.effort,
-              risk = excluded.risk,
-              dependencies = excluded.dependencies,
-              non_goals = excluded.non_goals,
-              suggested_task_split = excluded.suggested_task_split,
-              recommended_next_action = excluded.recommended_next_action,
-              status = excluded.status,
-              linked_task_id = excluded.linked_task_id,
-              updated_at = excluded.updated_at;
-            """,
-            binds: [
-                .text(backlogIdea.id),
-                .text(backlogIdea.projectId),
-                .text(backlogIdea.title),
-                .text(backlogIdea.priorityLevel.rawValue),
-                .text(backlogIdea.category),
-                .text(backlogIdea.source),
-                .text(backlogIdea.goal),
-                .text(backlogIdea.context),
-                .text(JSONCoding.encodeArray(backlogIdea.acceptanceCriteria)),
-                .text(backlogIdea.effort.rawValue),
-                .text(backlogIdea.risk.rawValue),
-                .text(backlogIdea.dependencies),
-                .text(backlogIdea.nonGoals),
-                .text(backlogIdea.suggestedTaskSplit),
-                .text(backlogIdea.recommendedNextAction),
-                .text(backlogIdea.status.rawValue),
-                .text(backlogIdea.linkedTaskId),
-                .text(DateCoding.string(from: backlogIdea.createdAt)),
-                .text(DateCoding.string(from: backlogIdea.updatedAt))
-            ]
-        )
-    }
-
-    public func deleteBacklogIdea(id: String) throws {
-        try database.execute("DELETE FROM backlog_ideas WHERE id = ?;", binds: [.text(id)])
     }
 
     public func upsert(codexSessionLink link: CodexSessionLink) throws {
@@ -641,6 +591,20 @@ public final class FactoryRepository {
             type: TaskType(rawValue: row.optional("type") ?? "") ?? .coding,
             status: TaskStatus.storedValue(row.optional("status")),
             priority: TaskPriority(rawValue: row.optional("priority") ?? "") ?? .normal,
+            kind: FactoryTaskKind(rawValue: row.optional("kind") ?? "") ?? .task,
+            triageStatus: FactoryTaskTriageStatus(rawValue: row.optional("triage_status") ?? ""),
+            readiness: FactoryTaskReadiness(rawValue: row.optional("readiness") ?? "") ?? .scoped,
+            priorityLabel: FactoryTaskPriorityLabel(rawValue: row.optional("priority_label") ?? ""),
+            effort: FactoryTaskEffort(rawValue: row.optional("effort") ?? "") ?? .unknown,
+            risk: FactoryTaskRisk(rawValue: row.optional("risk") ?? "") ?? .unknown,
+            source: row.optional("source") ?? "",
+            category: row.optional("category") ?? "",
+            scopingNotes: row.optional("scoping_notes") ?? "",
+            dependencies: row.optional("dependencies") ?? "",
+            nonGoals: row.optional("non_goals") ?? "",
+            suggestedSplit: row.optional("suggested_split") ?? "",
+            recommendedNextAction: row.optional("recommended_next_action") ?? "",
+            parentTaskId: row.optional("parent_task_id"),
             goal: row.optional("goal") ?? "",
             context: row.optional("context") ?? "",
             acceptanceCriteria: JSONCoding.decodeArray(row.optional("acceptance_criteria_json")),
@@ -650,30 +614,6 @@ public final class FactoryRepository {
             codexWorktreePath: row.optional("codex_worktree_path"),
             localBaseBranchCommit: row.optional("local_base_branch_commit"),
             codexBaseBranchCommit: row.optional("codex_base_branch_commit"),
-            createdAt: DateCoding.date(from: row.required("created_at")),
-            updatedAt: DateCoding.date(from: row.required("updated_at"))
-        )
-    }
-
-    private func backlogIdea(from row: [String: String?]) -> BacklogIdea {
-        BacklogIdea(
-            id: row.required("id"),
-            projectId: row.required("project_id"),
-            title: row.required("title"),
-            priorityLevel: BacklogPriorityLevel(rawValue: row.optional("priority_level") ?? "") ?? .p2,
-            category: row.optional("category") ?? "",
-            source: row.optional("source") ?? "",
-            goal: row.optional("goal") ?? "",
-            context: row.optional("context") ?? "",
-            acceptanceCriteria: JSONCoding.decodeArray(row.optional("acceptance_criteria_json")),
-            effort: BacklogEffort(rawValue: row.optional("effort") ?? "") ?? .unknown,
-            risk: BacklogRisk(rawValue: row.optional("risk") ?? "") ?? .unknown,
-            dependencies: row.optional("dependencies") ?? "",
-            nonGoals: row.optional("non_goals") ?? "",
-            suggestedTaskSplit: row.optional("suggested_task_split") ?? "",
-            recommendedNextAction: row.optional("recommended_next_action") ?? "",
-            status: BacklogIdeaStatus(rawValue: row.optional("status") ?? "") ?? .idea,
-            linkedTaskId: row.optional("linked_task_id"),
             createdAt: DateCoding.date(from: row.required("created_at")),
             updatedAt: DateCoding.date(from: row.required("updated_at"))
         )

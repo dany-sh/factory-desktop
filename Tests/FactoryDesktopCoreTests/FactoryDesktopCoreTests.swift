@@ -200,7 +200,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(try decoder.decode(CodexSessionLink.self, from: encoder.encode(sessionLink)), sessionLink)
     }
 
-    func testRunnerAndBacklogModelsRoundTripThroughCodable() throws {
+    func testRunnerAndFactoryTaskWorkItemModelsRoundTripThroughCodable() throws {
         let link = RunnerSessionLink(
             id: "runner-link",
             projectId: "project",
@@ -216,30 +216,33 @@ final class FactoryDesktopCoreTests: XCTestCase {
             lastSummary: "Attached.",
             transcriptPath: "/tmp/transcript.log"
         )
-        let idea = BacklogIdea(
-            id: "idea",
+        let task = FactoryTask(
+            id: "task",
             projectId: "project",
             title: "Queue item",
-            priorityLevel: .p1,
-            category: "product",
-            source: "user",
-            goal: "Ship a queue",
-            context: "Need runner orchestration.",
-            acceptanceCriteria: ["Top 3 next work", "Scope ideas"],
+            kind: .idea,
+            triageStatus: .needsScoping,
+            readiness: .scoped,
+            priorityLabel: .high,
             effort: .medium,
             risk: .low,
+            source: "user",
+            category: "product",
+            scopingNotes: "Needs a tight first slice.",
             dependencies: "none",
             nonGoals: "kanban",
-            suggestedTaskSplit: "UI first",
-            recommendedNextAction: "Promote when scoped",
-            status: .readyToPromote
+            suggestedSplit: "UI first",
+            recommendedNextAction: "Make executable.",
+            goal: "Ship a queue",
+            context: "Need runner orchestration.",
+            acceptanceCriteria: ["Top 3 next work", "Scope ideas"]
         )
 
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
         XCTAssertEqual(try decoder.decode(RunnerSessionLink.self, from: encoder.encode(link)), link)
-        XCTAssertEqual(try decoder.decode(BacklogIdea.self, from: encoder.encode(idea)), idea)
+        XCTAssertEqual(try decoder.decode(FactoryTask.self, from: encoder.encode(task)), task)
     }
 
     func testRunDirectoryUsesFullTaskID() {
@@ -2006,6 +2009,117 @@ final class FactoryDesktopCoreTests: XCTestCase {
         ]))
     }
 
+    func testMigrationConvertsLegacyBacklogIdeasIntoFactoryTasks() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("factory-desktop-tests-\(UUID().uuidString)", isDirectory: true)
+        let paths = FactoryPaths(root: root)
+        try paths.ensureBaseDirectories()
+        let database = try SQLiteDatabase(url: paths.database)
+        try database.executeScript(
+            """
+            CREATE TABLE schema_migrations (
+              version INTEGER PRIMARY KEY,
+              name TEXT NOT NULL,
+              checksum TEXT NOT NULL,
+              applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_migrations (version, name, checksum, applied_at)
+            VALUES
+              (1, 'legacy', '', '2026-01-01T00:00:00Z'),
+              (2, 'legacy', '', '2026-01-01T00:00:00Z'),
+              (3, 'legacy', '', '2026-01-01T00:00:00Z'),
+              (4, 'legacy', '', '2026-01-01T00:00:00Z'),
+              (5, 'legacy', '', '2026-01-01T00:00:00Z'),
+              (6, 'legacy', '', '2026-01-01T00:00:00Z'),
+              (7, 'legacy', '', '2026-01-01T00:00:00Z');
+
+            CREATE TABLE projects (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              type TEXT NOT NULL,
+              path TEXT NOT NULL UNIQUE,
+              default_branch TEXT DEFAULT 'main',
+              test_commands_json TEXT DEFAULT '[]',
+              metadata_json TEXT DEFAULT '{}',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE tasks (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              title TEXT NOT NULL,
+              type TEXT NOT NULL DEFAULT 'coding',
+              status TEXT NOT NULL DEFAULT 'inbox',
+              priority TEXT NOT NULL DEFAULT 'normal',
+              goal TEXT DEFAULT '',
+              context TEXT DEFAULT '',
+              acceptance_criteria_json TEXT DEFAULT '[]',
+              local_branch TEXT,
+              codex_branch TEXT,
+              local_worktree_path TEXT,
+              codex_worktree_path TEXT,
+              local_base_branch_commit TEXT,
+              codex_base_branch_commit TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE backlog_ideas (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              title TEXT NOT NULL,
+              priority_level TEXT NOT NULL DEFAULT 'p2',
+              category TEXT DEFAULT '',
+              source TEXT DEFAULT '',
+              goal TEXT DEFAULT '',
+              context TEXT DEFAULT '',
+              acceptance_criteria_json TEXT DEFAULT '[]',
+              effort TEXT NOT NULL DEFAULT 'unknown',
+              risk TEXT NOT NULL DEFAULT 'unknown',
+              dependencies TEXT DEFAULT '',
+              non_goals TEXT DEFAULT '',
+              suggested_task_split TEXT DEFAULT '',
+              recommended_next_action TEXT DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'idea',
+              linked_task_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            INSERT INTO projects (id, name, type, path, created_at, updated_at)
+            VALUES ('project', 'Demo', 'code_repo', '/tmp/demo', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+
+            INSERT INTO backlog_ideas (
+              id, project_id, title, priority_level, category, source, goal, context, acceptance_criteria_json,
+              effort, risk, dependencies, non_goals, suggested_task_split, recommended_next_action, status,
+              created_at, updated_at
+            )
+            VALUES (
+              'idea-1', 'project', 'Runner queue', 'p0', 'product', 'user', 'Ship runner queue',
+              'Needs scoping.', '["Executable acceptance"]', 'medium', 'low', 'none', 'no autonomy',
+              'Split later', 'Dispatch after scoping', 'ready_to_promote',
+              '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'
+            );
+            """
+        )
+
+        try MigrationRunner(database: database, paths: paths).migrate()
+        let repository = FactoryRepository(database: database)
+        let task = try XCTUnwrap(repository.tasks(projectId: "project").first)
+        XCTAssertEqual(task.id, "idea-1")
+        XCTAssertEqual(task.kind, .idea)
+        XCTAssertEqual(task.triageStatus, .ready)
+        XCTAssertEqual(task.readiness, .executable)
+        XCTAssertEqual(task.priorityLabel, .critical)
+        XCTAssertEqual(task.effort, .medium)
+        XCTAssertEqual(task.risk, .low)
+        XCTAssertEqual(task.source, "user")
+        XCTAssertEqual(task.category, "product")
+        XCTAssertEqual(task.suggestedSplit, "Split later")
+        XCTAssertEqual(task.acceptanceCriteria, ["Executable acceptance"])
+    }
+
     func testRepositoryPersistsCodexProjectLink() throws {
         let fixture = try makeRepositoryFixture()
         let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
@@ -2097,20 +2211,35 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertTrue(try fixture.repository.codexSessionLinks(projectId: project.id).contains { $0.id == first.id && $0.taskId == nil && $0.status == .paused })
     }
 
-    func testRepositoryPersistsBacklogIdeasAndNullableRuns() throws {
+    func testRepositoryPersistsFactoryTaskWorkItemMetadataAndNullableRuns() throws {
         let fixture = try makeRepositoryFixture()
         let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
         try fixture.repository.upsert(project: project)
 
-        let idea = BacklogIdea(
-            id: "idea-1",
+        let task = FactoryTask(
+            id: "task-1",
             projectId: project.id,
             title: "Runner orchestration",
-            priorityLevel: .p0,
+            type: .planning,
+            status: .backlog,
+            priority: .urgent,
+            kind: .idea,
+            triageStatus: .backlog,
+            readiness: .raw,
+            priorityLabel: .critical,
+            effort: .medium,
+            risk: .low,
+            source: "user",
+            category: "product",
+            scopingNotes: "Scope before dispatch.",
+            dependencies: "none",
+            nonGoals: "autonomy",
+            suggestedSplit: "Runner first",
+            recommendedNextAction: "Scope with runner.",
             goal: "Scope runner abstraction",
             acceptanceCriteria: ["Generic provider layer"]
         )
-        try fixture.repository.upsert(backlogIdea: idea)
+        try fixture.repository.upsert(task: task)
 
         let run = RunRecord(
             id: "run-1",
@@ -2126,11 +2255,15 @@ final class FactoryDesktopCoreTests: XCTestCase {
         )
         try fixture.repository.upsert(run: run)
 
-        let storedIdea = try XCTUnwrap(fixture.repository.backlogIdeas(projectId: project.id).first)
-        XCTAssertEqual(storedIdea.id, idea.id)
-        XCTAssertEqual(storedIdea.title, idea.title)
-        XCTAssertEqual(storedIdea.priorityLevel, .p0)
-        XCTAssertEqual(storedIdea.acceptanceCriteria, ["Generic provider layer"])
+        let storedTask = try XCTUnwrap(fixture.repository.tasks(projectId: project.id).first)
+        XCTAssertEqual(storedTask.id, task.id)
+        XCTAssertEqual(storedTask.title, task.title)
+        XCTAssertEqual(storedTask.kind, .idea)
+        XCTAssertEqual(storedTask.triageStatus, .backlog)
+        XCTAssertEqual(storedTask.readiness, .raw)
+        XCTAssertEqual(storedTask.priorityLabel, .critical)
+        XCTAssertEqual(storedTask.acceptanceCriteria, ["Generic provider layer"])
+        XCTAssertEqual(storedTask.suggestedSplit, "Runner first")
         XCTAssertEqual(try fixture.repository.runs(projectId: project.id).first?.taskId, nil)
     }
 
@@ -2249,12 +2382,20 @@ final class FactoryDesktopCoreTests: XCTestCase {
     }
 
     @MainActor
-    func testScopingBacklogIdeaUpdatesStructuredFields() async throws {
+    func testScopingWorkItemUpdatesSameFactoryTask() async throws {
         let fixture = try makeRepositoryFixture()
         let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
-        let idea = BacklogIdea(id: "idea", projectId: project.id, title: "Runner queue")
+        let task = FactoryTask(
+            id: "task",
+            projectId: project.id,
+            title: "Runner queue",
+            type: .planning,
+            kind: .idea,
+            triageStatus: .backlog,
+            readiness: .raw
+        )
         try fixture.repository.upsert(project: project)
-        try fixture.repository.upsert(backlogIdea: idea)
+        try fixture.repository.upsert(task: task)
 
         let service = CodexCLIService { request in
             CommandResult(
@@ -2263,12 +2404,15 @@ final class FactoryDesktopCoreTests: XCTestCase {
                 standardOutput: """
                 {
                   "title": "Runner queue orchestration",
+                  "kind": "feature",
                   "goal": "Add a generic runner queue.",
                   "acceptanceCriteria": ["Top 3 next work", "Dispatch task"],
-                  "priorityLevel": "p1",
+                  "priorityLabel": "high",
+                  "readiness": "executable",
                   "effort": "medium",
                   "risk": "low",
-                  "recommendedNextAction": "Promote into a task."
+                  "suggestedSplit": "None needed.",
+                  "recommendedNextAction": "Dispatch with runner."
                 }
                 """,
                 standardError: ""
@@ -2277,45 +2421,49 @@ final class FactoryDesktopCoreTests: XCTestCase {
 
         let store = AppStore(paths: fixture.paths, codexCLIService: service)
         store.selectedProjectID = project.id
-        store.selectBacklogIdea(idea.id)
-        await store.scopeBacklogIdea()
+        store.selectTask(task.id)
+        await store.scopeWorkItem()
 
-        let updated = try XCTUnwrap(fixture.repository.backlogIdeas(projectId: project.id).first)
+        let updated = try XCTUnwrap(fixture.repository.tasks(projectId: project.id).first)
         XCTAssertEqual(updated.title, "Runner queue orchestration")
+        XCTAssertEqual(updated.kind, .feature)
         XCTAssertEqual(updated.goal, "Add a generic runner queue.")
-        XCTAssertEqual(updated.priorityLevel, .p1)
-        XCTAssertEqual(updated.status, .readyToPromote)
+        XCTAssertEqual(updated.priorityLabel, .high)
+        XCTAssertEqual(updated.readiness, .executable)
+        XCTAssertEqual(updated.triageStatus, .ready)
         XCTAssertEqual(updated.acceptanceCriteria, ["Top 3 next work", "Dispatch task"])
     }
 
     @MainActor
-    func testPromotingBacklogIdeaCreatesTask() async throws {
+    func testDispatchBlocksRawWorkItemWithoutPromotion() async throws {
         let fixture = try makeRepositoryFixture()
         let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
-        let idea = BacklogIdea(
-            id: "idea",
+        let task = FactoryTask(
+            id: "task",
             projectId: project.id,
             title: "Runner queue",
-            priorityLevel: .p0,
+            type: .planning,
+            status: .backlog,
+            priority: .urgent,
+            kind: .idea,
+            triageStatus: .backlog,
+            readiness: .raw,
+            priorityLabel: .critical,
             goal: "Ship the queue",
             context: "Need queue and ranking.",
             acceptanceCriteria: ["Project dashboard top 3"]
         )
         try fixture.repository.upsert(project: project)
-        try fixture.repository.upsert(backlogIdea: idea)
+        try fixture.repository.upsert(task: task)
 
         let store = AppStore(paths: fixture.paths)
         store.selectedProjectID = project.id
-        store.selectBacklogIdea(idea.id)
-        await store.promoteSelectedBacklogIdeaToTask()
+        store.selectTask(task.id)
+        await store.dispatchTask()
 
-        let promotedIdea = try XCTUnwrap(fixture.repository.backlogIdeas(projectId: project.id).first)
-        let task = try XCTUnwrap(fixture.repository.tasks(projectId: project.id).first)
-        XCTAssertEqual(promotedIdea.status, .promoted)
-        XCTAssertEqual(promotedIdea.linkedTaskId, task.id)
-        XCTAssertEqual(task.priority, .urgent)
-        XCTAssertEqual(task.goal, idea.goal)
-        XCTAssertEqual(task.acceptanceCriteria, idea.acceptanceCriteria)
+        XCTAssertEqual(store.errorMessage, "Scope this work item until readiness is executable before dispatch.")
+        XCTAssertEqual(try fixture.repository.tasks(projectId: project.id).count, 1)
+        XCTAssertTrue(try fixture.repository.runs(taskId: task.id).isEmpty)
     }
 
     @MainActor

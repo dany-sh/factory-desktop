@@ -35,13 +35,6 @@ public struct FactoryPaths: Equatable {
             .appendingPathComponent("artifacts", isDirectory: true)
     }
 
-    public func backlogIdeaRunDirectory(project: Project, idea: BacklogIdea) -> URL {
-        runs
-            .appendingPathComponent(Slug.make(project.name), isDirectory: true)
-            .appendingPathComponent("ideas", isDirectory: true)
-            .appendingPathComponent(idea.id, isDirectory: true)
-    }
-
     public func worktreeDirectory(project: Project, task: FactoryTask, flavor: WorktreeFlavor) -> URL {
         worktrees
             .appendingPathComponent(Slug.make(project.name), isDirectory: true)
