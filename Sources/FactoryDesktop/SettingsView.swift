@@ -85,6 +85,27 @@ struct SettingsView: View {
                 SettingsRow(title: "Selected project", value: store.selectedProject?.name ?? "None")
                 SettingsRow(title: "Selected task", value: store.selectedTask?.title ?? "None")
             }
+        case .updates:
+            settingsGroup("App Updates") {
+                SettingsRow(title: "Status", value: updateStatusLabel)
+                SettingsRow(title: "Details", value: store.appUpdateStatus.message)
+                SettingsRow(title: "Running build", value: "\(store.buildInfo.shortSHA) @ launch", monospacedValue: true)
+                if let detectedBuild = store.appUpdateStatus.detectedBuildInfo {
+                    SettingsRow(title: "Detected checkout", value: detectedBuild.shortSHA, monospacedValue: true)
+                }
+                if let checkedAt = store.appUpdateStatus.lastCheckedAt {
+                    SettingsRow(title: "Last checked", value: checkedAt.formatted(date: .abbreviated, time: .standard))
+                }
+                HStack(spacing: 12) {
+                    Button("Check Now") {
+                        Task { await store.refreshAppUpdateStatus() }
+                    }
+                    Button(store.appUpdateStatus.isApplying ? "Updating..." : "Update Factory Desktop") {
+                        Task { await store.applyAppUpdate() }
+                    }
+                    .disabled(!store.appUpdateStatus.isUpdateAvailable || store.appUpdateStatus.isApplying)
+                }
+            }
         case .models:
             settingsGroup("Local Model Policy") {
                 Picker("Default planner model", selection: $store.selectedModel) {
@@ -148,6 +169,19 @@ struct SettingsView: View {
                 SettingsRow(title: "Launch timestamp", value: store.buildInfo.launchTimestamp.formatted(date: .abbreviated, time: .standard))
                 SettingsRow(title: "Database", value: store.paths.database.path, monospacedValue: true)
             }
+        }
+    }
+
+    private var updateStatusLabel: String {
+        switch store.appUpdateStatus.availability {
+        case .checking:
+            return "Checking"
+        case .upToDate:
+            return "Up to date"
+        case .available:
+            return "Update available"
+        case .applying:
+            return "Applying update"
         }
     }
 

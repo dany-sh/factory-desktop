@@ -13,6 +13,7 @@ public struct BuildInfo: Equatable, Codable {
     public var branch: String
     public var shortSHA: String
     public var repoState: RepoState
+    public var sourceSignature: String
     public var repoPath: String
     public var launchTimestamp: Date
 
@@ -21,6 +22,7 @@ public struct BuildInfo: Equatable, Codable {
         branch: String,
         shortSHA: String,
         repoState: RepoState,
+        sourceSignature: String,
         repoPath: String,
         launchTimestamp: Date
     ) {
@@ -28,6 +30,7 @@ public struct BuildInfo: Equatable, Codable {
         self.branch = branch
         self.shortSHA = shortSHA
         self.repoState = repoState
+        self.sourceSignature = sourceSignature
         self.repoPath = repoPath
         self.launchTimestamp = launchTimestamp
     }
@@ -53,6 +56,7 @@ public struct BuildInfo: Equatable, Codable {
             branch: BuildInfoService.unknownValue,
             shortSHA: BuildInfoService.unknownValue,
             repoState: .unknown,
+            sourceSignature: BuildInfoService.unknownValue,
             repoPath: repoPath,
             launchTimestamp: launchTimestamp
         )
@@ -78,16 +82,19 @@ public enum BuildInfoService {
                 branch: unknownValue,
                 shortSHA: unknownValue,
                 repoState: .unknown,
+                sourceSignature: unknownValue,
                 repoPath: repoPath,
                 launchTimestamp: launchTimestamp
             )
         }
 
+        let normalizedShortSHA = normalizedGitValue(shortSHA)
         return BuildInfo(
             appVersion: appVersion,
             branch: normalizedGitValue(branch),
-            shortSHA: normalizedGitValue(shortSHA),
+            shortSHA: normalizedShortSHA,
             repoState: repoState(fromPorcelainOutput: porcelain),
+            sourceSignature: sourceSignature(shortSHA: normalizedShortSHA, porcelainOutput: porcelain),
             repoPath: repoPath,
             launchTimestamp: launchTimestamp
         )
@@ -101,6 +108,12 @@ public enum BuildInfoService {
     public static func normalizedGitValue(_ output: String?) -> String {
         let value = output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return value.isEmpty ? unknownValue : value
+    }
+
+    public static func sourceSignature(shortSHA: String, porcelainOutput: String?) -> String {
+        let normalizedSHA = normalizedGitValue(shortSHA)
+        let rawPorcelain = porcelainOutput ?? ""
+        return "\(normalizedSHA):\(stableDigest(rawPorcelain))"
     }
 
     private static func appVersion(bundle: Bundle = .main) -> String {
@@ -133,5 +146,14 @@ public enum BuildInfoService {
         } catch {
             return nil
         }
+    }
+
+    private static func stableDigest(_ value: String) -> String {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in value.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 0x100000001b3
+        }
+        return String(format: "%016llx", hash)
     }
 }

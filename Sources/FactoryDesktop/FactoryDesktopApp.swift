@@ -6,7 +6,9 @@ import SwiftUI
 @main
 struct FactoryDesktopApp: App {
     @NSApplicationDelegateAdaptor(FactoryDesktopAppDelegate.self) private var appDelegate
-    @StateObject private var store = AppStore()
+    @StateObject private var store = AppStore(appTerminator: {
+        NSApp.terminate(nil)
+    })
     @StateObject private var router = AppRouter()
 
     var body: some Scene {
@@ -72,6 +74,15 @@ struct FactoryDesktopApp: App {
                     Task { await store.refreshGitStatus() }
                 }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
+
+                Button("Check App Updates") {
+                    Task { await store.refreshAppUpdateStatus() }
+                }
+
+                Button("Update Factory Desktop") {
+                    Task { await store.applyAppUpdate() }
+                }
+                .disabled(!store.appUpdateStatus.isUpdateAvailable || store.appUpdateStatus.isApplying)
             }
         }
     }

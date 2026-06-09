@@ -2,6 +2,7 @@ import FactoryDesktopCore
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var store: AppStore
     @EnvironmentObject private var router: AppRouter
 
@@ -33,7 +34,13 @@ struct ContentView: View {
             Text(store.errorMessage ?? "")
         }
         .task {
+            store.startAppUpdateMonitoring()
+            await store.refreshAppUpdateStatus()
             await store.refreshGitStatus()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .active else { return }
+            Task { await store.refreshAppUpdateStatus() }
         }
     }
 

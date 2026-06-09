@@ -25,6 +25,7 @@ public final class AppStore: ObservableObject {
     @Published public private(set) var codexSessionLinks: [CodexSessionLink] = []
     @Published public private(set) var latestCodexSessionRecommendation: CodexSessionResultRecommendation?
     @Published public private(set) var buildInfo: BuildInfo
+    @Published public private(set) var appUpdateStatus: AppUpdateStatus = AppUpdateStatus()
     @Published public var selectedRunOutput: String = ""
     @Published public var selectedWorkspaceScope: WorkspaceSelectionScope = .project
     @Published public var statusMessage: String = ""
@@ -44,6 +45,11 @@ public final class AppStore: ObservableObject {
     private var gitService: GitService?
     private var ollamaClient: OllamaClient
     private var handoffService: HandoffService
+    private let currentBuildInfoProvider: () -> BuildInfo
+    private let appRelauncher: () throws -> Void
+    private let appTerminator: () -> Void
+    private var appUpdateMonitorTask: Task<Void, Never>?
+    private var isAppUpdateMonitoring = false
     public var selectedProject: Project? {
         guard let selectedProjectID else { return projects.first }
         return projects.first { $0.id == selectedProjectID }
@@ -241,10 +247,16 @@ public final class AppStore: ObservableObject {
 
     public init(
         paths: FactoryPaths = FactoryPaths(),
-        codexCLIService: CodexCLIService? = nil
+        codexCLIService: CodexCLIService? = nil,
+        currentBuildInfoProvider: @escaping () -> BuildInfo = { BuildInfoService.current(launchTimestamp: Date()) },
+        appRelauncher: @escaping () throws -> Void = { try AppUpdateService.relaunchCurrentApplication() },
+        appTerminator: @escaping () -> Void = {}
     ) {
         self.paths = paths
-        self.buildInfo = BuildInfoService.current(launchTimestamp: Date())
+        self.currentBuildInfoProvider = currentBuildInfoProvider
+        self.appRelauncher = appRelauncher
+        self.appTerminator = appTerminator
+        self.buildInfo = currentBuildInfoProvider()
         self.commandRunner = CommandRunner()
         self.codexCLIService = codexCLIService ?? CodexCLIService(commandRunner: commandRunner)
         self.runnerAdapters = [:]
@@ -264,6 +276,10 @@ public final class AppStore: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    deinit {
+        appUpdateMonitorTask?.cancel()
     }
 
     public func reload() throws {
@@ -295,6 +311,83 @@ public final class AppStore: ObservableObject {
             taskEvents = []
         }
         try reloadCodexLinks()
+    }
+
+    public func startAppUpdateMonitoring() {
+        guard !isAppUpdateMonitoring else { return }
+        isAppUpdateMonitoring = true
+        appUpdateMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.refreshAppUpdateStatus()
+                try? await Task.sleep(for: .seconds(15))
+            }
+        }
+    }
+
+    public func refreshAppUpdateStatus() async {
+        guard appUpdateStatus.isApplying == false else { return }
+        let checkedAt = Date()
+        let launchedBuildInfo = buildInfo
+        let currentBuildInfo = await Task.detached(priority: .utility) { [currentBuildInfoProvider] in
+            currentBuildInfoProvider()
+        }.value
+        appUpdateStatus = AppUpdateService.evaluate(
+            launched: launchedBuildInfo,
+            current: currentBuildInfo,
+            checkedAt: checkedAt
+        )
+    }
+
+    public func applyAppUpdate() async {
+        guard !appUpdateStatus.isApplying else { return }
+
+        isWorking = true
+        errorMessage = nil
+        appUpdateStatus = AppUpdateStatus(
+            availability: .applying,
+            message: "Building Factory Desktop...",
+            detectedBuildInfo: appUpdateStatus.detectedBuildInfo,
+            lastCheckedAt: Date()
+        )
+        statusMessage = "Factory Desktop update running..."
+
+        do {
+            let sourceRoot = SelfRepoLocator.sourceRoot
+            let buildResult = try await commandRunner.run(CommandRequest(
+                executable: "swift",
+                arguments: ["build"],
+                workingDirectory: sourceRoot
+            ))
+            guard buildResult.succeeded else {
+                throw FactoryError.commandFailed(buildResult.output)
+            }
+
+            appUpdateStatus = AppUpdateStatus(
+                availability: .applying,
+                message: "Running Factory Desktop tests...",
+                detectedBuildInfo: appUpdateStatus.detectedBuildInfo,
+                lastCheckedAt: Date()
+            )
+
+            let testResult = try await commandRunner.run(CommandRequest(
+                executable: "swift",
+                arguments: ["test"],
+                workingDirectory: sourceRoot
+            ))
+            guard testResult.succeeded else {
+                throw FactoryError.commandFailed(testResult.output)
+            }
+
+            try appRelauncher()
+            statusMessage = "Factory Desktop updated. Restarting into the new build..."
+            appTerminator()
+        } catch {
+            errorMessage = error.localizedDescription
+            statusMessage = "Factory Desktop update failed."
+            await refreshAppUpdateStatus()
+        }
+
+        isWorking = false
     }
 
     private func reloadCodexLinks() throws {

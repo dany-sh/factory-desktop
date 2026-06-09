@@ -87,6 +87,28 @@ struct SidebarView: View {
             .listStyle(.sidebar)
 
             VStack(spacing: 8) {
+                if store.appUpdateStatus.isUpdateAvailable || store.appUpdateStatus.isApplying {
+                    Button {
+                        if store.appUpdateStatus.isUpdateAvailable {
+                            Task { await store.applyAppUpdate() }
+                        } else {
+                            router.openSettings(.updates)
+                        }
+                    } label: {
+                        Label(
+                            store.appUpdateStatus.isApplying ? "Updating Factory Desktop" : "Update Factory Desktop",
+                            systemImage: "arrow.trianglehead.clockwise"
+                        )
+                        .frame(maxWidth: .infinity)
+                    }
+                    .disabled(store.appUpdateStatus.isApplying)
+
+                    Text(store.appUpdateStatus.message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
                 Button {
                     router.openSettings(.general)
                 } label: {

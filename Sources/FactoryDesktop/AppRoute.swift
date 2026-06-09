@@ -2,6 +2,7 @@ import SwiftUI
 
 enum SettingsSection: String, CaseIterable, Identifiable {
     case general
+    case updates
     case models
     case storage
     case safety
@@ -15,6 +16,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .general: "General"
+        case .updates: "Updates"
         case .models: "Models"
         case .storage: "Storage"
         case .safety: "Safety"
@@ -28,6 +30,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .general: "gearshape"
+        case .updates: "arrow.trianglehead.clockwise"
         case .models: "cpu"
         case .storage: "internaldrive"
         case .safety: "lock.shield"

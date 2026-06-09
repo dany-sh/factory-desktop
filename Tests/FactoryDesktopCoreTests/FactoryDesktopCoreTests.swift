@@ -2029,6 +2029,15 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(BuildInfoService.normalizedGitValue(nil), "unknown")
     }
 
+    func testBuildInfoSourceSignatureChangesWhenWorktreeChanges() {
+        let clean = BuildInfoService.sourceSignature(shortSHA: "abc123", porcelainOutput: "")
+        let dirty = BuildInfoService.sourceSignature(shortSHA: "abc123", porcelainOutput: " M Sources/App.swift\n")
+        let nextCommit = BuildInfoService.sourceSignature(shortSHA: "def456", porcelainOutput: "")
+
+        XCTAssertNotEqual(clean, dirty)
+        XCTAssertNotEqual(clean, nextCommit)
+    }
+
     func testBuildInfoCompactsWorktreeBranchForSidebar() {
         XCTAssertEqual(BuildInfo.compactBranchName("main"), "main")
         XCTAssertEqual(BuildInfo.compactBranchName("codex/88CE8956-add-visible-build-and-run-identity"), "codex/88CE8956")
@@ -2047,6 +2056,61 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(info.repoPath, missingRepo.path)
         XCTAssertEqual(info.launchTimestamp, timestamp)
         XCTAssertFalse(info.appVersion.isEmpty)
+    }
+
+    func testAppUpdateServiceDetectsUpdatedCheckout() {
+        let launchTime = Date(timeIntervalSince1970: 1_700_000_000)
+        let launched = BuildInfo(
+            appVersion: "0.1.0",
+            branch: "main",
+            shortSHA: "abc123",
+            repoState: .clean,
+            sourceSignature: BuildInfoService.sourceSignature(shortSHA: "abc123", porcelainOutput: ""),
+            repoPath: "/tmp/factory-desktop",
+            launchTimestamp: launchTime
+        )
+        let current = BuildInfo(
+            appVersion: "0.1.0",
+            branch: "main",
+            shortSHA: "def456",
+            repoState: .clean,
+            sourceSignature: BuildInfoService.sourceSignature(shortSHA: "def456", porcelainOutput: ""),
+            repoPath: "/tmp/factory-desktop",
+            launchTimestamp: launchTime
+        )
+
+        let status = AppUpdateService.evaluate(launched: launched, current: current)
+
+        XCTAssertEqual(status.availability, .available)
+        XCTAssertTrue(status.message.contains("abc123 -> def456"))
+    }
+
+    func testAppUpdateServiceTreatsMatchingSourceSignatureAsUpToDate() {
+        let launchTime = Date(timeIntervalSince1970: 1_700_000_000)
+        let signature = BuildInfoService.sourceSignature(shortSHA: "abc123", porcelainOutput: " M Sources/App.swift\n")
+        let launched = BuildInfo(
+            appVersion: "0.1.0",
+            branch: "main",
+            shortSHA: "abc123",
+            repoState: .dirty,
+            sourceSignature: signature,
+            repoPath: "/tmp/factory-desktop",
+            launchTimestamp: launchTime
+        )
+        let current = BuildInfo(
+            appVersion: "0.1.0",
+            branch: "main",
+            shortSHA: "abc123",
+            repoState: .dirty,
+            sourceSignature: signature,
+            repoPath: "/tmp/factory-desktop",
+            launchTimestamp: launchTime
+        )
+
+        let status = AppUpdateService.evaluate(launched: launched, current: current)
+
+        XCTAssertEqual(status.availability, .upToDate)
+        XCTAssertEqual(status.message, "Factory Desktop is up to date.")
     }
 
     func testMigrationCreatesInitialTables() throws {
