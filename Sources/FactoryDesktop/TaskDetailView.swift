@@ -1,4 +1,5 @@
 import FactoryDesktopCore
+import MarkdownUI
 import SwiftUI
 
 struct TaskDetailView: View {
@@ -601,16 +602,6 @@ struct TaskDetailView: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.orange)
                 }
-            } else if !store.latestTaskStateReviewText.isEmpty {
-                ScrollView {
-                    Text(store.latestTaskStateReviewText)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding()
-                }
-                .frame(minHeight: 180)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
             } else {
                 Text("Review Task State to summarize artifacts, worktrees, preflight, tests, diff review, and the next action.")
                     .foregroundStyle(.secondary)
@@ -699,7 +690,7 @@ struct TaskDetailView: View {
                     Text("No saved plan yet.")
                         .foregroundStyle(.secondary)
                 } else {
-                    markdownBox(store.currentPlanText, minHeight: 320)
+                    primaryMarkdownBox(store.currentPlanText, minHeight: 320)
                 }
 
                 if !store.latestPlanReviewText.isEmpty {
@@ -717,7 +708,15 @@ struct TaskDetailView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    markdownBox(store.latestPlanReviewText, minHeight: 180)
+                    if let artifact = store.latestPlanReviewArtifact {
+                        HStack {
+                            Text("Open the full review in a separate markdown window.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            artifactPath(artifact)
+                        }
+                    }
                 }
             }
             .padding()
@@ -784,7 +783,9 @@ struct TaskDetailView: View {
                     Text("No test output artifact yet.")
                         .foregroundStyle(.secondary)
                 } else {
-                    markdownBox(store.latestTestOutputText, minHeight: 240)
+                    Text("Test output is available as a separate artifact window instead of an inline dump.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding()
@@ -863,7 +864,9 @@ struct TaskDetailView: View {
                     Text("No diff review artifact yet.")
                         .foregroundStyle(.secondary)
                 } else {
-                    markdownBox(store.latestDiffReviewText, minHeight: 240)
+                    Text("Diff review is available as a separate markdown window instead of an inline duplicate.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding()
@@ -1079,11 +1082,10 @@ struct TaskDetailView: View {
         }
     }
 
-    private func markdownBox(_ text: String, minHeight: CGFloat) -> some View {
+    private func primaryMarkdownBox(_ text: String, minHeight: CGFloat) -> some View {
         ScrollView {
-            Text(text)
-                .font(.system(.body, design: .monospaced))
-                .textSelection(.enabled)
+            Markdown(text)
+                .markdownTheme(.gitHub)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding()
         }

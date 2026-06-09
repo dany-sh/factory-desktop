@@ -89,6 +89,10 @@ public final class AppStore: ObservableObject {
         return review.flatMap { try? String(contentsOfFile: $0.path, encoding: .utf8) } ?? ""
     }
 
+    public var latestPlanReviewArtifact: Artifact? {
+        latestArtifact(type: .codexPlanReview) ?? latestArtifact(type: .localPlanReview)
+    }
+
     public var latestTaskStateReviewArtifact: Artifact? {
         latestArtifact(type: .taskStateReview)
     }
