@@ -11,6 +11,7 @@ struct TaskDetailView: View {
     @State private var selectedStage: TaskWorkspaceStage = .write
     @State private var showTaskMetadata = false
     @State private var showAllArtifacts = false
+    @State private var editorSelectionText = ""
     @FocusState private var focusedField: TaskEditorField?
 
     var body: some View {
@@ -286,21 +287,7 @@ struct TaskDetailView: View {
                     .focused($focusedField, equals: .title)
             }
 
-            LabeledTextEditor(
-                title: "Brief",
-                text: $draft.brief,
-                minHeight: 310,
-                focusedField: $focusedField,
-                field: .brief
-            )
-
-            LabeledTextEditor(
-                title: "Acceptance criteria",
-                text: $acceptanceText,
-                minHeight: 128,
-                focusedField: $focusedField,
-                field: .acceptanceCriteria
-            )
+            richTaskEditorCanvas
 
             DisclosureGroup("Metadata, dependencies, and scope guards", isExpanded: $showTaskMetadata) {
                 taskMetadataEditor
@@ -390,11 +377,117 @@ struct TaskDetailView: View {
         }
     }
 
+    private var richTaskEditorCanvas: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Task Brief")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if editorSelectionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Select text to make AI edits more targeted.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Selection ready")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.green)
+                }
+            }
+            RichTaskEditorView(markdown: editorDocumentBinding, selectedText: $editorSelectionText)
+                .frame(minHeight: 520)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(.separator.opacity(0.55))
+                }
+        }
+    }
+
     private var writingAssistPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
+            editorAssistCard
             writingScoreCard
             sectionStarterCard
         }
+    }
+
+    private var editorAssistCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("AI Assist")
+                    .font(.headline)
+                Spacer()
+                if store.isEditorAssistRunning {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            Picker("Provider", selection: $store.selectedEditorAssistProvider) {
+                ForEach(store.editorAssistProviderOptions) { option in
+                    Text(option.isAvailable ? option.provider.displayName : "\(option.provider.displayName) · \(option.detail)")
+                        .tag(option.provider)
+                        .disabled(!option.isAvailable)
+                }
+            }
+            .labelsHidden()
+
+            LazyVGrid(columns: [GridItem(.flexible())], spacing: 7) {
+                ForEach(EditorAssistAction.allCases) { action in
+                    assistButton(action.displayName, systemImage: editorAssistIcon(for: action)) {
+                        Task {
+                            await store.runEditorAssist(
+                                action: action,
+                                documentMarkdown: editorDocumentMarkdown,
+                                selectedText: editorSelectionText
+                            )
+                        }
+                    }
+                    .disabled(!selectedEditorAssistProviderIsAvailable || store.isEditorAssistRunning)
+                }
+            }
+
+            if let suggestion = store.latestEditorAssistSuggestion {
+                Divider()
+                Text(suggestion.summary)
+                    .font(.caption.weight(.semibold))
+                ScrollView {
+                    Text(suggestion.replacementMarkdown)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 120)
+                .padding(8)
+                .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+                HStack {
+                    Button("Accept") {
+                        applyEditorSuggestion(suggestion, insertOnly: false)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button("Insert Below") {
+                        applyEditorSuggestion(suggestion, insertOnly: true)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Button("Reject") {
+                    store.clearEditorAssistSuggestion()
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+            } else if !selectedEditorAssistProviderIsAvailable {
+                Text("Selected provider is not configured yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(.separator.opacity(0.55))
+        )
     }
 
     private var writingScoreCard: some View {
@@ -452,6 +545,58 @@ struct TaskDetailView: View {
             RoundedRectangle(cornerRadius: 14)
                 .stroke(.separator.opacity(0.55))
         )
+    }
+
+    private var editorDocumentMarkdown: String {
+        TaskEditorDocument.markdown(brief: draft.brief, acceptanceText: acceptanceText)
+    }
+
+    private var editorDocumentBinding: Binding<String> {
+        Binding(
+            get: { editorDocumentMarkdown },
+            set: { updateEditorDocumentMarkdown($0) }
+        )
+    }
+
+    private var selectedEditorAssistProviderIsAvailable: Bool {
+        store.editorAssistProviderOptions.first { $0.provider == store.selectedEditorAssistProvider }?.isAvailable == true
+    }
+
+    private func updateEditorDocumentMarkdown(_ markdown: String) {
+        let document = TaskEditorDocument.parse(markdown)
+        draft.brief = document.brief
+        acceptanceText = document.acceptanceText
+    }
+
+    private func applyEditorSuggestion(_ suggestion: EditorAssistSuggestion, insertOnly: Bool) {
+        let current = editorDocumentMarkdown
+        let replacement = suggestion.replacementMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !replacement.isEmpty else { return }
+
+        if insertOnly {
+            let separator = current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
+            updateEditorDocumentMarkdown(current + separator + replacement)
+        } else {
+            let selection = editorSelectionText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !selection.isEmpty, let range = current.range(of: selection) {
+                var updated = current
+                updated.replaceSubrange(range, with: replacement)
+                updateEditorDocumentMarkdown(updated)
+            } else {
+                updateEditorDocumentMarkdown(replacement)
+            }
+        }
+        store.clearEditorAssistSuggestion()
+    }
+
+    private func editorAssistIcon(for action: EditorAssistAction) -> String {
+        switch action {
+        case .rewriteSelection: "wand.and.stars"
+        case .tightenGoal: "target"
+        case .findAmbiguity: "questionmark.bubble"
+        case .generateAcceptanceCriteria: "checklist"
+        case .splitTask: "square.split.2x1"
+        }
     }
 
     private func save(_ task: FactoryTask) {
@@ -1363,6 +1508,7 @@ struct TaskDetailView: View {
         acceptanceText = task.acceptanceCriteria.joined(separator: "\n")
         loadedTaskID = task.id
         focusedField = nil
+        editorSelectionText = ""
     }
 
     private func appendBriefSection(_ title: String, body: String) {

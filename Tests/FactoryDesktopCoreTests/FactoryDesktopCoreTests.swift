@@ -94,6 +94,69 @@ final class FactoryDesktopCoreTests: XCTestCase {
         }
     }
 
+    func testTaskEditorDocumentRoundTripsBriefAndAcceptanceCriteria() {
+        let brief = "## Goal\nMake task writing excellent.\n\n## Context\nThe old editor is plain."
+        let acceptance = "User can write rich task briefs.\nAI suggestions require review."
+
+        let markdown = TaskEditorDocument.markdown(brief: brief, acceptanceText: acceptance)
+        let parsed = TaskEditorDocument.parse(markdown)
+
+        XCTAssertEqual(parsed.brief, brief)
+        XCTAssertEqual(parsed.acceptanceText, acceptance)
+        XCTAssertTrue(markdown.contains("## Acceptance Criteria"))
+        XCTAssertTrue(markdown.contains("- User can write rich task briefs."))
+    }
+
+    func testTaskEditorDocumentParsesBulletAndNumberedAcceptanceCriteria() {
+        let markdown = """
+        ## Goal
+        Ship the editor.
+
+        ## Acceptance Criteria
+        - First item
+        * Second item
+        3. Third item
+        """
+
+        let parsed = TaskEditorDocument.parse(markdown)
+
+        XCTAssertEqual(parsed.brief, "## Goal\nShip the editor.")
+        XCTAssertEqual(parsed.acceptanceText, "First item\nSecond item\nThird item")
+    }
+
+    func testEditorAssistSuggestionParsesFencedMarkdown() {
+        let output = """
+        Tightened the goal and removed ambiguity.
+
+        ```markdown
+        ## Goal
+        Ship a review-first TinyMCE editor.
+        ```
+        """
+
+        let suggestion = EditorAssistSuggestion.parse(provider: .codex, action: .tightenGoal, output: output)
+
+        XCTAssertEqual(suggestion.provider, .codex)
+        XCTAssertEqual(suggestion.action, .tightenGoal)
+        XCTAssertEqual(suggestion.summary, "Tightened the goal and removed ambiguity.")
+        XCTAssertEqual(suggestion.replacementMarkdown, "## Goal\nShip a review-first TinyMCE editor.")
+    }
+
+    func testEditorAssistPromptUsesEditorAssistRunnerModeVocabulary() {
+        XCTAssertEqual(RunnerMode.editorAssist.rawValue, "editor_assist")
+
+        let prompt = EditorAssistPrompt.instruction(
+            action: .rewriteSelection,
+            taskTitle: "Editor",
+            documentMarkdown: "## Goal\nBetter editor",
+            selectedText: "Better editor"
+        )
+
+        XCTAssertTrue(prompt.contains("Suggest improvements only."))
+        XCTAssertTrue(prompt.contains("Rewrite Selection"))
+        XCTAssertTrue(prompt.contains("Better editor"))
+    }
+
     func testSlugIsStableAndBranchSafe() {
         XCTAssertEqual(Slug.make("Improve source controls UI"), "improve-source-controls-ui")
         XCTAssertEqual(Slug.make("   ***   "), "task")

@@ -27,6 +27,7 @@ public enum RunnerMode: String, CaseIterable, Codable, Identifiable, Sendable {
     case review
     case testDebug = "test_debug"
     case summary
+    case editorAssist = "editor_assist"
 
     public var id: String { rawValue }
 

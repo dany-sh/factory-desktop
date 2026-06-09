@@ -30,6 +30,9 @@ public final class AppStore: ObservableObject {
     @Published public var statusMessage: String = ""
     @Published public var errorMessage: String?
     @Published public var isWorking: Bool = false
+    @Published public var selectedEditorAssistProvider: RunnerProvider = .codex
+    @Published public private(set) var isEditorAssistRunning: Bool = false
+    @Published public private(set) var latestEditorAssistSuggestion: EditorAssistSuggestion?
 
     public let paths: FactoryPaths
 
@@ -222,6 +225,18 @@ public final class AppStore: ObservableObject {
         }
         guard project.type == .codeRepo, !hasExistingTaskWorktree(task) else { return nil }
         return "Create a task worktree before planning this code task."
+    }
+
+    public var editorAssistProviderOptions: [EditorAssistProviderOption] {
+        RunnerProvider.allCases
+            .filter { $0 != .manual && $0 != .unknown }
+            .map { provider in
+                if runnerAdapters[provider] != nil {
+                    EditorAssistProviderOption(provider: provider, isAvailable: true, detail: "Available")
+                } else {
+                    EditorAssistProviderOption(provider: provider, isAvailable: false, detail: "Not configured")
+                }
+            }
     }
 
     public init(
@@ -1371,6 +1386,91 @@ public final class AppStore: ObservableObject {
             try? repository.upsert(run: run)
             errorMessage = error.localizedDescription
         }
+    }
+
+    public func runEditorAssist(action: EditorAssistAction, documentMarkdown: String, selectedText: String) async {
+        guard let repository, let project = selectedProject, let task = selectedTask else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        let provider = selectedEditorAssistProvider
+        guard let adapter = runnerAdapters[provider] else {
+            errorMessage = "AI assist provider \(provider.displayName) is not configured."
+            return
+        }
+
+        isEditorAssistRunning = true
+        isWorking = true
+        defer {
+            isEditorAssistRunning = false
+            isWorking = false
+        }
+
+        let instruction = EditorAssistPrompt.instruction(
+            action: action,
+            taskTitle: task.title,
+            documentMarkdown: documentMarkdown,
+            selectedText: selectedText
+        )
+        let directory = paths.runDirectory(project: project, task: task)
+        let promptURL = directory.appendingPathComponent("\(task.id.shortID)-editor-assist-prompt.md")
+        let outputURL = directory.appendingPathComponent("\(task.id.shortID)-editor-assist-output.log")
+        var run = RunRecord(
+            projectId: project.id,
+            taskId: task.id,
+            executor: "\(provider.rawValue)_editor_assist",
+            model: selectedRunnerProjectLink?.preferredModelProfile?.modelName,
+            status: .running,
+            promptPath: promptURL.path,
+            outputPath: outputURL.path,
+            summary: "Editor assist: \(action.displayName)"
+        )
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try instruction.write(to: promptURL, atomically: true, encoding: .utf8)
+            try repository.upsert(run: run)
+            try reloadRunsAndArtifacts()
+
+            let request = RunnerRequest(
+                provider: provider,
+                mode: .editorAssist,
+                workspacePath: runnerWorkspacePath(project: project, task: task),
+                taskID: task.id,
+                instruction: instruction,
+                modelProfile: selectedRunnerProjectLink?.preferredModelProfile,
+                sandboxMode: .readOnly
+            )
+            let result = try await adapter.execute(request)
+            try result.output.write(to: outputURL, atomically: true, encoding: .utf8)
+
+            run.status = result.succeeded ? .succeeded : .failed
+            run.command = result.command.displayString
+            run.exitCode = Int(result.exitCode)
+            run.summary = result.summary
+            run.endedAt = result.endedAt
+            try repository.upsert(run: run)
+            try reloadRunsAndArtifacts()
+
+            selectedRunOutput = result.output
+            if result.succeeded {
+                latestEditorAssistSuggestion = EditorAssistSuggestion.parse(provider: provider, action: action, output: result.output)
+                statusMessage = "Editor assist suggestion ready."
+            } else {
+                errorMessage = result.output
+                statusMessage = "Editor assist failed."
+            }
+        } catch {
+            run.status = .failed
+            run.summary = error.localizedDescription
+            run.endedAt = Date()
+            try? repository.upsert(run: run)
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func clearEditorAssistSuggestion() {
+        latestEditorAssistSuggestion = nil
     }
 
     public func dispatchTask(taskID: String? = nil, provider: RunnerProvider = .codex) async {

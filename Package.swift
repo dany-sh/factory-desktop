@@ -29,6 +29,9 @@ let package = Package(
             dependencies: [
                 "FactoryDesktopCore",
                 .product(name: "MarkdownUI", package: "swift-markdown-ui")
+            ],
+            resources: [
+                .copy("Resources")
             ]
         ),
         .testTarget(
