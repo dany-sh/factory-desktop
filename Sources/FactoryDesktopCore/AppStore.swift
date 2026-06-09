@@ -62,10 +62,10 @@ public final class AppStore: ObservableObject {
 
     public var backlogTasksForSelectedProject: [FactoryTask] {
         tasksForSelectedProject
-            .filter { $0.triageStatus != .done && $0.triageStatus != .archived }
+            .filter { $0.status != .done && $0.status != .archived }
             .sorted { left, right in
-                if left.triageStatus.sortOrder != right.triageStatus.sortOrder {
-                    return left.triageStatus.sortOrder < right.triageStatus.sortOrder
+                if left.status.sortOrder != right.status.sortOrder {
+                    return left.status.sortOrder < right.status.sortOrder
                 }
                 if left.priorityLabel.sortOrder != right.priorityLabel.sortOrder {
                     return left.priorityLabel.sortOrder < right.priorityLabel.sortOrder
@@ -427,7 +427,6 @@ public final class AppStore: ObservableObject {
                 type: type,
                 status: .backlog,
                 kind: .task,
-                triageStatus: .backlog,
                 readiness: goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .needsScoping : .scoped,
                 goal: goal
             )
@@ -453,6 +452,7 @@ public final class AppStore: ObservableObject {
             guard let repository = self.repository else { return }
             let previousStatus = self.tasks.first { $0.id == task.id }?.status
             var updated = task
+            updated.triageStatus = FactoryTaskTriageStatus.fromLegacyStatus(updated.status)
             updated.updatedAt = Date()
             try repository.upsert(task: updated)
             if let previousStatus, previousStatus != updated.status {
@@ -1323,7 +1323,8 @@ public final class AppStore: ObservableObject {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try prompt.write(to: promptURL, atomically: true, encoding: .utf8)
             try repository.upsert(run: run)
-            task.triageStatus = .needsScoping
+            task.status = .planning
+            task.triageStatus = FactoryTaskTriageStatus.fromLegacyStatus(task.status)
             task.readiness = .needsScoping
             task.updatedAt = Date()
             try repository.upsert(task: task)
@@ -3363,7 +3364,7 @@ public final class AppStore: ObservableObject {
         Task:
         - Title: \(task.title)
         - Kind: \(task.kind.rawValue)
-        - Triage status: \(task.triageStatus.rawValue)
+        - Status: \(task.status.rawValue)
         - Readiness: \(task.readiness.rawValue)
         - Priority: \(task.priorityLabel.rawValue)
         - Category: \(task.category.isEmpty ? "unknown" : task.category)
@@ -3393,7 +3394,6 @@ public final class AppStore: ObservableObject {
         - Title: \(task.title)
         - ID: \(task.id)
         - Status: \(task.status.rawValue)
-        - Triage status: \(task.triageStatus.rawValue)
         - Kind: \(task.kind.rawValue)
         - Readiness: \(task.readiness.rawValue)
         - Priority: \(task.priorityLabel.rawValue)
@@ -3447,12 +3447,11 @@ public final class AppStore: ObservableObject {
         }
         switch updated.readiness {
         case .executable:
-            updated.triageStatus = .ready
-        case .scoped:
-            updated.triageStatus = .backlog
-        case .needsScoping, .raw:
-            updated.triageStatus = .needsScoping
+            updated.status = .ready
+        case .scoped, .needsScoping, .raw:
+            updated.status = .backlog
         }
+        updated.triageStatus = FactoryTaskTriageStatus.fromLegacyStatus(updated.status)
         return updated
     }
 

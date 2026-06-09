@@ -60,10 +60,6 @@ public enum FactoryTaskTriageStatus: String, CaseIterable, Codable, Identifiable
         }
     }
 
-    public static var kanbanColumns: [FactoryTaskTriageStatus] {
-        [.inbox, .backlog, .needsScoping, .ready, .running, .review, .done]
-    }
-
     public static func fromLegacyStatus(_ status: TaskStatus) -> FactoryTaskTriageStatus {
         switch status {
         case .backlog: .backlog
@@ -232,7 +228,7 @@ public enum BacklogQueueRanking {
         recommendationsByTaskID: [String: RunnerRecommendation]
     ) -> [BacklogNextWorkItem] {
         tasks
-            .filter { $0.triageStatus != .done && $0.triageStatus != .archived }
+            .filter { $0.status != .done && $0.status != .archived }
             .map { task -> BacklogNextWorkItem in
                 let recommendation = recommendationsByTaskID[task.id]
                 let hasLinkedSession = runnerLinksByTaskID[task.id] != nil

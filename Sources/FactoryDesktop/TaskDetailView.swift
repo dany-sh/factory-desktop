@@ -18,6 +18,7 @@ struct TaskDetailView: View {
             if let task = store.selectedTask {
                 VStack(alignment: .leading, spacing: 18) {
                     header(task: task)
+                    taskCommandBar(task: task)
                     Picker("Stage", selection: $selectedStage) {
                         ForEach(TaskWorkspaceStage.allCases) { stage in
                             Text(stage.title).tag(stage)
@@ -100,6 +101,7 @@ struct TaskDetailView: View {
                         .buttonStyle(.plain)
                         StatusPill(text: task.type.displayName)
                         StatusPill(text: task.priority.displayName)
+                        StatusPill(text: task.readiness.displayName)
                         Text(task.id.shortID)
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
@@ -124,6 +126,90 @@ struct TaskDetailView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator.opacity(0.6))
         )
+    }
+
+    private func taskCommandBar(task: FactoryTask) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    Label("Actions", systemImage: "bolt.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    primaryCommandControl(task: task)
+
+                    Divider()
+                        .frame(height: 24)
+
+                    actionButton("Review State", systemImage: "list.bullet.clipboard") {
+                        Task { await store.reviewTaskState() }
+                    }
+                    .disabled(store.selectedTask == nil || store.isWorking)
+
+                    actionButton("Preflight", systemImage: "checklist.checked") {
+                        Task { await store.runPreflightCheck() }
+                    }
+                    .disabled(store.selectedTask == nil || store.isWorking)
+
+                    actionButton("Task Worktree", systemImage: "point.3.connected.trianglepath.dotted") {
+                        Task { await store.createWorktree(flavor: .local) }
+                    }
+                    .disabled(store.selectedTask == nil || task.localWorktreePath != nil || store.isWorking)
+
+                    actionButton("Alternate Worktree", systemImage: "terminal") {
+                        Task { await store.createWorktree(flavor: .codex) }
+                    }
+                    .disabled(store.selectedTask == nil || task.codexWorktreePath != nil || store.isWorking)
+
+                    actionButton("Open VS Code", systemImage: "curlybraces.square") {
+                        Task { await store.openVSCodeForSelectedTask() }
+                    }
+                    .disabled(store.selectedTask == nil || selectedCodeWorktreeUnavailable || store.isWorking)
+
+                    actionButton("Codex Handoff", systemImage: "paperplane") {
+                        store.generateCodexHandoff()
+                    }
+                    .disabled(!canSendToCodexBuild)
+                }
+            }
+            .controlSize(.small)
+
+            if let warning = store.selectedTaskWorktreeWarning {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+            }
+        }
+        .padding(12)
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.55))
+        )
+    }
+
+    @ViewBuilder
+    private func primaryCommandControl(task: FactoryTask) -> some View {
+        if task.status == .archived || task.status == .done {
+            completedTaskNextAction(task)
+        } else if let review = store.latestTaskStateReview {
+            primaryActionButton(review.recommendedAction)
+        } else if store.canPlanSelectedTaskLocally {
+            actionButton("Plan Locally", systemImage: "brain", prominent: true) {
+                Task { await store.planLocally() }
+            }
+            .disabled(store.isWorking)
+        } else {
+            actionButton("Create Task Worktree", systemImage: "point.3.connected.trianglepath.dotted", prominent: true) {
+                Task { await store.createWorktree(flavor: .local) }
+            }
+            .disabled(store.selectedTask == nil || task.localWorktreePath != nil || store.isWorking)
+        }
+    }
+
+    private var canSendToCodexBuild: Bool {
+        guard let status = store.selectedTask?.status else { return false }
+        return !store.isWorking && status == .approved && !selectedCodeWorktreeUnavailable
     }
 
     private func statusMenu(task: FactoryTask) -> some View {
@@ -198,11 +284,6 @@ struct TaskDetailView: View {
                     .font(.largeTitle.weight(.semibold))
                     .textFieldStyle(.plain)
                     .focused($focusedField, equals: .title)
-                HStack(spacing: 8) {
-                    DraftPill(title: "Type", value: draft.type.displayName)
-                    DraftPill(title: "Priority", value: draft.priorityLabel.displayName)
-                    DraftPill(title: "Readiness", value: draft.readiness.displayName)
-                }
             }
 
             LabeledTextEditor(
@@ -253,11 +334,6 @@ struct TaskDetailView: View {
                 Picker("Priority", selection: $draft.priorityLabel) {
                     ForEach(FactoryTaskPriorityLabel.allCases) { level in
                         Text(level.displayName).tag(level)
-                    }
-                }
-                Picker("Triage", selection: $draft.triageStatus) {
-                    ForEach(FactoryTaskTriageStatus.allCases) { status in
-                        Text(status.displayName).tag(status)
                     }
                 }
                 Picker("Readiness", selection: $draft.readiness) {
@@ -318,7 +394,6 @@ struct TaskDetailView: View {
         VStack(alignment: .leading, spacing: 14) {
             writingScoreCard
             sectionStarterCard
-            scopeGuardCard
         }
     }
 
@@ -369,28 +444,6 @@ struct TaskDetailView: View {
             }
             assistButton("Acceptance", systemImage: "checklist") {
                 appendAcceptanceCriteria()
-            }
-        }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(.separator.opacity(0.55))
-        )
-    }
-
-    private var scopeGuardCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Writing Lens")
-                .font(.headline)
-            Text("A good Factory task should say what changes, what stays unchanged, how we verify it, and which action should happen next.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if let warning = store.selectedTaskWorktreeWarning {
-                Divider()
-                Text(warning)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.orange)
             }
         }
         .padding()
@@ -485,50 +538,8 @@ struct TaskDetailView: View {
     private func writeSection(task: FactoryTask) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             taskBriefPanel
-            taskContextStrip(task: task)
-        }
-    }
-
-    private func taskContextStrip(task: FactoryTask) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            compactContextCard(title: "Status", value: task.status.displayName, systemImage: "circle.dashed")
-            compactContextCard(title: "Task Worktree", value: taskWorktreeContextValue, systemImage: "point.3.connected.trianglepath.dotted")
-            compactContextCard(title: "Latest Plan", value: store.currentPlanArtifact == nil ? "Not started" : "Available", systemImage: "doc.text")
-            compactContextCard(title: "Recent Events", value: store.taskEvents.isEmpty ? "None yet" : "\(store.taskEvents.count)", systemImage: "clock")
-        }
-    }
-
-    private var taskWorktreeContextValue: String {
-        if store.selectedTaskWorktreeDisplays.isEmpty {
-            return "Missing"
-        }
-        if store.selectedTaskWorktreeDisplays.contains(where: { $0.canOpen }) {
-            return "Ready"
-        }
-        return "Needs attention"
-    }
-
-    private func compactContextCard(title: String, value: String, systemImage: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: systemImage)
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Text(value)
-                    .font(.subheadline.weight(.semibold))
-            }
-            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(.separator.opacity(0.5))
-        )
     }
 
     private var workflowHealthPanel: some View {
@@ -1459,24 +1470,6 @@ private struct StatusPill: View {
     }
 }
 
-private struct DraftPill: View {
-    var title: String
-    var value: String
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Text(title)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .fontWeight(.semibold)
-        }
-        .font(.caption)
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(.quaternary.opacity(0.55), in: Capsule())
-    }
-}
-
 private struct DraftQuality {
     struct Check: Identifiable {
         var id: String { title }
@@ -1630,7 +1623,6 @@ private struct TaskDraft {
     var title = ""
     var type: TaskType = .planning
     var kind: FactoryTaskKind = .task
-    var triageStatus: FactoryTaskTriageStatus = .backlog
     var readiness: FactoryTaskReadiness = .needsScoping
     var priorityLabel: FactoryTaskPriorityLabel = .normal
     var category = ""
@@ -1649,7 +1641,6 @@ private struct TaskDraft {
         title = task.title
         type = task.type
         kind = task.kind
-        triageStatus = task.triageStatus
         readiness = task.readiness
         priorityLabel = task.priorityLabel
         category = task.category
@@ -1669,10 +1660,10 @@ private struct TaskDraft {
         updated.title = title
         updated.type = type
         updated.kind = kind
-        updated.triageStatus = triageStatus
         updated.readiness = readiness
         updated.priorityLabel = priorityLabel
         updated.priority = priorityLabel.taskPriority
+        updated.triageStatus = FactoryTaskTriageStatus.fromLegacyStatus(updated.status)
         updated.category = category
         updated.source = source
         updated.effort = effort
@@ -1692,7 +1683,6 @@ private struct TaskDraft {
         title != task.title ||
             type != task.type ||
             kind != task.kind ||
-            triageStatus != task.triageStatus ||
             readiness != task.readiness ||
             priorityLabel != task.priorityLabel ||
             category != task.category ||
