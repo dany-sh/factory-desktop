@@ -157,36 +157,33 @@ struct TaskDetailView: View {
     }
 
     private func workspaceBreadcrumb(task: FactoryTask) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Workspace")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            HStack(spacing: 6) {
-                Button {
-                    store.showProjectWorkspace()
-                } label: {
-                    Text(store.selectedProject?.name ?? "Project")
-                        .lineLimit(1)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.primary)
-                .help("Open project page")
-                Image(systemName: "chevron.right")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                HStack(spacing: 8) {
-                    Text(taskIdentityKey(for: task))
-                        .font(.caption.monospaced().weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Color.secondary.opacity(0.12), in: Capsule())
-                    Text(task.title)
-                        .lineLimit(1)
-                }
+        HStack(spacing: 8) {
+            Button {
+                store.showProjectWorkspace()
+            } label: {
+                Text(store.selectedProject?.name ?? "Project")
+                    .lineLimit(1)
             }
-            .font(.title3.weight(.semibold))
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            .help("Open project page")
+
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.tertiary)
+
+            HStack(spacing: 8) {
+                Text(taskIdentityKey(for: task))
+                    .font(.caption.monospaced().weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                Text(task.title)
+                    .lineLimit(1)
+            }
         }
+        .font(.title3.weight(.semibold))
     }
 
     private func taskIdentityKey(for task: FactoryTask) -> String {
@@ -197,35 +194,16 @@ struct TaskDetailView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 8) {
-                    TextField("Untitled Task", text: draftTitleBinding)
-                        .font(.title2.weight(.semibold))
-                        .textFieldStyle(.plain)
-                        .focused($focusedField, equals: .title)
                     metadataHeaderRow(task: task)
-                    worktreeSummaryLine
+                    secondaryMetadataLine(task: task)
                 }
                 Spacer()
-                VStack(alignment: .trailing, spacing: 10) {
-                    HStack(spacing: 10) {
-                        Button {
-                            store.showProjectWorkspace()
-                        } label: {
-                            Label("Project View", systemImage: "square.grid.2x2")
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-
-                        if store.isWorking {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
+                HStack(spacing: 12) {
+                    if store.isWorking {
+                        ProgressView()
+                            .controlSize(.small)
                     }
-
-                    if selectedStage == .write {
-                        editorStatusSummary(task: task)
-                    } else {
-                        compactPrimaryAction
-                    }
+                    editorStatusSummary(task: task)
                 }
             }
         }
@@ -247,61 +225,63 @@ struct TaskDetailView: View {
 
                     primaryCommandControl(task: task)
 
-                    Divider()
-                        .frame(height: 24)
+                    if !task.isCompletedForTaskDetail {
+                        Divider()
+                            .frame(height: 24)
 
-                    actionButton("Assign to AI Worker", systemImage: "sparkles") {
-                        Task { await store.assignSelectedTaskToAIWorker() }
+                        actionButton("Assign to AI Worker", systemImage: "sparkles") {
+                            Task { await store.assignSelectedTaskToAIWorker() }
+                        }
+                        .disabled(store.selectedTask == nil || store.isWorking)
+
+                        actionButton("Resume Worker", systemImage: "play.circle") {
+                            Task { await store.resumeWorker() }
+                        }
+                        .disabled(store.selectedRunnerSession == nil || store.isWorking)
+
+                        actionButton("Review Worker Report", systemImage: "doc.text.magnifyingglass") {
+                            store.reviewLatestWorkerReport()
+                        }
+                        .disabled(store.latestWorkerReport == nil || store.isWorking)
+
+                        actionButton("Create Proposed Tasks", systemImage: "plus.square.on.square") {
+                            store.createAllProposedTasks()
+                        }
+                        .disabled(!store.taskProposals.contains { $0.status == .proposed } || store.isWorking)
+
+                        Divider()
+                            .frame(height: 24)
+
+                        actionButton("Review State", systemImage: "list.bullet.clipboard") {
+                            Task { await store.reviewTaskState() }
+                        }
+                        .disabled(store.selectedTask == nil || store.isWorking)
+
+                        actionButton("Preflight", systemImage: "checklist.checked") {
+                            Task { await store.runPreflightCheck() }
+                        }
+                        .disabled(store.selectedTask == nil || store.isWorking)
+
+                        actionButton("Task Worktree", systemImage: "point.3.connected.trianglepath.dotted") {
+                            Task { await store.createWorktree(flavor: .local) }
+                        }
+                        .disabled(store.selectedTask == nil || task.localWorktreePath != nil || store.isWorking)
+
+                        actionButton("Alternate Worktree", systemImage: "terminal") {
+                            Task { await store.createWorktree(flavor: .codex) }
+                        }
+                        .disabled(store.selectedTask == nil || task.codexWorktreePath != nil || store.isWorking)
+
+                        actionButton("Open VS Code", systemImage: "curlybraces.square") {
+                            Task { await store.openVSCodeForSelectedTask() }
+                        }
+                        .disabled(store.selectedTask == nil || selectedCodeWorktreeUnavailable || store.isWorking)
+
+                        actionButton("Codex Handoff", systemImage: "paperplane") {
+                            store.generateCodexHandoff()
+                        }
+                        .disabled(!canSendToCodexBuild)
                     }
-                    .disabled(store.selectedTask == nil || store.isWorking)
-
-                    actionButton("Resume Worker", systemImage: "play.circle") {
-                        Task { await store.resumeWorker() }
-                    }
-                    .disabled(store.selectedRunnerSession == nil || store.isWorking)
-
-                    actionButton("Review Worker Report", systemImage: "doc.text.magnifyingglass") {
-                        store.reviewLatestWorkerReport()
-                    }
-                    .disabled(store.latestWorkerReport == nil || store.isWorking)
-
-                    actionButton("Create Proposed Tasks", systemImage: "plus.square.on.square") {
-                        store.createAllProposedTasks()
-                    }
-                    .disabled(!store.taskProposals.contains { $0.status == .proposed } || store.isWorking)
-
-                    Divider()
-                        .frame(height: 24)
-
-                    actionButton("Review State", systemImage: "list.bullet.clipboard") {
-                        Task { await store.reviewTaskState() }
-                    }
-                    .disabled(store.selectedTask == nil || store.isWorking)
-
-                    actionButton("Preflight", systemImage: "checklist.checked") {
-                        Task { await store.runPreflightCheck() }
-                    }
-                    .disabled(store.selectedTask == nil || store.isWorking)
-
-                    actionButton("Task Worktree", systemImage: "point.3.connected.trianglepath.dotted") {
-                        Task { await store.createWorktree(flavor: .local) }
-                    }
-                    .disabled(store.selectedTask == nil || task.localWorktreePath != nil || store.isWorking)
-
-                    actionButton("Alternate Worktree", systemImage: "terminal") {
-                        Task { await store.createWorktree(flavor: .codex) }
-                    }
-                    .disabled(store.selectedTask == nil || task.codexWorktreePath != nil || store.isWorking)
-
-                    actionButton("Open VS Code", systemImage: "curlybraces.square") {
-                        Task { await store.openVSCodeForSelectedTask() }
-                    }
-                    .disabled(store.selectedTask == nil || selectedCodeWorktreeUnavailable || store.isWorking)
-
-                    actionButton("Codex Handoff", systemImage: "paperplane") {
-                        store.generateCodexHandoff()
-                    }
-                    .disabled(!canSendToCodexBuild)
                 }
             }
             .controlSize(.small)
@@ -322,7 +302,7 @@ struct TaskDetailView: View {
 
     @ViewBuilder
     private func primaryCommandControl(task: FactoryTask) -> some View {
-        if task.status == .archived || task.status == .done {
+        if task.isCompletedForTaskDetail {
             completedTaskNextAction(task)
         } else if store.selectedRunnerSession != nil {
             actionButton("Resume Worker", systemImage: "play.circle", prominent: true) {
@@ -392,15 +372,9 @@ struct TaskDetailView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 statusMenu(task: task)
-                metadataMenu("Task type", selection: draftBinding(\.type), options: TaskType.allCases.sorted { $0.displayName < $1.displayName }, label: \.displayName)
+                metadataMenu("Stage", selection: draftBinding(\.type), options: TaskType.allCases.sorted { $0.displayName < $1.displayName }, label: \.displayName)
                 metadataMenu("Priority", selection: draftBinding(\.priorityLabel), options: FactoryTaskPriorityLabel.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: \.displayName)
-                metadataMenu("Readiness", selection: draftBinding(\.readiness), options: FactoryTaskReadiness.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: \.displayName)
-                if draft.effort != .unknown {
-                    metadataMenu("Effort", selection: draftBinding(\.effort), options: FactoryTaskEffort.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: effortLabel(for:))
-                }
-                if draft.risk != .unknown {
-                    metadataMenu("Risk", selection: draftBinding(\.risk), options: FactoryTaskRisk.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: riskLabel(for:))
-                }
+                metadataMenu("Scoping", selection: draftBinding(\.readiness), options: FactoryTaskReadiness.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: \.displayName)
             }
         }
     }
@@ -446,10 +420,12 @@ struct TaskDetailView: View {
     }
 
     private func editorStatusSummary(task: FactoryTask) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
+        HStack(spacing: 6) {
             Text("Editor")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
+            Text("·")
+                .foregroundStyle(.tertiary)
             if draft.hasChanges(comparedTo: task, acceptanceText: acceptanceText) {
                 Label("Unsaved changes", systemImage: "pencil.and.outline")
                     .foregroundStyle(.orange)
@@ -458,7 +434,8 @@ struct TaskDetailView: View {
                     .foregroundStyle(.green)
             }
         }
-        .frame(minWidth: 190, alignment: .leading)
+        .font(.subheadline.weight(.semibold))
+        .frame(minWidth: 230, alignment: .trailing)
     }
 
     private var taskEditorCanvas: some View {
@@ -588,7 +565,7 @@ struct TaskDetailView: View {
             Text("Next Action")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            if let task = store.selectedTask, task.status == .archived || task.status == .done {
+            if let task = store.selectedTask, task.isCompletedForTaskDetail {
                 completedTaskNextAction(task)
             } else if let review = store.latestTaskStateReview {
                 primaryActionButton(review.recommendedAction)
@@ -610,31 +587,48 @@ struct TaskDetailView: View {
             Text(task.status == .archived ? "Archived" : "No action required")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
-            Button("Reopen Task") {}
-                .disabled(true)
-                .help("Foundation-only placeholder.")
+            Button {
+                store.updateSelectedTaskStatus(.backlog)
+            } label: {
+                Label("Reopen Task", systemImage: "arrow.uturn.backward")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(store.isWorking)
         }
     }
 
     @ViewBuilder
-    private var worktreeSummaryLine: some View {
-        let displays = store.selectedTaskWorktreeDisplays
-        let isCompletedTask = store.selectedTask?.status == .archived || store.selectedTask?.status == .done
-        if displays.isEmpty {
-            Text(store.selectedTaskCanUseWorktree ? "No worktree yet" : "Worktree optional")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        } else if displays.contains(where: { $0.state == .missingPath }) {
-            Text(isCompletedTask ? "Archived Worktree Reference" : "Missing Worktree")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(isCompletedTask ? Color.secondary : Color.red)
-        } else {
-            Text(displays.map { "\($0.label): \($0.branch ?? "no branch") (\($0.state.displayName))" }.joined(separator: "  |  "))
+    private func secondaryMetadataLine(task: FactoryTask) -> some View {
+        let items = secondaryMetadataItems(for: task)
+        if !items.isEmpty {
+            Text(items.joined(separator: " · "))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
+    }
+
+    private func secondaryMetadataItems(for task: FactoryTask) -> [String] {
+        var items = [worktreeMetadataText(for: task)]
+        if draft.effort != .unknown {
+            items.append("Effort: \(draft.effort.displayName)")
+        }
+        if draft.risk != .unknown {
+            items.append("Risk: \(draft.risk.displayName)")
+        }
+        return items
+    }
+
+    private func worktreeMetadataText(for task: FactoryTask) -> String {
+        let displays = store.selectedTaskWorktreeDisplays
+        if displays.isEmpty {
+            return store.selectedTaskCanUseWorktree ? "No worktree yet" : "Worktree optional"
+        }
+        if displays.contains(where: { $0.state == .missingPath }) {
+            return task.isCompletedForTaskDetail ? "Archived worktree reference" : "Missing worktree"
+        }
+        return displays.map { "\($0.label): \($0.branch ?? "no branch") (\($0.state.displayName))" }.joined(separator: "  |  ")
     }
 
     private var selectedCodeWorktreeUnavailable: Bool {
@@ -1332,13 +1326,12 @@ struct TaskDetailView: View {
             Text("Archive")
                 .font(.headline)
         case .noActionRequired:
-            VStack(alignment: .leading, spacing: 6) {
-                Text(store.selectedTask?.status == .archived ? "Archived" : "No action required")
+            if let task = store.selectedTask {
+                completedTaskNextAction(task)
+            } else {
+                Text("No action required")
                     .font(.headline)
                     .foregroundStyle(.secondary)
-                Button("Reopen Task") {}
-                    .disabled(true)
-                    .help("Foundation-only placeholder.")
             }
         case .investigate:
             actionButton(action.displayName, systemImage: "list.bullet.clipboard", prominent: true) {
@@ -1471,6 +1464,12 @@ struct TaskDetailView: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+    }
+}
+
+private extension FactoryTask {
+    var isCompletedForTaskDetail: Bool {
+        status == .archived || status == .done
     }
 }
 

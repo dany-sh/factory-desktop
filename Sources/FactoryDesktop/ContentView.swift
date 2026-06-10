@@ -112,10 +112,7 @@ struct ContentView: View {
             }
             return "factory-desktop / Kanban"
         case .task:
-            if let task = store.selectedTask {
-                return "factory-desktop / Task / \(task.title)"
-            }
-            return "factory-desktop / Task"
+            return ""
         }
     }
 }
