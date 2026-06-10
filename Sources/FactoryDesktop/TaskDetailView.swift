@@ -156,9 +156,7 @@ struct TaskDetailView: View {
             get: { selectedStage },
             set: { nextStage in
                 guard nextStage != selectedStage else { return }
-                syncEditorStateIfNeeded {
-                    selectedStage = nextStage
-                }
+                workspaceState.selectStagePreservingDraft(nextStage)
             }
         )
     }
@@ -251,10 +249,10 @@ struct TaskDetailView: View {
                         }
                         .disabled(store.latestWorkerReport == nil || store.isWorking)
 
-                        actionButton("Worker Detail", systemImage: "sidebar.right") {
-                            store.showWorkerRunDetail()
+                        actionButton("Worker Workspace", systemImage: "person.text.rectangle") {
+                            openWorkerWorkspace()
                         }
-                        .disabled(store.latestRunnerExecution == nil && store.latestWorkerReport == nil)
+                        .disabled(store.selectedTask == nil)
 
                         actionButton("Create Proposed Tasks", systemImage: "plus.square.on.square") {
                             store.createAllProposedTasks()
@@ -579,7 +577,7 @@ struct TaskDetailView: View {
     @ViewBuilder
     private func taskWorkspaceLayout(task: FactoryTask) -> some View {
         Group {
-            if selectedStage == .write {
+            if selectedStage == .write || selectedStage == .worker {
                 taskWorkspaceContent(task: task)
             } else {
                 ScrollView {
@@ -602,6 +600,8 @@ struct TaskDetailView: View {
                 planReviewSection
             case .buildTest:
                 buildTestSection
+            case .worker:
+                workerSection(task: task)
             case .diff:
                 diffSection
             case .artifacts:
@@ -1327,7 +1327,7 @@ struct TaskDetailView: View {
 
             if let execution = store.latestRunnerExecution {
                 Button {
-                    store.showWorkerRunDetail(executionId: execution.id)
+                    openWorkerWorkspace()
                 } label: {
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
@@ -1349,7 +1349,7 @@ struct TaskDetailView: View {
                             .foregroundStyle(.tertiary)
                         }
                         Spacer()
-                        Label("Detail", systemImage: "sidebar.right")
+                        Label("Worker", systemImage: "person.text.rectangle")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -1572,6 +1572,27 @@ struct TaskDetailView: View {
         .buttonStyle(.bordered)
         .controlSize(.small)
     }
+
+    private func openWorkerWorkspace() {
+        store.showTaskWorkspace()
+        workspaceState.inspectorPresented = true
+        workspaceState.selectStagePreservingDraft(.worker) {
+            store.prepareWorkerRunDetailForWorkspace()
+        }
+    }
+
+    private func openWorkerDiff() {
+        workspaceState.selectStagePreservingDraft(.diff) {
+            Task { await store.refreshGitStatus() }
+        }
+    }
+
+    private func workerSection(task: FactoryTask) -> some View {
+        WorkerWorkspaceView(
+            task: task,
+            openDiff: openWorkerDiff
+        )
+    }
 }
 
 private extension FactoryTask {
@@ -1590,6 +1611,7 @@ enum TaskWorkspaceStage: String, CaseIterable, Identifiable {
     case write
     case planReview
     case buildTest
+    case worker
     case diff
     case artifacts
 
@@ -1600,6 +1622,7 @@ enum TaskWorkspaceStage: String, CaseIterable, Identifiable {
         case .write: "Write"
         case .planReview: "Plan & Review"
         case .buildTest: "Build & Test"
+        case .worker: "Worker"
         case .diff: "Diff"
         case .artifacts: "Artifacts"
         }

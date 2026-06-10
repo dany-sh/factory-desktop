@@ -101,6 +101,211 @@ struct WorkerRunDetailView: View {
     }
 }
 
+struct WorkerWorkspaceView: View {
+    @EnvironmentObject private var store: AppStore
+
+    let task: FactoryTask
+    var openDiff: () -> Void
+
+    @State private var followUpText = ""
+    @State private var rawLogsExpanded = false
+
+    private var detail: WorkerRunDetail? {
+        guard store.workerRunDetail?.task.id == task.id else { return nil }
+        return store.workerRunDetail
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let detail {
+                let conversation = WorkerConversationBuilder.build(
+                    detail: detail,
+                    processStatus: store.workerProcessStatus(for: detail.execution)
+                )
+                header(detail: detail, conversation: conversation)
+                Divider()
+                WorkerConversationView(
+                    conversation: conversation,
+                    rawLogsExpanded: $rawLogsExpanded,
+                    createProposal: { store.createTask(from: $0) },
+                    dismissProposal: { store.dismissTaskProposal($0) },
+                    openLog: { Task { await store.openWorkerLog() } },
+                    openWorktree: { Task { await store.openWorkerWorktree() } }
+                )
+                Divider()
+                WorkerComposerView(
+                    text: $followUpText,
+                    isWorking: store.isWorking,
+                    isCancellable: store.workerRunIsCancellable(detail.execution),
+                    submitTitle: detail.session == nil ? "Assign Worker" : "Resume Worker",
+                    submitSystemImage: detail.session == nil ? "sparkles" : "play.circle",
+                    onSubmit: submitFollowUp,
+                    onStop: { Task { await store.cancelWorkerRun() } }
+                )
+            } else {
+                loadingState
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.72), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.55))
+        )
+        .task(id: task.id) {
+            rawLogsExpanded = store.workerRawLogsInitiallyExpanded
+            store.prepareWorkerRunDetailForWorkspace(expandRawLogs: store.workerRawLogsInitiallyExpanded)
+            await store.refreshActiveWorkerProcesses()
+        }
+        .onChange(of: store.workerRawLogsInitiallyExpanded) { _, expanded in
+            if expanded {
+                rawLogsExpanded = true
+            }
+        }
+    }
+
+    private func header(detail: WorkerRunDetail, conversation: WorkerConversation) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: "sparkles")
+                    .font(.title2)
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 30, height: 30)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 8) {
+                        StatusPill(detail.session?.provider.displayName ?? "AI Worker")
+                        StatusPill(reportStatusText(for: detail, conversation: conversation))
+                    }
+                    Text(task.title)
+                        .font(.title3.weight(.semibold))
+                        .lineLimit(2)
+                    Text("TASK-\(task.id.shortID.uppercased()) · \(workspaceSummary(for: detail))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 12)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    Button {
+                        submitFollowUp(followUpText)
+                    } label: {
+                        Label(detail.session == nil ? "Assign Worker" : "Resume Worker", systemImage: detail.session == nil ? "sparkles" : "play.circle")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(store.isWorking)
+
+                    Button {
+                        openDiff()
+                    } label: {
+                        Label("Review Diff", systemImage: "doc.text.magnifyingglass")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button {
+                        rawLogsExpanded = true
+                    } label: {
+                        Label("View Logs", systemImage: "doc.plaintext")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!conversation.preview.hasRawLogs)
+
+                    Button {
+                        Task { await store.openWorkerWorktree() }
+                    } label: {
+                        Label("Open Worktree", systemImage: "folder")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(detail.workspace?.worktreePath == nil)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                Label(conversation.preview.latestMeaningfulMessage, systemImage: "text.bubble")
+                    .lineLimit(2)
+                HStack(spacing: 12) {
+                    Label(conversation.preview.verificationDigest, systemImage: "checkmark.seal")
+                        .lineLimit(1)
+                    Label(conversation.preview.changedFilesSummary, systemImage: "doc.on.doc")
+                        .lineLimit(1)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if !conversation.preview.nextRecommendedAction.isEmpty {
+                Label(conversation.preview.nextRecommendedAction, systemImage: "arrow.right.circle")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(18)
+    }
+
+    private var loadingState: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ContentUnavailableView(
+                "Worker Workspace",
+                systemImage: "sparkles",
+                description: Text("Preparing the worker conversation for this task.")
+            )
+            WorkerComposerView(
+                text: $followUpText,
+                isWorking: store.isWorking,
+                isCancellable: false,
+                submitTitle: "Assign Worker",
+                submitSystemImage: "sparkles",
+                onSubmit: submitFollowUp,
+                onStop: {}
+            )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+    }
+
+    private func reportStatusText(for detail: WorkerRunDetail, conversation: WorkerConversation) -> String {
+        if let report = detail.report {
+            return report.status.displayName
+        }
+        if let execution = detail.execution {
+            return execution.status.displayName
+        }
+        return conversation.preview.statusLine
+    }
+
+    private func workspaceSummary(for detail: WorkerRunDetail) -> String {
+        var parts: [String] = []
+        if let branchName = detail.workspace?.branchName, !branchName.isEmpty {
+            parts.append(branchName)
+        }
+        if let worktreePath = detail.workspace?.worktreePath, !worktreePath.isEmpty {
+            parts.append(URL(fileURLWithPath: worktreePath).lastPathComponent)
+        }
+        return parts.isEmpty ? "No worker worktree yet" : parts.joined(separator: " · ")
+    }
+
+    private func submitFollowUp(_ text: String) {
+        let instruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        followUpText = ""
+        Task {
+            if detail?.session == nil {
+                await store.assignSelectedTaskToAIWorker(additionalInstruction: instruction)
+            } else {
+                await store.resumeWorker(additionalInstruction: instruction)
+            }
+        }
+    }
+}
+
 private struct WorkerConversationView: View {
     var conversation: WorkerConversation
     @Binding var rawLogsExpanded: Bool

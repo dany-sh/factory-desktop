@@ -2775,6 +2775,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertFalse(preview.latestMeaningfulMessage.contains("/Users/dany"))
         XCTAssertFalse(preview.latestMeaningfulMessage.lowercased().contains("git status"))
         XCTAssertFalse(preview.latestMeaningfulMessage.lowercased().contains("codex exec"))
+        XCTAssertEqual(preview.latestMeaningfulMessage, "Worker update available. Open Worker for details.")
         XCTAssertFalse(preview.nextRecommendedAction.contains("/Users/dany"))
         XCTAssertEqual(preview.changedFilesSummary, "1 changed file · 1 file changed, 2 insertions(+)")
         XCTAssertEqual(preview.verificationDigest, "swift test")
@@ -3270,6 +3271,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertTrue(events.contains { $0.newStatus == .readyForReview && $0.message.contains("Reason: worker report status") && $0.message.contains("Evidence: execution") })
 
         fixture.store.showWorkerRunDetail(executionId: execution.id)
+        XCTAssertTrue(fixture.store.isWorkerRunDetailPresented)
         let detail = try XCTUnwrap(fixture.store.workerRunDetail)
         XCTAssertEqual(detail.task.id, fixture.task.id)
         XCTAssertEqual(detail.workspace?.id, workspace.id)
@@ -3282,6 +3284,49 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(detail.proposals.map(\.title), ["Add worker cancellation"])
         XCTAssertFalse(detail.lifecycleSnapshots.isEmpty)
         XCTAssertTrue(detail.events.contains { $0.message.contains("Evidence: execution") })
+    }
+
+    @MainActor
+    func testPreparingWorkerWorkspaceLoadsDetailWithoutPresentingModalAndKeepsLogsCollapsed() async throws {
+        let fixture = try makeWorkerStoreFixture(workerOutput: """
+        Worker update complete.
+
+        WORKER REPORT
+        Status: needs_review
+        Summary: Worker workspace is ready.
+        Files Changed:
+        - Sources/FactoryDesktop/WorkerRunDetailView.swift
+        Tests Run:
+        - swift test
+        Risks:
+        - Manual UI QA still useful.
+        Blockers:
+        - None
+        Follow-up Tasks Proposed:
+        - None
+        Next Recommended Action: Review the Worker workspace.
+        """)
+
+        await fixture.store.assignSelectedTaskToAIWorker()
+        let execution = try XCTUnwrap(try fixture.repository.latestRunnerExecution(taskId: fixture.task.id))
+
+        fixture.store.prepareWorkerRunDetailForWorkspace(executionId: execution.id)
+        let detail = try XCTUnwrap(fixture.store.workerRunDetail)
+        let conversation = WorkerConversationBuilder.build(detail: detail, processStatus: .completed)
+
+        XCTAssertFalse(fixture.store.isWorkerRunDetailPresented)
+        XCTAssertFalse(fixture.store.workerRawLogsInitiallyExpanded)
+        XCTAssertEqual(detail.task.id, fixture.task.id)
+        XCTAssertEqual(detail.execution?.id, execution.id)
+        XCTAssertTrue(conversation.events.contains { event in if case .assignment = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .workerMessage = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .checkResult = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .changedFiles = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .rawLogReference = event.kind { return true }; return false })
+
+        fixture.store.prepareWorkerRunDetailForWorkspace(executionId: execution.id, expandRawLogs: true)
+        XCTAssertFalse(fixture.store.isWorkerRunDetailPresented)
+        XCTAssertTrue(fixture.store.workerRawLogsInitiallyExpanded)
     }
 
     @MainActor

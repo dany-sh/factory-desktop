@@ -86,9 +86,9 @@ struct RightToolsInspectorView: View {
 
                 HStack {
                     Button {
-                        store.showWorkerRunDetail()
+                        openWorkerWorkspaceFromInspector()
                     } label: {
-                        Label("Open Conversation", systemImage: "sidebar.right")
+                        Label("Open Worker", systemImage: "person.text.rectangle")
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .buttonStyle(.bordered)
@@ -106,7 +106,7 @@ struct RightToolsInspectorView: View {
                     .disabled(store.selectedTask == nil || store.isWorking)
                 }
                 Button {
-                    store.viewLatestWorkerLogs()
+                    viewWorkerLogsFromInspector()
                 } label: {
                     Label("View Logs", systemImage: "doc.plaintext")
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -485,8 +485,25 @@ struct RightToolsInspectorView: View {
 
     private func reviewDiffFromInspector() {
         store.showTaskWorkspace()
-        workspaceState.selectedStage = .diff
-        Task { await store.refreshGitStatus() }
+        workspaceState.selectStagePreservingDraft(.diff) {
+            Task { await store.refreshGitStatus() }
+        }
+    }
+
+    private func openWorkerWorkspaceFromInspector() {
+        store.showTaskWorkspace()
+        workspaceState.inspectorPresented = true
+        workspaceState.selectStagePreservingDraft(.worker) {
+            store.prepareWorkerRunDetailForWorkspace()
+        }
+    }
+
+    private func viewWorkerLogsFromInspector() {
+        store.showTaskWorkspace()
+        workspaceState.inspectorPresented = true
+        workspaceState.selectStagePreservingDraft(.worker) {
+            store.prepareWorkerRunDetailForWorkspace(expandRawLogs: true)
+        }
     }
 
     private func workerList(_ title: String, values: [String]) -> some View {

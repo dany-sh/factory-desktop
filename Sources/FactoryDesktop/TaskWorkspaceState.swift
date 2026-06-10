@@ -90,6 +90,33 @@ final class TaskWorkspaceState: ObservableObject {
         }
     }
 
+    func selectStagePreservingDraft(_ nextStage: TaskWorkspaceStage, completion: (() -> Void)? = nil) {
+        guard nextStage != selectedStage else {
+            completion?()
+            return
+        }
+
+        let applyStageChange = {
+            self.selectedStage = nextStage
+            completion?()
+        }
+
+        guard selectedStage == .write,
+              let requestLatestMarkdown = editorBridge.requestLatestMarkdown else {
+            applyStageChange()
+            return
+        }
+
+        requestLatestMarkdown { [weak self] markdown in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.updateEditorDocumentMarkdown(markdown)
+                self.selectedStage = nextStage
+                completion?()
+            }
+        }
+    }
+
     func markTaskPersisted(_ task: FactoryTask) {
         activeTaskID = task.id
         activeDraftState = draftStore.markPersisted(task: task)

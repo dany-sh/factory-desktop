@@ -482,7 +482,7 @@ public enum WorkerConversationBuilder {
             lowercased.contains("`sed ") ||
             lowercased.contains("`codex ") ||
             ["git ", "swift ", "rg ", "grep ", "sed ", "codex "].contains(where: { lowercased.hasPrefix($0) || lowercased.contains("\n\($0)") }) {
-            return "Worker update available. Open Conversation for details."
+            return "Worker update available. Open Worker for details."
         }
         let noPaths = text
             .components(separatedBy: .whitespacesAndNewlines)

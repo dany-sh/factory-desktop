@@ -487,7 +487,7 @@ public final class AppStore: ObservableObject {
             taskProposals = try repository.taskProposals(sourceTaskId: task.id)
             runnerNotifications = try repository.runnerNotifications(taskId: task.id)
             latestLifecycleSnapshot = try repository.latestLifecycleSnapshot(taskId: task.id)
-            if isWorkerRunDetailPresented {
+            if isWorkerRunDetailPresented || workerRunDetail?.task.id == task.id {
                 workerRunDetail = try makeWorkerRunDetail(task: task, executionId: workerRunDetail?.execution?.id)
             }
         } else {
@@ -1951,6 +1951,17 @@ public final class AppStore: ObservableObject {
         }
         showWorkerRunDetail(executionId: latestRunnerExecution?.id, expandRawLogs: true)
         statusMessage = "Showing worker conversation logs."
+    }
+
+    public func prepareWorkerRunDetailForWorkspace(executionId: String? = nil, expandRawLogs: Bool = false) {
+        perform {
+            guard let task = self.selectedTask else { throw FactoryError.missingSelection }
+            self.workerRawLogsInitiallyExpanded = expandRawLogs
+            self.workerRunDetail = try self.makeWorkerRunDetail(task: task, executionId: executionId)
+            self.isWorkerRunDetailPresented = false
+            self.statusMessage = expandRawLogs ? "Showing worker logs in workspace." : "Showing worker workspace."
+            Task { await self.refreshWorkerRunDetailDiffSnapshot() }
+        }
     }
 
     public func showWorkerRunDetail(executionId: String? = nil, expandRawLogs: Bool = false) {
