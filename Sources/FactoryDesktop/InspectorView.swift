@@ -79,6 +79,13 @@ struct RightToolsInspectorView: View {
                         store.reviewLatestWorkerReport()
                     }
                     .disabled(store.latestWorkerReport == nil || store.isWorking)
+                    inspectorActionButton("Detail", systemImage: "sidebar.right") {
+                        store.showWorkerRunDetail()
+                    }
+                    .disabled(store.latestRunnerExecution == nil && store.latestWorkerReport == nil)
+                }
+
+                HStack {
                     inspectorActionButton("View Logs", systemImage: "doc.plaintext") {
                         store.viewLatestWorkerLogs()
                     }
@@ -108,7 +115,17 @@ struct RightToolsInspectorView: View {
                 }
 
                 if let execution = store.latestRunnerExecution {
-                    InspectorMetricRow(label: "Latest Execution", value: "\(execution.status.displayName) · \(execution.runReason)")
+                    Button {
+                        store.showWorkerRunDetail(executionId: execution.id)
+                    } label: {
+                        HStack {
+                            InspectorMetricRow(label: "Latest Execution", value: "\(execution.status.displayName) · \(execution.runReason)")
+                            Spacer()
+                            Image(systemName: "sidebar.right")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
 
                 if let report = store.latestWorkerReport {
@@ -126,6 +143,13 @@ struct RightToolsInspectorView: View {
                     if !report.nextRecommendedAction.isEmpty {
                         InspectorMetricRow(label: "Next Recommended Action", value: report.nextRecommendedAction)
                     }
+                    Button {
+                        store.showWorkerRunDetail(executionId: report.executionId)
+                    } label: {
+                        Label("Open Worker Run Detail", systemImage: "sidebar.right")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
 
                 let proposed = store.taskProposals.filter { $0.status == .proposed }

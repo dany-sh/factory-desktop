@@ -406,6 +406,20 @@ public final class FactoryRepository {
         )
     }
 
+    public func runnerExecution(id: String) throws -> RunnerExecution? {
+        let rows = try database.query(
+            """
+            SELECT id, session_id, run_reason, command, status, exit_code, log_path,
+                   before_repo_state, after_repo_state, started_at, ended_at
+            FROM runner_executions
+            WHERE id = ?
+            LIMIT 1;
+            """,
+            binds: [.text(id)]
+        )
+        return rows.first.map(runnerExecution(from:))
+    }
+
     public func runnerExecutions(sessionId: String) throws -> [RunnerExecution] {
         let rows = try database.query(
             """
@@ -437,6 +451,47 @@ public final class FactoryRepository {
         return rows.first.map(runnerExecution(from:))
     }
 
+    public func runnerSession(id: String) throws -> RunnerSession? {
+        let rows = try database.query(
+            """
+            SELECT id, workspace_id, provider, mode, model_profile_json, external_session_id, status,
+                   transcript_path, active_turn_id, created_at, updated_at
+            FROM runner_sessions
+            WHERE id = ?
+            LIMIT 1;
+            """,
+            binds: [.text(id)]
+        )
+        return rows.first.map(runnerSession(from:))
+    }
+
+    public func runnerWorkspace(id: String) throws -> RunnerWorkspace? {
+        let rows = try database.query(
+            """
+            SELECT id, project_id, task_id, branch_name, worktree_path, base_commit, head_commit,
+                   archived, cleaned, pinned, created_at, updated_at
+            FROM runner_workspaces
+            WHERE id = ?
+            LIMIT 1;
+            """,
+            binds: [.text(id)]
+        )
+        return rows.first.map(runnerWorkspace(from:))
+    }
+
+    public func agentTurns(sessionId: String) throws -> [AgentTurn] {
+        let rows = try database.query(
+            """
+            SELECT id, session_id, role, content, created_at
+            FROM agent_turns
+            WHERE session_id = ?
+            ORDER BY created_at DESC;
+            """,
+            binds: [.text(sessionId)]
+        )
+        return rows.map(agentTurn(from:))
+    }
+
     public func insert(agentTurn: AgentTurn) throws {
         try database.execute(
             """
@@ -457,12 +512,14 @@ public final class FactoryRepository {
         try database.execute(
             """
             INSERT INTO worker_reports (
-              id, session_id, execution_id, status, summary, files_changed_json, tests_run_json,
+              id, session_id, execution_id, status, parse_status, parse_error, summary, files_changed_json, tests_run_json,
               risks_json, blockers_json, next_recommended_action, recommended_task_status, raw_text, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               status = excluded.status,
+              parse_status = excluded.parse_status,
+              parse_error = excluded.parse_error,
               summary = excluded.summary,
               files_changed_json = excluded.files_changed_json,
               tests_run_json = excluded.tests_run_json,
@@ -477,6 +534,8 @@ public final class FactoryRepository {
                 .text(report.sessionId),
                 .text(report.executionId),
                 .text(report.status.rawValue),
+                .text(report.parseStatus.rawValue),
+                .text(report.parseError),
                 .text(report.summary),
                 .text(JSONCoding.encodeArray(report.filesChanged)),
                 .text(JSONCoding.encodeArray(report.testsRun)),
@@ -493,7 +552,7 @@ public final class FactoryRepository {
     public func workerReports(sessionId: String) throws -> [WorkerReport] {
         let rows = try database.query(
             """
-            SELECT id, session_id, execution_id, status, summary, files_changed_json, tests_run_json,
+            SELECT id, session_id, execution_id, status, parse_status, parse_error, summary, files_changed_json, tests_run_json,
                    risks_json, blockers_json, next_recommended_action, recommended_task_status, raw_text, created_at
             FROM worker_reports
             WHERE session_id = ?
@@ -507,7 +566,7 @@ public final class FactoryRepository {
     public func latestWorkerReport(taskId: String) throws -> WorkerReport? {
         let rows = try database.query(
             """
-            SELECT r.id, r.session_id, r.execution_id, r.status, r.summary, r.files_changed_json, r.tests_run_json,
+            SELECT r.id, r.session_id, r.execution_id, r.status, r.parse_status, r.parse_error, r.summary, r.files_changed_json, r.tests_run_json,
                    r.risks_json, r.blockers_json, r.next_recommended_action, r.recommended_task_status, r.raw_text, r.created_at
             FROM worker_reports r
             INNER JOIN runner_sessions s ON s.id = r.session_id
@@ -517,6 +576,21 @@ public final class FactoryRepository {
             LIMIT 1;
             """,
             binds: [.text(taskId)]
+        )
+        return rows.first.map(workerReport(from:))
+    }
+
+    public func workerReport(executionId: String) throws -> WorkerReport? {
+        let rows = try database.query(
+            """
+            SELECT id, session_id, execution_id, status, parse_status, parse_error, summary, files_changed_json, tests_run_json,
+                   risks_json, blockers_json, next_recommended_action, recommended_task_status, raw_text, created_at
+            FROM worker_reports
+            WHERE execution_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1;
+            """,
+            binds: [.text(executionId)]
         )
         return rows.first.map(workerReport(from:))
     }
@@ -715,6 +789,17 @@ public final class FactoryRepository {
         return rows.map(runnerNotification(from:))
     }
 
+    public func markRunnerNotificationRead(id: String) throws {
+        try database.execute(
+            """
+            UPDATE runner_notifications
+            SET is_read = 1
+            WHERE id = ?;
+            """,
+            binds: [.text(id)]
+        )
+    }
+
     public func upsert(lifecycleSnapshot snapshot: LifecycleSnapshot) throws {
         try database.execute(
             """
@@ -769,6 +854,22 @@ public final class FactoryRepository {
             binds: [.text(taskId)]
         )
         return rows.first.map(lifecycleSnapshot(from:))
+    }
+
+    public func lifecycleSnapshots(taskId: String, limit: Int = 10) throws -> [LifecycleSnapshot] {
+        let rows = try database.query(
+            """
+            SELECT id, task_id, workspace_id, worktree_exists, branch_exists, dirty_state, main_moved,
+                   latest_execution_status, latest_report_status, unseen_notifications, proposed_tasks_count,
+                   recommended_action, evidence_json, created_at
+            FROM lifecycle_snapshots
+            WHERE task_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?;
+            """,
+            binds: [.text(taskId), .int(limit)]
+        )
+        return rows.map(lifecycleSnapshot(from:))
     }
 
     public func upsert(codexSessionLink link: CodexSessionLink) throws {
@@ -1225,12 +1326,24 @@ public final class FactoryRepository {
         )
     }
 
+    private func agentTurn(from row: [String: String?]) -> AgentTurn {
+        AgentTurn(
+            id: row.required("id"),
+            sessionId: row.required("session_id"),
+            role: row.required("role"),
+            content: row.optional("content") ?? "",
+            createdAt: DateCoding.date(from: row.required("created_at"))
+        )
+    }
+
     private func workerReport(from row: [String: String?]) -> WorkerReport {
         WorkerReport(
             id: row.required("id"),
             sessionId: row.required("session_id"),
             executionId: row.required("execution_id"),
             status: WorkerReportStatus(rawValue: row.optional("status") ?? "") ?? .failed,
+            parseStatus: WorkerReportParseStatus(rawValue: row.optional("parse_status") ?? "") ?? .parsed,
+            parseError: row.optional("parse_error"),
             summary: row.optional("summary") ?? "",
             filesChanged: JSONCoding.decodeArray(row.optional("files_changed_json")),
             testsRun: JSONCoding.decodeArray(row.optional("tests_run_json")),

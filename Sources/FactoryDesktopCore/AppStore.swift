@@ -28,6 +28,8 @@ public final class AppStore: ObservableObject {
     @Published public private(set) var taskProposals: [TaskProposal] = []
     @Published public private(set) var runnerNotifications: [RunnerNotification] = []
     @Published public private(set) var latestLifecycleSnapshot: LifecycleSnapshot?
+    @Published public private(set) var workerRunDetail: WorkerRunDetail?
+    @Published public var isWorkerRunDetailPresented = false
     @Published public private(set) var selectedCodexProjectLink: CodexProjectLink?
     @Published public private(set) var selectedTaskCodexSessionLink: CodexSessionLink?
     @Published public private(set) var codexSessionLinks: [CodexSessionLink] = []
@@ -461,6 +463,9 @@ public final class AppStore: ObservableObject {
             taskProposals = try repository.taskProposals(sourceTaskId: task.id)
             runnerNotifications = try repository.runnerNotifications(taskId: task.id)
             latestLifecycleSnapshot = try repository.latestLifecycleSnapshot(taskId: task.id)
+            if isWorkerRunDetailPresented {
+                workerRunDetail = try makeWorkerRunDetail(task: task, executionId: workerRunDetail?.execution?.id)
+            }
         } else {
             runnerWorkspaces = []
             selectedRunnerWorkspace = nil
@@ -470,7 +475,36 @@ public final class AppStore: ObservableObject {
             taskProposals = []
             runnerNotifications = []
             latestLifecycleSnapshot = nil
+            workerRunDetail = nil
         }
+    }
+
+    private func makeWorkerRunDetail(task: FactoryTask, executionId: String? = nil) throws -> WorkerRunDetail {
+        guard let repository else { throw FactoryError.missingSelection }
+        let execution = try executionId.flatMap { try repository.runnerExecution(id: $0) } ?? repository.latestRunnerExecution(taskId: task.id)
+        let session = try execution.flatMap { try repository.runnerSession(id: $0.sessionId) } ?? repository.latestRunnerSession(taskId: task.id)
+        let workspace = try session.flatMap { try repository.runnerWorkspace(id: $0.workspaceId) } ?? repository.latestRunnerWorkspace(taskId: task.id)
+        let prompt: String
+        if let session {
+            prompt = try repository.agentTurns(sessionId: session.id)
+                .first { $0.role.lowercased() == "user" }?
+                .content ?? ""
+        } else {
+            prompt = ""
+        }
+        let report = try execution.flatMap { try repository.workerReport(executionId: $0.id) } ?? repository.latestWorkerReport(taskId: task.id)
+        return WorkerRunDetail(
+            task: task,
+            workspace: workspace,
+            session: session,
+            execution: execution,
+            prompt: prompt,
+            report: report,
+            proposals: try repository.taskProposals(sourceTaskId: task.id),
+            lifecycleSnapshots: try repository.lifecycleSnapshots(taskId: task.id),
+            notifications: try repository.runnerNotifications(taskId: task.id),
+            events: try repository.taskEvents(taskId: task.id)
+        )
     }
 
     public func selectProject(_ projectID: String?) {
@@ -1797,12 +1831,20 @@ public final class AppStore: ObservableObject {
     }
 
     public func resumeWorker() async {
-        guard let repository, let project = selectedProject, let task = selectedTask else {
+        await resumeWorker(taskID: selectedTask?.id, sessionID: selectedRunnerSession?.id)
+    }
+
+    private func resumeWorker(taskID: String?, sessionID: String?) async {
+        guard let repository, let project = selectedProject else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        guard let task = (taskID.flatMap { id in tasks.first { $0.id == id } }) ?? selectedTask else {
             errorMessage = FactoryError.missingSelection.localizedDescription
             return
         }
         guard let workspace = selectedRunnerWorkspace ?? (try? repository.latestRunnerWorkspace(taskId: task.id)),
-              let session = selectedRunnerSession ?? (try? repository.latestRunnerSession(taskId: task.id)) else {
+              let session = sessionID.flatMap({ try? repository.runnerSession(id: $0) }) ?? selectedRunnerSession ?? (try? repository.latestRunnerSession(taskId: task.id)) else {
             await assignTaskToAIWorker(taskID: task.id)
             return
         }
@@ -1846,6 +1888,173 @@ public final class AppStore: ObservableObject {
         }
         selectedRunOutput = (try? String(contentsOfFile: path, encoding: .utf8)) ?? "Log file is missing: \(path)"
         statusMessage = "Showing worker log."
+    }
+
+    public func showWorkerRunDetail(executionId: String? = nil) {
+        perform {
+            guard let task = self.selectedTask else { throw FactoryError.missingSelection }
+            self.workerRunDetail = try self.makeWorkerRunDetail(task: task, executionId: executionId)
+            self.isWorkerRunDetailPresented = true
+            self.statusMessage = "Showing worker run detail."
+        }
+    }
+
+    public func openWorkerLog() async {
+        guard let path = workerRunDetail?.execution?.logPath ?? latestRunnerExecution?.logPath ?? selectedRunnerSession?.transcriptPath else {
+            statusMessage = "No worker log is available."
+            return
+        }
+        await openPath(path, successMessage: "Opened worker log.")
+    }
+
+    public func openWorkerWorktree() async {
+        guard let path = workerRunDetail?.workspace?.worktreePath ?? selectedRunnerWorkspace?.worktreePath else {
+            statusMessage = "No worker workspace is available."
+            return
+        }
+        await openPath(path, successMessage: "Opened worker workspace.")
+    }
+
+    public func retryWorkerRun() async {
+        guard let detail = workerRunDetail else {
+            await resumeWorker()
+            return
+        }
+        await resumeWorker(taskID: detail.task.id, sessionID: detail.session?.id)
+    }
+
+    public func markWorkerRunFailed() {
+        perform {
+            guard let repository = self.repository,
+                  var detail = self.workerRunDetail,
+                  var execution = detail.execution,
+                  let task = self.tasks.first(where: { $0.id == detail.task.id }) else {
+                throw FactoryError.missingSelection
+            }
+            execution.status = .failed
+            execution.endedAt = execution.endedAt ?? Date()
+            try repository.upsert(runnerExecution: execution)
+            if var session = detail.session {
+                session.status = .failed
+                session.updatedAt = Date()
+                try repository.upsert(runnerSession: session)
+            }
+            try repository.insert(runnerNotification: RunnerNotification(
+                taskId: task.id,
+                sessionId: detail.session?.id,
+                executionId: execution.id,
+                level: .warning,
+                message: "Worker run marked failed by user. Evidence: \(execution.logPath ?? "no log path recorded")."
+            ))
+            try repository.insert(taskEvent: TaskEvent(
+                taskId: task.id,
+                kind: .statusChangedManually,
+                source: .manual,
+                message: "Worker run marked failed. Previous task status: \(task.status.displayName). New task status: \(task.status.displayName). Reason: user marked execution failed. Evidence: execution \(execution.id.shortID), log \(execution.logPath ?? "unavailable").",
+                previousStatus: task.status,
+                newStatus: task.status
+            ))
+            try self.reloadWorkerState()
+            detail.execution = execution
+            detail.notifications = try repository.runnerNotifications(taskId: task.id)
+            detail.events = try repository.taskEvents(taskId: task.id)
+            self.workerRunDetail = detail
+            self.statusMessage = "Marked worker run failed."
+        }
+    }
+
+    public func markWorkerNeedsReview() {
+        perform {
+            guard let repository = self.repository,
+                  var task = self.selectedTask ?? self.workerRunDetail?.task else {
+                throw FactoryError.missingSelection
+            }
+            let previousStatus = task.status
+            task.status = .readyForReview
+            task.triageStatus = FactoryTaskTriageStatus.fromLegacyStatus(.readyForReview)
+            task.updatedAt = Date()
+            try repository.upsert(task: task)
+            try repository.insert(taskEvent: TaskEvent(
+                taskId: task.id,
+                kind: .statusChangedManually,
+                source: .manual,
+                message: "Marked needs review from worker detail. Previous task status: \(previousStatus.displayName). New task status: Ready for Review. Reason: user requested review. Evidence: execution \(self.workerRunDetail?.execution?.id.shortID ?? self.latestRunnerExecution?.id.shortID ?? "unavailable"), report \(self.workerRunDetail?.report?.parseStatus.displayName ?? self.latestWorkerReport?.parseStatus.displayName ?? "unavailable").",
+                previousStatus: previousStatus,
+                newStatus: .readyForReview
+            ))
+            try self.reload()
+            self.selectedTaskID = task.id
+            self.workerRunDetail = try self.makeWorkerRunDetail(task: task, executionId: self.workerRunDetail?.execution?.id)
+            self.statusMessage = "Marked task needs review."
+        }
+    }
+
+    public func dismissRunnerNotification(_ notification: RunnerNotification) {
+        perform {
+            guard let repository = self.repository else { throw FactoryError.missingSelection }
+            try repository.markRunnerNotificationRead(id: notification.id)
+            try self.reloadWorkerState()
+            if let task = self.workerRunDetail?.task {
+                self.workerRunDetail = try self.makeWorkerRunDetail(task: task, executionId: self.workerRunDetail?.execution?.id)
+            }
+            self.statusMessage = "Dismissed worker notification."
+        }
+    }
+
+    public func retryParseWorkerReport() {
+        perform {
+            guard let repository = self.repository,
+                  let detail = self.workerRunDetail,
+                  let execution = detail.execution,
+                  let session = detail.session,
+                  let report = detail.report else {
+                throw FactoryError.missingSelection
+            }
+            let parsed = WorkerReportParser.parse(
+                output: report.rawText,
+                sessionId: session.id,
+                executionId: execution.id,
+                sourceTaskId: detail.task.id
+            )
+            if var parsedReport = parsed.report {
+                parsedReport.id = report.id
+                try repository.upsert(workerReport: parsedReport)
+                for proposal in parsed.proposals {
+                    try repository.upsert(taskProposal: proposal)
+                }
+                if parsed.status == .partiallyParsed {
+                    try repository.insert(runnerNotification: RunnerNotification(
+                        taskId: detail.task.id,
+                        sessionId: session.id,
+                        executionId: execution.id,
+                        level: .warning,
+                        message: parsed.error ?? "Worker report partially parsed."
+                    ))
+                }
+            } else {
+                let failedReport = WorkerReport(
+                    id: report.id,
+                    sessionId: session.id,
+                    executionId: execution.id,
+                    status: .failed,
+                    parseStatus: parsed.status,
+                    parseError: parsed.error,
+                    summary: parsed.error ?? "Worker report could not be parsed.",
+                    rawText: parsed.rawReportText
+                )
+                try repository.upsert(workerReport: failedReport)
+                try repository.insert(runnerNotification: RunnerNotification(
+                    taskId: detail.task.id,
+                    sessionId: session.id,
+                    executionId: execution.id,
+                    level: .warning,
+                    message: parsed.error ?? "Worker report needs review."
+                ))
+            }
+            try self.reloadWorkerState()
+            self.workerRunDetail = try self.makeWorkerRunDetail(task: detail.task, executionId: execution.id)
+            self.statusMessage = parsed.report == nil ? "Retry parse failed; raw report preserved." : "Worker report parsed."
+        }
     }
 
     public func createTask(from proposal: TaskProposal) {
@@ -2542,6 +2751,15 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    private func openPath(_ path: String, successMessage: String) async {
+        do {
+            _ = try await commandRunner.run(CommandRequest(executable: "open", arguments: [path]))
+            statusMessage = successMessage
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     public func backupDatabaseNow() {
         perform {
             let timestamp = DateFormatter.backup.string(from: Date())
@@ -2850,6 +3068,8 @@ public final class AppStore: ObservableObject {
                 sessionId: session.id,
                 executionId: execution.id,
                 status: .failed,
+                parseStatus: parsed.status,
+                parseError: parsed.error,
                 summary: parsed.error ?? "Worker report could not be parsed.",
                 rawText: parsed.rawReportText
             )
@@ -2865,6 +3085,15 @@ public final class AppStore: ObservableObject {
         }
 
         try repository.upsert(workerReport: report)
+        if report.parseStatus == .partiallyParsed {
+            try repository.insert(runnerNotification: RunnerNotification(
+                taskId: task.id,
+                sessionId: session.id,
+                executionId: execution.id,
+                level: .warning,
+                message: report.parseError ?? "Worker report partially parsed."
+            ))
+        }
         for proposal in parsed.proposals {
             try repository.upsert(taskProposal: proposal)
         }
@@ -2883,7 +3112,7 @@ public final class AppStore: ObservableObject {
             to: .building,
             source: .automatic,
             eventKind: .statusChangedAutomatically,
-            message: "Assigned to AI Worker.",
+            message: "AI Worker automation changed task status. Previous status: \(task.status.displayName). New status: Building. Reason: worker execution started. Evidence: execution \(executionID.shortID).",
             repository: repository
         )
     }
@@ -2911,7 +3140,7 @@ public final class AppStore: ObservableObject {
             to: nextStatus,
             source: .automatic,
             eventKind: .statusChangedAutomatically,
-            message: "Worker report status: \(report.status.displayName).",
+            message: "AI Worker automation changed task status. Previous status: \(task.status.displayName). New status: \(nextStatus.displayName). Reason: worker report status \(report.status.displayName). Evidence: execution \(executionID.shortID); parse \(report.parseStatus.displayName); summary \(report.summary.nonEmptyTrimmed ?? "unavailable").",
             repository: repository
         )
     }

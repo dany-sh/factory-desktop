@@ -603,6 +603,14 @@ public final class MigrationRunner {
             CREATE INDEX IF NOT EXISTS idx_runner_notifications_task ON runner_notifications(task_id, is_read, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_lifecycle_snapshots_task ON lifecycle_snapshots(task_id, created_at DESC);
             """
+        ),
+        Migration(
+            version: 10,
+            name: "worker_run_detail_reliability",
+            sql: """
+            ALTER TABLE worker_reports ADD COLUMN parse_status TEXT NOT NULL DEFAULT 'parsed';
+            ALTER TABLE worker_reports ADD COLUMN parse_error TEXT;
+            """
         )
     ]
 }

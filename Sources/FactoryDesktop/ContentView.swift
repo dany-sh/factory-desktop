@@ -21,6 +21,12 @@ struct ContentView: View {
             RegisterProjectView()
                 .environmentObject(store)
         }
+        .sheet(isPresented: $store.isWorkerRunDetailPresented) {
+            if let detail = store.workerRunDetail {
+                WorkerRunDetailView(detail: detail)
+                    .environmentObject(store)
+            }
+        }
         .alert(
             "Factory Desktop",
             isPresented: Binding(

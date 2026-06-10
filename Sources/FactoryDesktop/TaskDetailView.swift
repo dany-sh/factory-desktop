@@ -244,6 +244,11 @@ struct TaskDetailView: View {
                         }
                         .disabled(store.latestWorkerReport == nil || store.isWorking)
 
+                        actionButton("Worker Detail", systemImage: "sidebar.right") {
+                            store.showWorkerRunDetail()
+                        }
+                        .disabled(store.latestRunnerExecution == nil && store.latestWorkerReport == nil)
+
                         actionButton("Create Proposed Tasks", systemImage: "plus.square.on.square") {
                             store.createAllProposedTasks()
                         }
@@ -1256,6 +1261,40 @@ struct TaskDetailView: View {
                     }
                     .buttonStyle(.plain)
                 }
+            }
+
+            if let execution = store.latestRunnerExecution {
+                Button {
+                    store.showWorkerRunDetail(executionId: execution.id)
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("AI Worker Execution")
+                                .font(.body)
+                            Text("\(execution.status.displayName) · \(execution.runReason) · \(execution.id.shortID)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 8) {
+                                Text("Started \(execution.startedAt.formatted(date: .abbreviated, time: .shortened))")
+                                if let endedAt = execution.endedAt {
+                                    Text("Ended \(endedAt.formatted(date: .abbreviated, time: .shortened))")
+                                }
+                                if let logPath = execution.logPath {
+                                    Text(URL(fileURLWithPath: logPath).lastPathComponent)
+                                }
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        Label("Detail", systemImage: "sidebar.right")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(10)
+                    .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
             }
 
             if !store.selectedRunOutput.isEmpty {

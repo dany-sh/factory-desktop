@@ -183,6 +183,8 @@ public struct WorkerReport: Identifiable, Equatable, Codable, Sendable {
     public var sessionId: String
     public var executionId: String
     public var status: WorkerReportStatus
+    public var parseStatus: WorkerReportParseStatus
+    public var parseError: String?
     public var summary: String
     public var filesChanged: [String]
     public var testsRun: [String]
@@ -198,6 +200,8 @@ public struct WorkerReport: Identifiable, Equatable, Codable, Sendable {
         sessionId: String,
         executionId: String,
         status: WorkerReportStatus,
+        parseStatus: WorkerReportParseStatus = .parsed,
+        parseError: String? = nil,
         summary: String,
         filesChanged: [String] = [],
         testsRun: [String] = [],
@@ -212,6 +216,8 @@ public struct WorkerReport: Identifiable, Equatable, Codable, Sendable {
         self.sessionId = sessionId
         self.executionId = executionId
         self.status = status
+        self.parseStatus = parseStatus
+        self.parseError = parseError
         self.summary = summary
         self.filesChanged = filesChanged
         self.testsRun = testsRun
@@ -221,6 +227,24 @@ public struct WorkerReport: Identifiable, Equatable, Codable, Sendable {
         self.recommendedTaskStatus = recommendedTaskStatus
         self.rawText = rawText
         self.createdAt = createdAt
+    }
+}
+
+public enum WorkerReportParseStatus: String, CaseIterable, Codable, Identifiable, Sendable {
+    case parsed
+    case partiallyParsed = "partially_parsed"
+    case missing
+    case invalid
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .parsed: "Parsed"
+        case .partiallyParsed: "Partially Parsed"
+        case .missing: "Missing"
+        case .invalid: "Invalid"
+        }
     }
 }
 
@@ -369,13 +393,51 @@ public struct LifecycleSnapshot: Identifiable, Equatable, Codable, Sendable {
     }
 }
 
+public struct WorkerRunDetail: Equatable {
+    public var task: FactoryTask
+    public var workspace: RunnerWorkspace?
+    public var session: RunnerSession?
+    public var execution: RunnerExecution?
+    public var prompt: String
+    public var report: WorkerReport?
+    public var proposals: [TaskProposal]
+    public var lifecycleSnapshots: [LifecycleSnapshot]
+    public var notifications: [RunnerNotification]
+    public var events: [TaskEvent]
+
+    public init(
+        task: FactoryTask,
+        workspace: RunnerWorkspace?,
+        session: RunnerSession?,
+        execution: RunnerExecution?,
+        prompt: String,
+        report: WorkerReport?,
+        proposals: [TaskProposal],
+        lifecycleSnapshots: [LifecycleSnapshot],
+        notifications: [RunnerNotification],
+        events: [TaskEvent]
+    ) {
+        self.task = task
+        self.workspace = workspace
+        self.session = session
+        self.execution = execution
+        self.prompt = prompt
+        self.report = report
+        self.proposals = proposals
+        self.lifecycleSnapshots = lifecycleSnapshots
+        self.notifications = notifications
+        self.events = events
+    }
+}
+
 public struct WorkerReportParseResult: Equatable, Sendable {
     public var report: WorkerReport?
     public var proposals: [TaskProposal]
     public var rawReportText: String
+    public var status: WorkerReportParseStatus
     public var error: String?
 
-    public var isValid: Bool { report != nil && error == nil }
+    public var isValid: Bool { report != nil && status == .parsed && error == nil }
 }
 
 public enum WorkerReportParser {
@@ -390,6 +452,7 @@ public enum WorkerReportParser {
                 report: nil,
                 proposals: [],
                 rawReportText: output,
+                status: .missing,
                 error: "Worker output did not contain a WORKER REPORT block."
             )
         }
@@ -402,6 +465,7 @@ public enum WorkerReportParser {
                 report: nil,
                 proposals: [],
                 rawReportText: rawReport,
+                status: .invalid,
                 error: "Worker report did not include a valid Status."
             )
         }
@@ -413,10 +477,16 @@ public enum WorkerReportParser {
         let summary = text(in: sections["summary"])
         let nextAction = text(in: sections["next recommended action"])
         let recommendedStatus = text(in: sections["recommended task status"]).nonEmptyTrimmed.flatMap(TaskStatus.workerText)
+        let requiredSections = ["summary", "files changed", "tests run", "risks", "blockers"]
+        let missingSections = requiredSections.filter { sections[$0] == nil }
+        let parseStatus: WorkerReportParseStatus = missingSections.isEmpty ? .parsed : .partiallyParsed
+        let parseError = missingSections.isEmpty ? nil : "Worker report is missing section(s): \(missingSections.joined(separator: ", "))."
         let report = WorkerReport(
             sessionId: sessionId,
             executionId: executionId,
             status: status,
+            parseStatus: parseStatus,
+            parseError: parseError,
             summary: summary,
             filesChanged: filesChanged,
             testsRun: testsRun,
@@ -433,7 +503,7 @@ public enum WorkerReportParser {
             sourceSessionId: sessionId,
             sourceFiles: filesChanged
         )
-        return WorkerReportParseResult(report: report, proposals: proposals, rawReportText: rawReport, error: nil)
+        return WorkerReportParseResult(report: report, proposals: proposals, rawReportText: rawReport, status: parseStatus, error: parseError)
     }
 
     private static func sections(from text: String) -> [String: [String]] {

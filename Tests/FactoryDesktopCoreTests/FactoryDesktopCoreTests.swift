@@ -2355,6 +2355,8 @@ final class FactoryDesktopCoreTests: XCTestCase {
         let report = try XCTUnwrap(parsed.report)
         XCTAssertTrue(parsed.isValid)
         XCTAssertEqual(report.status, .needsReview)
+        XCTAssertEqual(report.parseStatus, .parsed)
+        XCTAssertNil(report.parseError)
         XCTAssertEqual(report.filesChanged, ["Sources/AppStore.swift"])
         XCTAssertEqual(report.testsRun, ["swift test"])
         XCTAssertEqual(report.risks, ["UI needs manual QA."])
@@ -2375,7 +2377,51 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertFalse(parsed.isValid)
         XCTAssertNil(parsed.report)
         XCTAssertEqual(parsed.proposals, [])
+        XCTAssertEqual(parsed.status, .missing)
+        XCTAssertEqual(parsed.rawReportText, "No structured trailer.")
         XCTAssertTrue(parsed.error?.contains("WORKER REPORT") == true)
+    }
+
+    func testWorkerReportParserPreservesInvalidRawReport() {
+        let output = """
+        WORKER REPORT
+        Status: banana
+        Summary: This has raw text but invalid status.
+        """
+
+        let parsed = WorkerReportParser.parse(
+            output: output,
+            sessionId: "session",
+            executionId: "execution",
+            sourceTaskId: "task"
+        )
+
+        XCTAssertNil(parsed.report)
+        XCTAssertEqual(parsed.status, .invalid)
+        XCTAssertTrue(parsed.rawReportText.contains("Status: banana"))
+        XCTAssertTrue(parsed.error?.contains("valid Status") == true)
+    }
+
+    func testWorkerReportParserMarksPartialReports() throws {
+        let output = """
+        WORKER REPORT
+        Status: needs_review
+        Summary: Missing several optional-looking sections.
+        """
+
+        let parsed = WorkerReportParser.parse(
+            output: output,
+            sessionId: "session",
+            executionId: "execution",
+            sourceTaskId: "task"
+        )
+
+        let report = try XCTUnwrap(parsed.report)
+        XCTAssertFalse(parsed.isValid)
+        XCTAssertEqual(parsed.status, .partiallyParsed)
+        XCTAssertEqual(report.parseStatus, .partiallyParsed)
+        XCTAssertTrue(report.parseError?.contains("files changed") == true)
+        XCTAssertTrue(report.rawText.contains("Missing several"))
     }
 
     func testRepositoryPersistsWorkerRecordsAndApprovesProposalAsFactoryTask() throws {
@@ -2823,8 +2869,21 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(report.status, .needsReview)
         XCTAssertEqual(proposals.map(\.title), ["Add worker cancellation"])
         XCTAssertEqual(storedTask.status, .readyForReview)
-        XCTAssertTrue(events.contains { $0.newStatus == .building && $0.message == "Assigned to AI Worker." })
-        XCTAssertTrue(events.contains { $0.newStatus == .readyForReview && $0.message.contains("Worker report status") })
+        XCTAssertTrue(events.contains { $0.newStatus == .building && $0.message.contains("Reason: worker execution started") && $0.message.contains("Evidence: execution") })
+        XCTAssertTrue(events.contains { $0.newStatus == .readyForReview && $0.message.contains("Reason: worker report status") && $0.message.contains("Evidence: execution") })
+
+        fixture.store.showWorkerRunDetail(executionId: execution.id)
+        let detail = try XCTUnwrap(fixture.store.workerRunDetail)
+        XCTAssertEqual(detail.task.id, fixture.task.id)
+        XCTAssertEqual(detail.workspace?.id, workspace.id)
+        XCTAssertEqual(detail.session?.id, session.id)
+        XCTAssertEqual(detail.execution?.command, execution.command)
+        XCTAssertEqual(detail.execution?.logPath, execution.logPath)
+        XCTAssertTrue(detail.prompt.contains("WORKER REPORT"))
+        XCTAssertEqual(detail.report?.id, report.id)
+        XCTAssertEqual(detail.proposals.map(\.title), ["Add worker cancellation"])
+        XCTAssertFalse(detail.lifecycleSnapshots.isEmpty)
+        XCTAssertTrue(detail.events.contains { $0.message.contains("Evidence: execution") })
     }
 
     @MainActor
@@ -2868,6 +2927,8 @@ final class FactoryDesktopCoreTests: XCTestCase {
         let notifications = try fixture.repository.runnerNotifications(taskId: fixture.task.id)
         XCTAssertEqual(storedTask.status, .building)
         XCTAssertEqual(report.status, .failed)
+        XCTAssertEqual(report.parseStatus, .missing)
+        XCTAssertTrue(report.rawText.contains("forgot the structured report"))
         XCTAssertEqual(notifications.first?.level, .warning)
         XCTAssertTrue(notifications.first?.message.contains("WORKER REPORT") == true)
     }
