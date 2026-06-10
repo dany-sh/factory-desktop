@@ -463,6 +463,146 @@ public final class MigrationRunner {
             CREATE INDEX IF NOT EXISTS idx_tasks_project_triage ON tasks(project_id, triage_status, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_tasks_parent_task_id ON tasks(parent_task_id);
             """
+        ),
+        Migration(
+            version: 9,
+            name: "ai_worker_orchestration",
+            sql: """
+            CREATE TABLE IF NOT EXISTS runner_workspaces (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              task_id TEXT NOT NULL,
+              branch_name TEXT NOT NULL,
+              worktree_path TEXT NOT NULL,
+              base_commit TEXT,
+              head_commit TEXT,
+              archived INTEGER NOT NULL DEFAULT 0,
+              cleaned INTEGER NOT NULL DEFAULT 0,
+              pinned INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS runner_sessions (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              provider TEXT NOT NULL,
+              mode TEXT NOT NULL,
+              model_profile_json TEXT,
+              external_session_id TEXT,
+              status TEXT NOT NULL,
+              transcript_path TEXT,
+              active_turn_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(workspace_id) REFERENCES runner_workspaces(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS runner_executions (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              run_reason TEXT NOT NULL,
+              command TEXT,
+              status TEXT NOT NULL,
+              exit_code INTEGER,
+              log_path TEXT,
+              before_repo_state TEXT,
+              after_repo_state TEXT,
+              started_at TEXT NOT NULL,
+              ended_at TEXT,
+              FOREIGN KEY(session_id) REFERENCES runner_sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_turns (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              role TEXT NOT NULL,
+              content TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(session_id) REFERENCES runner_sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS worker_reports (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              execution_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              summary TEXT DEFAULT '',
+              files_changed_json TEXT DEFAULT '[]',
+              tests_run_json TEXT DEFAULT '[]',
+              risks_json TEXT DEFAULT '[]',
+              blockers_json TEXT DEFAULT '[]',
+              next_recommended_action TEXT DEFAULT '',
+              recommended_task_status TEXT,
+              raw_text TEXT DEFAULT '',
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(session_id) REFERENCES runner_sessions(id) ON DELETE CASCADE,
+              FOREIGN KEY(execution_id) REFERENCES runner_executions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS task_proposals (
+              id TEXT PRIMARY KEY,
+              source_task_id TEXT NOT NULL,
+              source_session_id TEXT NOT NULL,
+              title TEXT NOT NULL,
+              goal TEXT DEFAULT '',
+              context TEXT DEFAULT '',
+              acceptance_criteria_json TEXT DEFAULT '[]',
+              reason_discovered TEXT DEFAULT '',
+              suggested_priority TEXT NOT NULL DEFAULT 'normal',
+              suggested_stage TEXT NOT NULL DEFAULT 'backlog',
+              source_files_json TEXT DEFAULT '[]',
+              status TEXT NOT NULL DEFAULT 'proposed',
+              created_task_id TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(source_task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(source_session_id) REFERENCES runner_sessions(id) ON DELETE CASCADE,
+              FOREIGN KEY(created_task_id) REFERENCES tasks(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS runner_notifications (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              session_id TEXT,
+              execution_id TEXT,
+              level TEXT NOT NULL,
+              message TEXT NOT NULL,
+              is_read INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(session_id) REFERENCES runner_sessions(id) ON DELETE CASCADE,
+              FOREIGN KEY(execution_id) REFERENCES runner_executions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS lifecycle_snapshots (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              workspace_id TEXT,
+              worktree_exists INTEGER NOT NULL,
+              branch_exists INTEGER NOT NULL,
+              dirty_state TEXT NOT NULL,
+              main_moved INTEGER NOT NULL,
+              latest_execution_status TEXT,
+              latest_report_status TEXT,
+              unseen_notifications INTEGER NOT NULL DEFAULT 0,
+              proposed_tasks_count INTEGER NOT NULL DEFAULT 0,
+              recommended_action TEXT NOT NULL,
+              evidence_json TEXT DEFAULT '[]',
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(workspace_id) REFERENCES runner_workspaces(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_runner_workspaces_task ON runner_workspaces(task_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_runner_sessions_workspace ON runner_sessions(workspace_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_runner_executions_session ON runner_executions(session_id, started_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_worker_reports_session ON worker_reports(session_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_task_proposals_source_task ON task_proposals(source_task_id, status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_runner_notifications_task ON runner_notifications(task_id, is_read, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_lifecycle_snapshots_task ON lifecycle_snapshots(task_id, created_at DESC);
+            """
         )
     ]
 }

@@ -1,755 +1,655 @@
 import FactoryDesktopCore
 import SwiftUI
 
-struct InspectorView: View {
+struct RightToolsInspectorView: View {
     @EnvironmentObject private var store: AppStore
-    @Environment(\.openWindow) private var openWindow
-    @State private var commitMessage = ""
-    @State private var runnerWorkspacePath = ""
-    @State private var runnerSessionID = ""
-    @State private var showingCommitConfirmation = false
-    @State private var showAllArtifacts = false
+    @EnvironmentObject private var workspaceState: TaskWorkspaceState
+    @State private var workerExpanded = true
+    @State private var aiExpanded = true
+    @State private var qualityExpanded = true
+    @State private var reviewExpanded = true
+    @State private var terminalExpanded = false
+    @State private var browserExpanded = false
+    @State private var filesExpanded = false
+    @State private var proposalPrompt = ""
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                if store.selectedWorkspaceScope != .task {
-                    projectScopePlaceholder
+            VStack(alignment: .leading, spacing: 10) {
+                if shouldShowTaskInspector {
+                    aiWorkerSection
+                    aiAssistSection
+                    briefQualitySection
+                    reviewSection
+                    terminalSection
+                    browserSection
+                    filesSection
                 } else {
-                    codexCard
-                    worktreeCard
-                    actionCard
-                    taskStateCard
-                    lifecycleSyncCard
-                    preflightCard
-                    gitCard
-                    artifactsCard
+                    projectPlaceholder
                 }
             }
-            .padding(18)
+            .padding(12)
         }
-        .alert("Commit selected worktree?", isPresented: $showingCommitConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Commit") {
-                Task { await store.commitSelectedWorktree(message: commitMessage) }
-            }
-        } message: {
-            Text("Factory will run git add -A and git commit only in the selected task worktree, never on main/master/default.")
-        }
-        .onAppear {
-            syncCodexWorkspaceDraft()
-        }
-        .onChange(of: store.selectedProjectID) { _, _ in
-            syncCodexWorkspaceDraft()
-            runnerSessionID = ""
-        }
-        .onChange(of: store.selectedRunnerProjectLink?.workspacePath) { _, _ in
-            syncCodexWorkspaceDraft()
+        .onAppear(perform: syncWorkspaceState)
+        .onChange(of: store.selectedTask?.id) { _, _ in
+            syncWorkspaceState()
         }
     }
 
-    private var codexCard: some View {
-        InspectorCard(title: "Runner Session") {
-            if let project = store.selectedProject {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Runner Workspace")
-                        .font(.caption.weight(.semibold))
+    private var shouldShowTaskInspector: Bool {
+        switch store.selectedWorkspaceScope {
+        case .task:
+            return inspectorTask != nil
+        case .kanban:
+            return inspectorTask != nil
+        case .project:
+            return false
+        }
+    }
+
+    private var inspectorTask: FactoryTask? {
+        guard let task = store.selectedTask else { return nil }
+        guard task.projectId == store.selectedProject?.id else { return nil }
+        return task
+    }
+
+    private var selectedEditorAssistProviderIsAvailable: Bool {
+        store.editorAssistProviderOptions.first { $0.provider == store.selectedEditorAssistProvider }?.isAvailable == true
+    }
+
+    private var aiWorkerSection: some View {
+        InspectorToolSectionView(
+            icon: "sparkles",
+            title: "AI Worker",
+            isExpanded: $workerExpanded
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    inspectorActionButton("Assign", systemImage: "sparkles") {
+                        Task { await store.assignSelectedTaskToAIWorker() }
+                    }
+                    inspectorActionButton("Resume", systemImage: "play.circle") {
+                        Task { await store.resumeWorker() }
+                    }
+                    .disabled(store.selectedRunnerSession == nil || store.isWorking)
+                }
+
+                HStack {
+                    inspectorActionButton("Review Report", systemImage: "doc.text.magnifyingglass") {
+                        store.reviewLatestWorkerReport()
+                    }
+                    .disabled(store.latestWorkerReport == nil || store.isWorking)
+                    inspectorActionButton("View Logs", systemImage: "doc.plaintext") {
+                        store.viewLatestWorkerLogs()
+                    }
+                    .disabled(store.latestRunnerExecution?.logPath == nil || store.isWorking)
+                }
+
+                inspectorActionButton("Create Proposed Tasks", systemImage: "plus.square.on.square") {
+                    store.createAllProposedTasks()
+                }
+                .disabled(!store.taskProposals.contains { $0.status == .proposed } || store.isWorking)
+
+                Divider()
+
+                if let workspace = store.selectedRunnerWorkspace {
+                    InspectorMetricRow(label: "Workspace", value: workspace.worktreePath)
+                    InspectorMetricRow(label: "Branch", value: workspace.branchName)
+                } else {
+                    Text("No runner workspace yet.")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-                    TextField(project.path, text: $runnerWorkspacePath)
-                        .textFieldStyle(.roundedBorder)
-                    HStack {
-                        Button {
-                            store.linkRunnerProject(workspacePath: runnerWorkspacePath.isEmpty ? project.path : runnerWorkspacePath)
-                        } label: {
-                            Label(store.selectedRunnerProjectLink == nil ? "Link Workspace" : "Update Link", systemImage: "link")
-                        }
-                        Button {
-                            Task { await store.openSelectedProjectInCodex() }
-                        } label: {
-                            Label("Open Provider App", systemImage: "arrow.up.forward.app")
-                        }
-                        .disabled(store.isWorking)
-                        if store.selectedRunnerProjectLink != nil {
-                            Button {
-                                store.unlinkRunnerProject()
-                            } label: {
-                                Label("Unlink", systemImage: "link.badge.minus")
-                            }
-                            .disabled(store.isWorking)
-                        }
-                    }
-                    .buttonStyle(.bordered)
+                }
 
-                    if let link = store.selectedRunnerProjectLink {
-                        InfoRow(label: "Linked path", value: link.workspacePath)
-                        InfoRow(label: "Provider", value: link.provider.displayName)
-                    }
+                if let session = store.selectedRunnerSession {
+                    InspectorMetricRow(label: "Session", value: session.externalSessionId ?? session.id.shortID)
+                    InspectorMetricRow(label: "Provider", value: session.provider.displayName)
+                    InspectorMetricRow(label: "Status", value: session.status.displayName)
+                }
 
+                if let execution = store.latestRunnerExecution {
+                    InspectorMetricRow(label: "Latest Execution", value: "\(execution.status.displayName) · \(execution.runReason)")
+                }
+
+                if let report = store.latestWorkerReport {
                     Divider()
+                    InspectorMetricRow(label: "Report", value: report.status.displayName)
+                    if !report.summary.isEmpty {
+                        Text(report.summary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    workerList("Files Changed", values: report.filesChanged)
+                    workerList("Tests Run", values: report.testsRun)
+                    workerList("Risks", values: report.risks)
+                    workerList("Blockers", values: report.blockers)
+                    if !report.nextRecommendedAction.isEmpty {
+                        InspectorMetricRow(label: "Next Recommended Action", value: report.nextRecommendedAction)
+                    }
+                }
 
-                    if let session = store.selectedTaskRunnerSessionLink {
-                        InfoRow(label: "Session ID", value: session.sessionID)
-                        InfoRow(label: "Provider", value: session.provider.displayName)
-                        InfoRow(label: "Workspace", value: session.workspacePath)
-                        if let branch = session.branchName {
-                            InfoRow(label: "Branch", value: branch)
-                        }
-                        if let worktree = session.worktreePath {
-                            InfoRow(label: "Worktree", value: worktree)
-                        }
-                        InfoRow(label: "Status", value: session.status.displayName)
-                        InfoRow(label: "Last seen", value: session.lastSeenAt?.formatted(date: .abbreviated, time: .shortened) ?? "Unknown")
-                        if let summary = session.lastSummary, !summary.isEmpty {
-                            InfoRow(label: "Summary", value: summary)
-                        }
-                        if let recommendation = store.latestRunnerRecommendation ?? store.latestCodexSessionRecommendation.map({ RunnerRecommendation(action: runnerAction(from: $0.action), reason: $0.reason) }) {
-                            InfoRow(label: "Next", value: recommendation.action.displayName)
-                            InfoRow(label: "Reason", value: recommendation.reason)
-                        }
-                        HStack {
-                            Button {
-                                Task { await store.continueRunnerSession() }
-                            } label: {
-                                Label("Continue Run", systemImage: "play.circle")
-                            }
-                            Button {
-                                Task { await store.refreshSelectedTaskRunnerSessionState() }
-                            } label: {
-                                Label("Refresh Session", systemImage: "arrow.clockwise")
-                            }
-                            Button {
-                                Task { await store.checkSelectedTaskRunnerSession() }
-                            } label: {
-                                Label("Check Run State", systemImage: "checkmark.seal")
-                            }
-                            Button {
-                                store.detachRunnerSessionFromSelectedTask()
-                            } label: {
-                                Label("Detach", systemImage: "xmark.circle")
-                            }
+                let proposed = store.taskProposals.filter { $0.status == .proposed }
+                if !proposed.isEmpty {
+                    Divider()
+                    Text("Proposed Follow-up Tasks")
+                        .font(.caption.weight(.semibold))
+                    ForEach(proposed) { proposal in
+                        proposalRow(proposal)
+                    }
+                    HStack {
+                        Button("Create All") {
+                            store.createAllProposedTasks()
                         }
                         .buttonStyle(.bordered)
-                        .disabled(store.isWorking)
-                    } else if store.selectedTask != nil {
-                        Text("No runner session linked")
+                        Button("Dismiss All") {
+                            store.dismissAllTaskProposals()
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    .controlSize(.small)
+                }
+
+                if let snapshot = store.latestLifecycleSnapshot {
+                    Divider()
+                    InspectorMetricRow(label: "Lifecycle Recommendation", value: snapshot.recommendedAction)
+                    HStack(spacing: 8) {
+                        CompactStatusChip(label: "Worktree", value: snapshot.worktreeExists ? "Exists" : "Missing")
+                        CompactStatusChip(label: "Branch", value: snapshot.branchExists ? "Exists" : "Missing")
+                        CompactStatusChip(label: "Proposals", value: "\(snapshot.proposedTasksCount)")
+                    }
+                }
+            }
+        }
+    }
+
+    private var aiAssistSection: some View {
+        InspectorToolSectionView(
+            icon: "sparkles.rectangle.stack",
+            title: "AI Assist",
+            isExpanded: $aiExpanded
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Provider", selection: $store.selectedEditorAssistProvider) {
+                    ForEach(store.editorAssistProviderOptions) { option in
+                        Text(option.isAvailable ? option.provider.displayName : "\(option.provider.displayName) · \(option.detail)")
+                            .tag(option.provider)
+                            .disabled(!option.isAvailable)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+
+                targetSummary
+
+                LazyVGrid(columns: [GridItem(.flexible())], spacing: 7) {
+                    ForEach(inspectorActions) { action in
+                        Button {
+                            runAssist(action: action)
+                        } label: {
+                            Label(action.displayName, systemImage: editorAssistIcon(for: action))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(!selectedEditorAssistProviderIsAvailable || store.isEditorAssistRunning)
+                    }
+                }
+
+                if store.isEditorAssistRunning {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Generating suggestion…")
+                            .font(.caption)
                             .foregroundStyle(.secondary)
-                        TextField("Session ID", text: $runnerSessionID)
-                            .textFieldStyle(.roundedBorder)
-                        HStack {
-                            Button {
-                                Task { await store.dispatchTask() }
-                            } label: {
-                                Label("Dispatch", systemImage: "paperplane")
-                            }
-                            Button {
-                                store.attachRunnerSessionToSelectedTask(sessionID: runnerSessionID)
-                                runnerSessionID = ""
-                            } label: {
-                                Label("Attach Session", systemImage: "link.badge.plus")
-                            }
+                    }
+                } else if let proposal = store.latestAIAssistProposal {
+                    Divider()
+                    Text(proposal.summary)
+                        .font(.caption.weight(.semibold))
+                    InspectorMetricRow(label: "Target", value: proposal.target.label)
+                    ScrollView {
+                        Text(editorAssistPreviewText(for: proposal))
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(minHeight: 92, maxHeight: 180)
+                    .padding(8)
+                    .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+
+                    HStack {
+                        Button("Accept") {
+                            workspaceState.applyProposal(proposal, insertOnly: proposal.target.kind == .cursorInsertionPoint)
+                            store.clearEditorAssistSuggestion()
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(store.isWorking)
-                    } else {
-                        Text("Select a task to attach or dispatch a runner session.")
-                            .foregroundStyle(.secondary)
+
+                        Button("Replace Target") {
+                            workspaceState.applyProposal(proposal, insertOnly: false)
+                            store.clearEditorAssistSuggestion()
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("Insert Below") {
+                            workspaceState.applyProposal(proposal, insertOnly: true)
+                            store.clearEditorAssistSuggestion()
+                        }
+                        .buttonStyle(.bordered)
                     }
-                }
-            } else {
-                Text("No project selected.")
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
 
-    private func syncCodexWorkspaceDraft() {
-        runnerWorkspacePath = store.selectedRunnerProjectLink?.workspacePath ?? store.selectedProject?.path ?? ""
-    }
+                    TextField("Refine or custom ask", text: $proposalPrompt, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(2...4)
 
-    private func runnerAction(from action: CodexSessionRecommendedAction) -> RunnerRecommendedAction {
-        switch action {
-        case .reviewDiff: .reviewDiff
-        case .runTests: .runTests
-        case .syncLifecycle: .syncLifecycle
-        case .needsManualReview: .needsManualReview
-        case .noAction: .noAction
-        }
-    }
+                    HStack {
+                        Button("Retry") {
+                            runAssist(action: proposal.action, customInstruction: proposal.customInstruction)
+                        }
+                        .buttonStyle(.bordered)
 
-    private var worktreeCard: some View {
-        InspectorCard(title: "Task Worktree") {
-            if store.selectedTask != nil {
-                if store.selectedTaskWorktreeDisplays.isEmpty {
-                    Text("No task worktree created.")
+                        Button("Refine") {
+                            let instruction = proposalPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !instruction.isEmpty else { return }
+                            runAssist(action: proposal.action, customInstruction: instruction)
+                            proposalPrompt = ""
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("Dismiss") {
+                            proposalPrompt = ""
+                            store.clearEditorAssistSuggestion()
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                    }
+                } else if !selectedEditorAssistProviderIsAvailable {
+                    Text("Selected provider is not configured yet.")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(store.selectedTaskWorktreeDisplays) { display in
-                        TaskWorktreeReferenceView(display: display)
-                    }
+                    Text("Run an AI action to generate a proposal here. The editor will not change until you accept one.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-            } else {
-                Text("Select a task to create worktrees.")
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
 
-    private var actionCard: some View {
-        InspectorCard(title: "Next Actions") {
-            VStack(alignment: .leading, spacing: 8) {
-                if let review = store.latestTaskStateReview {
-                    recommendedActionButton(review.recommendedAction)
-                } else if let task = store.selectedTask, task.status == .archived || task.status == .done {
-                    completedTaskActionSummary(task)
-                } else {
-                    Button {
-                        Task { await store.reviewTaskState() }
-                    } label: {
-                        Label("Review Task State", systemImage: "list.bullet.clipboard")
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                if !workspaceState.customInlinePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.latestAIAssistProposal == nil {
+                    Divider()
+                    TextField("Custom ask", text: $workspaceState.customInlinePrompt, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(2...4)
+
+                    Button("Run Custom Ask") {
+                        let instruction = workspaceState.customInlinePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !instruction.isEmpty else { return }
+                        runAssist(action: .customAsk, customInstruction: instruction)
+                        workspaceState.customInlinePrompt = ""
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(store.selectedTask == nil || store.isWorking)
-                }
-
-                if store.latestTaskStateReview != nil, store.selectedTask?.status != .archived, store.selectedTask?.status != .done {
-                    Button {
-                        Task { await store.reviewTaskState() }
-                    } label: {
-                        Label("Review Task State", systemImage: "list.bullet.clipboard")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .disabled(store.selectedTask == nil || store.isWorking)
-                }
-
-                Button {
-                    Task { await store.runPreflightCheck() }
-                } label: {
-                    Label("Preflight Check", systemImage: "checklist.checked")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .disabled(store.selectedTask == nil || store.isWorking)
-
-                Divider()
-                nextActionButtons
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Divider()
-            Text("Setup")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            setupButtons
-
-            Divider()
-            TextField("Commit message", text: $commitMessage)
-            Button {
-                showingCommitConfirmation = true
-            } label: {
-                Label("Commit Selected Worktree", systemImage: "checkmark.circle")
-            }
-            .disabled(commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.selectedTask?.status != .readyForReview || store.isWorking || selectedCodeWorktreeUnavailable)
-        }
-        .buttonStyle(.bordered)
-    }
-
-    private func completedTaskActionSummary(_ task: FactoryTask) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(task.status == .archived ? "Archived" : "No action required")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Button("Reopen Task") {}
-                .disabled(true)
-                .help("Foundation-only placeholder.")
-        }
-    }
-
-    @ViewBuilder
-    private var nextActionButtons: some View {
-        if let task = store.selectedTask {
-            switch task.status {
-            case .backlog, .ready, .planning:
-                if store.canPlanSelectedTaskLocally {
-                    primaryButton("Plan Locally", systemImage: "brain") {
-                        Task { await store.planLocally() }
-                    }
-                } else {
-                    primaryButton("Create Task Worktree", systemImage: "point.3.connected.trianglepath.dotted") {
-                        Task { await store.createWorktree(flavor: .local) }
-                    }
-                    if let warning = store.selectedTaskWorktreeWarning {
-                        Text(warning)
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-                }
-            case .planReview:
-                primaryButton("Review Plan Locally", systemImage: "checklist") {
-                    Task { await store.reviewPlanLocally() }
-                }
-                secondaryButton("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass") {
-                    store.generateCodexPlanReviewHandoff()
-                }
-                secondaryButton("Approve Plan", systemImage: "hand.thumbsup") {
-                    store.approvePlan()
-                }
-                secondaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
-                    Task { await store.planLocally() }
-                }
-            case .approved:
-                if store.latestTaskStateReview?.hasImplementationChanges == true {
-                    primaryButton("Run Tests", systemImage: "checkmark.seal") {
-                        Task { await store.runFirstTestCommand() }
-                    }
-                    .disabled(selectedCodeWorktreeUnavailable)
-                } else {
-                    primaryButton("Build Locally", systemImage: "hammer") {
-                        store.buildLocallyPlaceholder()
-                    }
-                    .disabled(selectedCodeWorktreeUnavailable)
-                }
-                secondaryButton("Generate Codex Build Handoff", systemImage: "paperplane") {
-                    store.generateCodexHandoff()
-                }
-                .disabled(selectedCodeWorktreeUnavailable)
-                secondaryButton("Run Tests", systemImage: "checkmark.seal") {
-                    Task { await store.runFirstTestCommand() }
-                }
-                .disabled(selectedCodeWorktreeUnavailable)
-            case .needsFixes:
-                primaryButton("Revise Plan Locally", systemImage: "arrow.triangle.2.circlepath") {
-                    Task { await store.planLocally() }
-                }
-                secondaryButton("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass") {
-                    store.generateCodexPlanReviewHandoff()
-                }
-            case .building, .testing:
-                primaryButton("Run Tests", systemImage: "checkmark.seal") {
-                    Task { await store.runFirstTestCommand() }
-                }
-                .disabled(selectedCodeWorktreeUnavailable)
-                if !store.gitSnapshot.changedFiles.isEmpty {
-                    secondaryButton("Review Diff Locally", systemImage: "doc.text.magnifyingglass") {
-                        Task { await store.reviewDiffLocally() }
-                    }
-                    .disabled(selectedCodeWorktreeUnavailable)
-                }
-            case .readyForReview:
-                primaryButton("Review Diff Locally", systemImage: "doc.text.magnifyingglass") {
-                    Task { await store.reviewDiffLocally() }
-                }
-                .disabled(selectedCodeWorktreeUnavailable)
-                secondaryButton("Generate Codex Diff Review Handoff", systemImage: "paperplane") {
-                    store.askCodexToReviewDiff()
-                }
-                .disabled(selectedCodeWorktreeUnavailable)
-                secondaryButton("Generate Review Note", systemImage: "doc.badge.clock") {
-                    store.generateReviewNote()
-                }
-            case .done, .archived:
-                Text("Task is done.")
-                    .foregroundStyle(.secondary)
-            case .blocked:
-                primaryButton("Run Tests", systemImage: "checkmark.seal") {
-                    Task { await store.runFirstTestCommand() }
-                }
-                .disabled(selectedCodeWorktreeUnavailable)
-                secondaryButton("Generate Review Note", systemImage: "doc.badge.clock") {
-                    store.generateReviewNote()
                 }
             }
-        } else {
-            Text("Select a task to see next actions.")
-                .foregroundStyle(.secondary)
         }
     }
 
-    @ViewBuilder
-    private var setupButtons: some View {
-        Button {
-            Task { await store.refreshGitStatus() }
-        } label: {
-            Label("Refresh Git Status", systemImage: "arrow.clockwise")
-        }
+    private var briefQualitySection: some View {
+        let quality = DraftQuality(brief: workspaceState.draft.brief, acceptanceText: workspaceState.acceptanceText)
+        let hasBriefContent = !workspaceState.draft.brief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !workspaceState.acceptanceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return InspectorToolSectionView(
+            icon: "checklist",
+            title: "Brief Quality",
+            isExpanded: $qualityExpanded
+        ) {
+            if hasBriefContent {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("\(quality.score)/4")
+                            .font(.caption.weight(.bold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(quality.color.opacity(0.16), in: Capsule())
+                            .foregroundStyle(quality.color)
+                        Spacer()
+                    }
 
-        if store.selectedProject?.type == .codeRepo, let task = store.selectedTask {
-            if task.localWorktreePath == nil {
-                Button {
-                    Task { await store.createWorktree(flavor: .local) }
-                } label: {
-                    Label("Create Task Worktree", systemImage: "point.3.connected.trianglepath.dotted")
-                }
-                .disabled(store.isWorking)
-            }
-
-            if task.codexWorktreePath == nil {
-                Button {
-                    Task { await store.createWorktree(flavor: .codex) }
-                } label: {
-                    Label("Create Alternate Worktree", systemImage: "terminal")
-                }
-                .disabled(store.isWorking)
-            }
-        }
-
-        Button {
-            Task { await store.openVSCodeForSelectedTask() }
-        } label: {
-            Label("Open VS Code", systemImage: "curlybraces.square")
-        }
-        .disabled(store.selectedTask == nil || selectedCodeWorktreeUnavailable)
-
-        Button {
-            store.generateCodexHandoff()
-        } label: {
-            Label("Generate Codex Build Handoff", systemImage: "paperplane")
-        }
-        .disabled(!canSendToCodexBuild)
-    }
-
-    private var canSendToCodexBuild: Bool {
-        guard let status = store.selectedTask?.status else { return false }
-        return !store.isWorking && status == .approved && !selectedCodeWorktreeUnavailable
-    }
-
-    private var selectedCodeWorktreeUnavailable: Bool {
-        store.selectedProject?.type == .codeRepo && !store.selectedTaskCanUseWorktree
-    }
-
-    private var taskStateCard: some View {
-        InspectorCard(title: "Task State Review") {
-            if let review = store.latestTaskStateReview {
-                InfoRow(label: "Recommended", value: review.recommendedAction.displayName)
-                InfoRow(label: "Summary", value: review.summary)
-                if review.hasPlan && !review.hasPlanReview {
-                    Text("Plan exists but has not been reviewed.")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.orange)
-                }
-                HStack(spacing: 12) {
-                    TaskStateMetric(label: "Plan", value: review.hasPlan ? "yes" : "no")
-                    TaskStateMetric(label: "Review", value: review.hasPlanReview ? "yes" : "no")
-                    TaskStateMetric(label: "Preflight", value: review.hasPreflight ? (review.hasRiskyPreflight ? "risk" : "yes") : "no")
-                }
-                HStack(spacing: 12) {
-                    TaskStateMetric(label: "Changes", value: review.hasImplementationChanges ? "yes" : "no")
-                    TaskStateMetric(label: "Tests", value: review.hasTestOutput ? "yes" : "no")
-                    TaskStateMetric(label: "Diff", value: review.hasDiffReview ? "yes" : "no")
-                }
-            } else if let artifact = store.latestTaskStateReviewArtifact {
-                InfoRow(label: "Latest artifact", value: artifact.path)
-                Button {
-                    openArtifact(artifact)
-                } label: {
-                    Label(buttonTitle(for: artifact), systemImage: buttonIcon(for: artifact))
-                }
-            } else {
-                Text("Run Review Task State to inspect artifacts and get one recommended next action.")
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var preflightCard: some View {
-        InspectorCard(title: "Preflight") {
-            if let report = store.latestPreflightReport {
-                InfoRow(label: "Recommendation", value: report.overallRecommendation.displayName)
-                HStack(spacing: 12) {
-                    PreflightMetric(label: "Dirty", value: report.dirtyTargetCount)
-                    PreflightMetric(label: "Missing", value: report.missingPathCount)
-                    PreflightMetric(label: "Unpushed", value: report.unpushedCount)
-                }
-
-                Divider()
-                ForEach(report.targets) { target in
-                    PreflightTargetRow(target: target)
-                    if target.id != report.targets.last?.id {
-                        Divider()
+                    ForEach(quality.checks) { check in
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: check.isComplete ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(check.isComplete ? Color.green : .secondary)
+                            Text(check.title)
+                                .font(.caption)
+                                .foregroundStyle(check.isComplete ? .primary : .secondary)
+                        }
                     }
                 }
             } else {
-                Text("Run Preflight Check to inspect the canonical repo and Factory-managed worktrees.")
+                Text("No task brief yet. Start writing in the main editor to score goal, context, scope, and acceptance quality.")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
     }
 
-    private var lifecycleSyncCard: some View {
-        InspectorCard(title: "Lifecycle Sync") {
+    private var reviewSection: some View {
+        InspectorToolSectionView(
+            icon: "list.bullet.clipboard",
+            title: "Review / State",
+            isExpanded: $reviewExpanded
+        ) {
             VStack(alignment: .leading, spacing: 10) {
-                Button {
-                    Task { await store.syncSelectedTaskLifecycle() }
-                } label: {
-                    Label("Sync lifecycle", systemImage: "arrow.triangle.2.circlepath")
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                HStack {
+                    inspectorActionButton("Review State", systemImage: "list.bullet.clipboard") {
+                        Task { await store.reviewTaskState() }
+                    }
+                    inspectorActionButton("Preflight", systemImage: "checklist.checked") {
+                        Task { await store.runPreflightCheck() }
+                    }
                 }
-                .disabled(store.selectedTask == nil || store.isWorking)
+
+                inspectorActionButton("Sync Lifecycle", systemImage: "arrow.triangle.2.circlepath") {
+                    Task { await store.syncSelectedTaskLifecycle() }
+                }
+
+                if let review = store.latestTaskStateReview {
+                    InspectorMetricRow(label: "Recommended", value: review.recommendedAction.displayName)
+                    Text(review.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    HStack(spacing: 8) {
+                        CompactStatusChip(label: "Plan", value: review.hasPlan ? "Yes" : "No")
+                        CompactStatusChip(label: "Review", value: review.hasPlanReview ? "Yes" : "No")
+                        CompactStatusChip(label: "Tests", value: review.hasTestOutput ? "Yes" : "No")
+                    }
+
+                    HStack(spacing: 8) {
+                        CompactStatusChip(label: "Diff", value: review.hasDiffReview ? "Yes" : "No")
+                        CompactStatusChip(label: "Changes", value: review.hasImplementationChanges ? "Yes" : "No")
+                        CompactStatusChip(label: "Preflight", value: review.hasPreflight ? (review.hasRiskyPreflight ? "Risk" : "Yes") : "No")
+                    }
+                } else {
+                    Text("Run Review State to summarize the current plan, tests, diff, and recommended next action.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
                 LifecycleSyncSummaryView(
                     result: store.latestLifecycleSyncResult,
-                    emptyMessage: "Run lifecycle sync to inspect Git-backed task facts."
+                    emptyMessage: "No lifecycle sync details yet."
                 )
             }
         }
-        .buttonStyle(.bordered)
     }
 
-    private var lifecycleCard: some View {
-        LifecycleCleanupView()
+    private var terminalSection: some View {
+        InspectorToolSectionView(
+            icon: "terminal",
+            title: "Terminal",
+            isExpanded: $terminalExpanded
+        ) {
+            if let session = store.selectedTaskRunnerSessionLink {
+                VStack(alignment: .leading, spacing: 8) {
+                    InspectorMetricRow(label: "Session", value: session.sessionID)
+                    InspectorMetricRow(label: "Status", value: session.status.displayName)
+                    InspectorMetricRow(label: "Workspace", value: session.workspacePath)
+                }
+            } else {
+                Text("No task terminal session yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
-    private var projectScopePlaceholder: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Project and kanban views stay focused in the main workspace.")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text("Select a task to see task-specific inspector details.")
+    private var browserSection: some View {
+        InspectorToolSectionView(
+            icon: "safari",
+            title: "Browser",
+            isExpanded: $browserExpanded
+        ) {
+            Text("No browser session attached.")
                 .font(.caption)
-                .foregroundStyle(.tertiary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(.top, 4)
-    }
-
-    @ViewBuilder
-    private func recommendedActionButton(_ action: TaskStateRecommendedAction) -> some View {
-        switch action {
-        case .createWorktree:
-            primaryButton("Create Task Worktree", systemImage: "point.3.connected.trianglepath.dotted") {
-                Task { await store.createWorktree(flavor: .local) }
-            }
-        case .runPreflight, .inspectPreflightFixGitState:
-            primaryButton(action.displayName, systemImage: "checklist.checked") {
-                Task { await store.runPreflightCheck() }
-            }
-        case .planLocally, .revisePlan:
-            primaryButton(action.displayName, systemImage: "brain") {
-                Task { await store.planLocally() }
-            }
-            .disabled(store.isWorking || !store.canPlanSelectedTaskLocally)
-        case .reviewPlanLocally:
-            primaryButton(action.displayName, systemImage: "checklist") {
-                Task { await store.reviewPlanLocally() }
-            }
-        case .askCodexToReviewPlan:
-            primaryButton("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass") {
-                store.generateCodexPlanReviewHandoff()
-            }
-        case .approvePlan:
-            primaryButton(action.displayName, systemImage: "hand.thumbsup") {
-                store.approvePlan()
-            }
-        case .buildLocally:
-            primaryButton(action.displayName, systemImage: "hammer") {
-                store.buildLocallyPlaceholder()
-            }
-            .disabled(selectedCodeWorktreeUnavailable)
-        case .runTests:
-            primaryButton(action.displayName, systemImage: "checkmark.seal") {
-                Task { await store.runFirstTestCommand() }
-            }
-            .disabled(selectedCodeWorktreeUnavailable)
-        case .reviewDiff:
-            primaryButton(action.displayName, systemImage: "doc.text.magnifyingglass") {
-                Task { await store.reviewDiffLocally() }
-            }
-            .disabled(selectedCodeWorktreeUnavailable)
-        case .commitAndMerge:
-            Text("Primary next action: Commit and Merge")
-                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
-        case .archive:
-            Text("Primary next action: Archive")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-        case .noActionRequired:
-            VStack(alignment: .leading, spacing: 6) {
-                Text(store.selectedTask?.status == .archived ? "Archived" : "No action required")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Button("Reopen Task") {}
-                    .disabled(true)
-                    .help("Foundation-only placeholder.")
-            }
-        case .investigate:
-            primaryButton(action.displayName, systemImage: "list.bullet.clipboard") {
-                Task { await store.reviewTaskState() }
-            }
         }
     }
 
-    private func primaryButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .buttonStyle(.borderedProminent)
-        .disabled(store.selectedTask == nil || store.isWorking)
-    }
-
-    private func secondaryButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .disabled(store.selectedTask == nil || store.isWorking)
-    }
-
-    private var gitCard: some View {
-        InspectorCard(title: "Git Status") {
-            InfoRow(label: "Worktree", value: store.gitSnapshot.worktreePath.isEmpty ? "Not refreshed" : store.gitSnapshot.worktreePath)
-            InfoRow(label: "Branch", value: store.gitSnapshot.currentBranch ?? "Unknown")
-            Divider()
-            Text("Changed Files")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            if store.gitSnapshot.changedFiles.isEmpty {
-                Text("No changed files detected.")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(store.gitSnapshot.changedFiles, id: \.self) { file in
-                    Text(file)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-            }
-            Divider()
-            Text("Diff Stat")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(store.gitSnapshot.diffStat.isEmpty ? "(empty)" : store.gitSnapshot.diffStat)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-            Divider()
-            Text("Raw Status")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(store.gitSnapshot.statusText.isEmpty ? "(not refreshed)" : store.gitSnapshot.statusText)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-        }
-    }
-
-    private var artifactsCard: some View {
-        InspectorCard(title: "Artifacts") {
-            let groups = store.artifactDisplayGroups
+    private var filesSection: some View {
+        InspectorToolSectionView(
+            icon: "doc.on.doc",
+            title: "Files",
+            isExpanded: $filesExpanded
+        ) {
             if store.artifacts.isEmpty {
-                Text("Handoffs and review notes will appear here.")
+                Text("No file context attached.")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                Toggle("Show All Artifacts", isOn: $showAllArtifacts)
-                    .toggleStyle(.switch)
-                artifactList(title: "Current", artifacts: groups.current)
-                if showAllArtifacts {
-                    artifactList(title: "History", artifacts: groups.history)
-                    artifactList(title: "Raw Logs / Prompts", artifacts: groups.rawLogs)
+                VStack(alignment: .leading, spacing: 8) {
+                    InspectorMetricRow(label: "Attached Artifacts", value: "\(store.artifacts.count)")
+                    Text("Task artifacts remain available in the Artifacts stage of the main workspace.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
     }
 
-    private func artifactList(title: String, artifacts: [Artifact]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption.weight(.semibold))
+    private var projectPlaceholder: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(store.selectedWorkspaceScope == .project ? "Project Inspector" : "Task Inspector")
+                .font(.headline)
+            Text(placeholderCopy)
+                .font(.caption)
                 .foregroundStyle(.secondary)
-            if artifacts.isEmpty {
-                Text("None.")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+    }
+
+    private var placeholderCopy: String {
+        switch store.selectedWorkspaceScope {
+        case .project:
+            return "The right inspector stays quiet on the project dashboard. Select a task or switch to the task workspace to open task tools."
+        case .kanban:
+            return "Select a task card in Kanban to show its AI, quality, and review tools here."
+        case .task:
+            return "Select a task to show its inspector tools."
+        }
+    }
+
+    private func syncWorkspaceState() {
+        guard let task = inspectorTask else { return }
+        workspaceState.loadIfNeeded(task)
+    }
+
+    private var inspectorActions: [EditorAssistAction] {
+        [
+            .askAI,
+            .rewriteSelection,
+            .makeClearer,
+            .makeShorter,
+            .continueWriting,
+            .generateAcceptanceCriteria,
+            .tightenGoal,
+            .findAmbiguity,
+            .splitTask
+        ]
+    }
+
+    private var targetSummary: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            InspectorMetricRow(label: "Target", value: workspaceState.currentAssistTarget.label)
+            if workspaceState.selectionState.hasSelection {
+                Label("Selection ready", systemImage: "text.cursor")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.green)
+            } else {
+                Text("Select text in the brief editor, place the cursor in a section, or run AI against the full brief.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func runAssist(action: EditorAssistAction, customInstruction: String = "") {
+        workspaceState.inspectorPresented = true
+        Task {
+            await store.runEditorAssist(
+                action: action,
+                documentMarkdown: workspaceState.editorDocumentMarkdown,
+                target: workspaceState.currentAssistTarget,
+                customInstruction: customInstruction
+            )
+        }
+    }
+
+    private func editorAssistIcon(for action: EditorAssistAction) -> String {
+        switch action {
+        case .askAI: "sparkles"
+        case .rewriteSelection: "wand.and.stars"
+        case .makeClearer: "text.alignleft"
+        case .makeShorter: "arrow.down.to.line.compact"
+        case .continueWriting: "text.badge.plus"
+        case .tightenGoal: "target"
+        case .findAmbiguity: "questionmark.bubble"
+        case .generateAcceptanceCriteria: "checklist"
+        case .splitTask: "square.split.2x1"
+        case .customAsk: "ellipsis.bubble"
+        }
+    }
+
+    private func editorAssistPreviewText(for proposal: AIAssistProposal) -> String {
+        let replacement = proposal.replacementMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !replacement.isEmpty {
+            return replacement
+        }
+
+        let rawOutput = proposal.rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return rawOutput.isEmpty ? "No generated result was returned." : rawOutput
+    }
+
+    private func workerList(_ title: String, values: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if values.isEmpty {
+                Text("None")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(artifacts) { artifact in
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(artifact.artifactType?.displayName ?? artifact.type)
-                            .font(.subheadline.weight(.semibold))
-                        Text(artifact.path)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                        Button {
-                            openArtifact(artifact)
-                        } label: {
-                            Label(buttonTitle(for: artifact), systemImage: buttonIcon(for: artifact))
-                        }
-                        .controlSize(.small)
-                    }
-                    .padding(.vertical, 4)
+                ForEach(values.prefix(5), id: \.self) { value in
+                    Text(value)
+                        .font(.caption)
+                        .lineLimit(2)
                 }
             }
         }
     }
 
-    private func openArtifact(_ artifact: Artifact) {
-        if AppStore.isMarkdownPath(artifact.path) {
-            openWindow(id: "markdown-document", value: AppStore.normalizedMarkdownPath(artifact.path))
-        } else {
-            Task { await store.openArtifact(artifact) }
+    private func proposalRow(_ proposal: TaskProposal) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(proposal.title)
+                .font(.caption.weight(.semibold))
+            Text(proposal.reasonDiscovered)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+            HStack(spacing: 8) {
+                CompactStatusChip(label: "Priority", value: proposal.suggestedPriority.displayName)
+                CompactStatusChip(label: "Stage", value: proposal.suggestedStage.displayName)
+            }
+            if !proposal.acceptanceCriteria.isEmpty {
+                Text(proposal.acceptanceCriteria.joined(separator: " | "))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            HStack {
+                Button("Create Task") {
+                    store.createTask(from: proposal)
+                }
+                .buttonStyle(.bordered)
+                Button("Dismiss") {
+                    store.dismissTaskProposal(proposal)
+                }
+                .buttonStyle(.borderless)
+            }
+            .controlSize(.small)
         }
+        .padding(.vertical, 6)
     }
 
-    private func buttonTitle(for artifact: Artifact) -> String {
-        AppStore.isMarkdownPath(artifact.path) ? "Open Markdown" : "Open Artifact"
-    }
-
-    private func buttonIcon(for artifact: Artifact) -> String {
-        AppStore.isMarkdownPath(artifact.path) ? "doc.text" : "arrow.up.forward.app"
+    private func inspectorActionButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(store.selectedTask == nil || store.isWorking)
     }
 }
 
-private struct InspectorCard<Content: View>: View {
+private struct InspectorToolSectionView<Content: View>: View {
+    var icon: String
     var title: String
+    @Binding var isExpanded: Bool
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.headline)
-            content
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                isExpanded.toggle()
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: icon)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16)
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                Divider()
+                content
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 16))
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
         .overlay(
-            RoundedRectangle(cornerRadius: 16)
+            RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator.opacity(0.55))
         )
     }
 }
 
-private struct InfoRow: View {
+private struct InspectorMetricRow: View {
     var label: String
     var value: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
-                .font(.caption.weight(.semibold))
+                .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
             Text(value)
-                .font(label.lowercased().contains("path") ? .system(.caption, design: .monospaced) : .caption)
+                .font(.caption)
                 .textSelection(.enabled)
         }
     }
 }
 
-private struct PreflightMetric: View {
-    var label: String
-    var value: Int
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text("\(value)")
-                .font(.headline)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(8)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
-    }
-}
-
-private struct TaskStateMetric: View {
+private struct CompactStatusChip: View {
     var label: String
     var value: String
 
@@ -760,49 +660,9 @@ private struct TaskStateMetric: View {
                 .foregroundStyle(.secondary)
             Text(value)
                 .font(.caption.weight(.semibold))
-                .lineLimit(1)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(8)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
-    }
-}
-
-private struct PreflightTargetRow: View {
-    var target: PreflightTargetReport
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack {
-                Text(target.type.displayName)
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text(target.recommendation.displayName)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(target.risks.isEmpty ? .green : .orange)
-            }
-            Text(target.path)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-            Text("Branch \(target.branch ?? "unknown") · HEAD \(target.headSHA ?? "unknown")")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-            Text("Exists \(target.pathExists ? "yes" : "no") · Clean \(target.isClean ? "yes" : "no") · staged/unstaged/untracked \(target.stagedCount)/\(target.unstagedCount)/\(target.untrackedCount)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text("Merged \(target.isMergedToDefault.map { $0 ? "yes" : "no" } ?? "unknown") · ahead/behind \(target.aheadOfRemote.map(String.init) ?? "unknown")/\(target.behindRemote.map(String.init) ?? "unknown")")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if !target.risks.isEmpty {
-                Text(target.risks.map(\.displayName).joined(separator: ", "))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.orange)
-            }
-        }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
     }
 }

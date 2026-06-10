@@ -24,7 +24,7 @@ public enum ProjectType: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-public enum TaskStatus: String, CaseIterable, Codable, Identifiable {
+public enum TaskStatus: String, CaseIterable, Codable, Identifiable, Sendable {
     case backlog
     case ready
     case planning

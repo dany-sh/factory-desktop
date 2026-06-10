@@ -4,13 +4,8 @@ import SwiftUI
 
 struct TaskDetailView: View {
     @EnvironmentObject private var store: AppStore
+    @EnvironmentObject private var workspaceState: TaskWorkspaceState
     @Environment(\.openWindow) private var openWindow
-    @State private var draft = TaskDraft()
-    @State private var acceptanceText = ""
-    @State private var loadedTaskID: String?
-    @State private var selectedStage: TaskWorkspaceStage = .write
-    @State private var showAllArtifacts = false
-    @State private var editorSelectionText = ""
     @FocusState private var focusedField: TaskEditorField?
     @StateObject private var editorBridge = RichTaskEditorBridge()
 
@@ -18,6 +13,7 @@ struct TaskDetailView: View {
         Group {
             if let task = store.selectedTask {
                 VStack(alignment: .leading, spacing: 18) {
+                    workspaceBreadcrumb(task: task)
                     header(task: task)
                     taskCommandBar(task: task)
                     Picker("Stage", selection: stageSelection) {
@@ -58,10 +54,17 @@ struct TaskDetailView: View {
                     .background(.bar)
                 }
                 .onAppear {
-                    loadIfNeeded(task)
+                    editorBridge.dismissInlineAI = {
+                        workspaceState.customInlinePrompt = ""
+                    }
+                    editorBridge.openInlineAI = {
+                        handleInlineAction(.askAI)
+                    }
+                    editorBridge.runInlineAction = handleInlineAction
+                    workspaceState.loadIfNeeded(task)
                 }
                 .onChange(of: task.id) { _, _ in
-                    loadIfNeeded(task)
+                    workspaceState.loadIfNeeded(task)
                 }
             } else {
                 ContentUnavailableView(
@@ -70,13 +73,75 @@ struct TaskDetailView: View {
                     description: Text("Create a task to start intake, planning, handoff, and review.")
                 )
                 .onAppear {
-                    loadedTaskID = nil
-                    draft = TaskDraft()
-                    acceptanceText = ""
+                    editorBridge.dismissInlineAI = nil
+                    editorBridge.openInlineAI = nil
+                    editorBridge.runInlineAction = nil
+                    workspaceState.reset()
                     focusedField = nil
                 }
             }
         }
+    }
+
+    private var draft: TaskDraft {
+        get { workspaceState.draft }
+        nonmutating set { workspaceState.draft = newValue }
+    }
+
+    private var acceptanceText: String {
+        get { workspaceState.acceptanceText }
+        nonmutating set { workspaceState.acceptanceText = newValue }
+    }
+
+    private var selectedStage: TaskWorkspaceStage {
+        get { workspaceState.selectedStage }
+        nonmutating set { workspaceState.selectedStage = newValue }
+    }
+
+    private var showAllArtifacts: Bool {
+        get { workspaceState.showAllArtifacts }
+        nonmutating set { workspaceState.showAllArtifacts = newValue }
+    }
+
+    private var editorSelectionText: String {
+        get { workspaceState.selectionState.selectedText }
+        nonmutating set {
+            var selectionState = workspaceState.selectionState
+            selectionState.selectedText = newValue
+            workspaceState.selectionState = selectionState
+        }
+    }
+
+    private var draftTitleBinding: Binding<String> {
+        Binding(
+            get: { draft.title },
+            set: { draft.title = $0 }
+        )
+    }
+
+    private var editorSelectionBinding: Binding<TaskEditorSelectionState> {
+        Binding(
+            get: { workspaceState.selectionState },
+            set: { workspaceState.updateSelectionState($0) }
+        )
+    }
+
+    private var showAllArtifactsBinding: Binding<Bool> {
+        Binding(
+            get: { showAllArtifacts },
+            set: { showAllArtifacts = $0 }
+        )
+    }
+
+    private func draftBinding<Value>(_ keyPath: WritableKeyPath<TaskDraft, Value>) -> Binding<Value> {
+        Binding(
+            get: { draft[keyPath: keyPath] },
+            set: { newValue in
+                var updated = draft
+                updated[keyPath: keyPath] = newValue
+                draft = updated
+            }
+        )
     }
 
     private var stageSelection: Binding<TaskWorkspaceStage> {
@@ -91,11 +156,33 @@ struct TaskDetailView: View {
         )
     }
 
+    private func workspaceBreadcrumb(task: FactoryTask) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Workspace")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text(store.selectedProject?.name ?? "Project")
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                Text("Task")
+                    .foregroundStyle(.secondary)
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                Text(task.title)
+                    .lineLimit(1)
+            }
+            .font(.title3.weight(.semibold))
+        }
+    }
+
     private func header(task: FactoryTask) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 8) {
-                    TextField("Untitled Task", text: $draft.title)
+                    TextField("Untitled Task", text: draftTitleBinding)
                         .font(.title2.weight(.semibold))
                         .textFieldStyle(.plain)
                         .focused($focusedField, equals: .title)
@@ -144,6 +231,29 @@ struct TaskDetailView: View {
                         .foregroundStyle(.secondary)
 
                     primaryCommandControl(task: task)
+
+                    Divider()
+                        .frame(height: 24)
+
+                    actionButton("Assign to AI Worker", systemImage: "sparkles") {
+                        Task { await store.assignSelectedTaskToAIWorker() }
+                    }
+                    .disabled(store.selectedTask == nil || store.isWorking)
+
+                    actionButton("Resume Worker", systemImage: "play.circle") {
+                        Task { await store.resumeWorker() }
+                    }
+                    .disabled(store.selectedRunnerSession == nil || store.isWorking)
+
+                    actionButton("Review Worker Report", systemImage: "doc.text.magnifyingglass") {
+                        store.reviewLatestWorkerReport()
+                    }
+                    .disabled(store.latestWorkerReport == nil || store.isWorking)
+
+                    actionButton("Create Proposed Tasks", systemImage: "plus.square.on.square") {
+                        store.createAllProposedTasks()
+                    }
+                    .disabled(!store.taskProposals.contains { $0.status == .proposed } || store.isWorking)
 
                     Divider()
                         .frame(height: 24)
@@ -199,6 +309,16 @@ struct TaskDetailView: View {
     private func primaryCommandControl(task: FactoryTask) -> some View {
         if task.status == .archived || task.status == .done {
             completedTaskNextAction(task)
+        } else if store.selectedRunnerSession != nil {
+            actionButton("Resume Worker", systemImage: "play.circle", prominent: true) {
+                Task { await store.resumeWorker() }
+            }
+            .disabled(store.isWorking)
+        } else if task.readiness == .executable || task.status == .ready || task.status == .approved {
+            actionButton("Assign to AI Worker", systemImage: "sparkles", prominent: true) {
+                Task { await store.assignSelectedTaskToAIWorker() }
+            }
+            .disabled(store.isWorking)
         } else if let review = store.latestTaskStateReview {
             primaryActionButton(review.recommendedAction)
         } else if store.canPlanSelectedTaskLocally {
@@ -257,11 +377,11 @@ struct TaskDetailView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 statusMenu(task: task)
-                metadataMenu("Task type", selection: $draft.type, options: TaskType.allCases.sorted { $0.displayName < $1.displayName }, label: \.displayName)
-                metadataMenu("Priority", selection: $draft.priorityLabel, options: FactoryTaskPriorityLabel.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: \.displayName)
-                metadataMenu("Readiness", selection: $draft.readiness, options: FactoryTaskReadiness.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: \.displayName)
-                metadataMenu("Effort", selection: $draft.effort, options: FactoryTaskEffort.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: effortLabel(for:))
-                metadataMenu("Risk", selection: $draft.risk, options: FactoryTaskRisk.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: riskLabel(for:))
+                metadataMenu("Task type", selection: draftBinding(\.type), options: TaskType.allCases.sorted { $0.displayName < $1.displayName }, label: \.displayName)
+                metadataMenu("Priority", selection: draftBinding(\.priorityLabel), options: FactoryTaskPriorityLabel.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: \.displayName)
+                metadataMenu("Readiness", selection: draftBinding(\.readiness), options: FactoryTaskReadiness.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: \.displayName)
+                metadataMenu("Effort", selection: draftBinding(\.effort), options: FactoryTaskEffort.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: effortLabel(for:))
+                metadataMenu("Risk", selection: draftBinding(\.risk), options: FactoryTaskRisk.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: riskLabel(for:))
                 Text(task.id.shortID)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
@@ -319,12 +439,9 @@ struct TaskDetailView: View {
                 Label("Unsaved changes", systemImage: "pencil.and.outline")
                     .foregroundStyle(.orange)
             } else {
-                Label("Saved", systemImage: "checkmark.circle")
+                Label("All changes saved", systemImage: "checkmark.circle")
                     .foregroundStyle(.green)
             }
-            Text("Press Command-S to save.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
         .frame(minWidth: 190, alignment: .leading)
     }
@@ -358,7 +475,7 @@ struct TaskDetailView: View {
                         .foregroundStyle(.green)
                 }
             }
-            RichTaskEditorView(markdown: editorDocumentBinding, selectedText: $editorSelectionText, bridge: editorBridge)
+            RichTaskEditorView(markdown: editorDocumentBinding, selectionState: editorSelectionBinding, bridge: editorBridge)
                 .frame(minHeight: 520)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay {
@@ -368,192 +485,37 @@ struct TaskDetailView: View {
         }
     }
 
-    private var writingAssistPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            editorAssistCard
-            writingScoreCard
-        }
-    }
-
-    private var editorAssistCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("AI Assist")
-                    .font(.headline)
-                Spacer()
-                if store.isEditorAssistRunning {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-            }
-
-            Picker("Provider", selection: $store.selectedEditorAssistProvider) {
-                ForEach(store.editorAssistProviderOptions) { option in
-                    Text(option.isAvailable ? option.provider.displayName : "\(option.provider.displayName) · \(option.detail)")
-                        .tag(option.provider)
-                        .disabled(!option.isAvailable)
-                }
-            }
-            .labelsHidden()
-
-            LazyVGrid(columns: [GridItem(.flexible())], spacing: 7) {
-                ForEach(EditorAssistAction.allCases) { action in
-                    assistButton(action.displayName, systemImage: editorAssistIcon(for: action)) {
-                        Task {
-                            await store.runEditorAssist(
-                                action: action,
-                                documentMarkdown: editorDocumentMarkdown,
-                                selectedText: editorSelectionText
-                            )
-                        }
-                    }
-                    .disabled(!selectedEditorAssistProviderIsAvailable || store.isEditorAssistRunning)
-                }
-            }
-
-            if let suggestion = store.latestEditorAssistSuggestion {
-                Divider()
-                Text(suggestion.summary)
-                    .font(.caption.weight(.semibold))
-                Text("Generated Result")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ScrollView {
-                    Text(editorAssistPreviewText(for: suggestion))
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(minHeight: 88, maxHeight: 160, alignment: .top)
-                .padding(8)
-                .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
-                HStack {
-                    Button("Accept") {
-                        applyEditorSuggestion(suggestion, insertOnly: false)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    Button("Insert Below") {
-                        applyEditorSuggestion(suggestion, insertOnly: true)
-                    }
-                    .buttonStyle(.bordered)
-                }
-                Button("Reject") {
-                    store.clearEditorAssistSuggestion()
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-            } else if !selectedEditorAssistProviderIsAvailable {
-                Text("Selected provider is not configured yet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(.separator.opacity(0.55))
-        )
-    }
-
-    private var writingScoreCard: some View {
-        let quality = DraftQuality(brief: draft.brief, acceptanceText: acceptanceText)
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Brief Quality")
-                    .font(.headline)
-                Spacer()
-                Text("\(quality.score)/4")
-                    .font(.caption.weight(.bold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(quality.color.opacity(0.16), in: Capsule())
-                    .foregroundStyle(quality.color)
-            }
-            ForEach(quality.checks) { check in
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Image(systemName: check.isComplete ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(check.isComplete ? Color.green : .secondary)
-                    Text(check.title)
-                        .font(.caption)
-                        .foregroundStyle(check.isComplete ? .primary : .secondary)
-                }
-            }
-        }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(.separator.opacity(0.55))
-        )
-    }
-
     private var editorDocumentMarkdown: String {
-        TaskEditorDocument.markdown(brief: draft.brief, acceptanceText: acceptanceText)
+        workspaceState.editorDocumentMarkdown
     }
 
     private var editorDocumentBinding: Binding<String> {
         Binding(
             get: { editorDocumentMarkdown },
-            set: { updateEditorDocumentMarkdown($0) }
+            set: { workspaceState.updateEditorDocumentMarkdown($0) }
         )
     }
 
-    private var selectedEditorAssistProviderIsAvailable: Bool {
-        store.editorAssistProviderOptions.first { $0.provider == store.selectedEditorAssistProvider }?.isAvailable == true
-    }
-
-    private func updateEditorDocumentMarkdown(_ markdown: String) {
-        let document = TaskEditorDocument.parse(markdown)
-        draft.brief = document.brief
-        acceptanceText = document.acceptanceText
-    }
-
-    private func applyEditorSuggestion(_ suggestion: EditorAssistSuggestion, insertOnly: Bool) {
-        let current = editorDocumentMarkdown
-        let replacement = suggestion.replacementMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !replacement.isEmpty else { return }
-
-        if insertOnly {
-            let separator = current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
-            updateEditorDocumentMarkdown(current + separator + replacement)
-        } else {
-            let selection = editorSelectionText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !selection.isEmpty, let range = current.range(of: selection) {
-                var updated = current
-                updated.replaceSubrange(range, with: replacement)
-                updateEditorDocumentMarkdown(updated)
-            } else {
-                updateEditorDocumentMarkdown(replacement)
-            }
+    private func handleInlineAction(_ action: EditorAssistAction) {
+        workspaceState.inspectorPresented = true
+        if action == .customAsk {
+            workspaceState.customInlinePrompt = workspaceState.selectionState.hasSelection ? "Focus on this selection and improve it." : "Write the next part for this section."
+            return
         }
-        store.clearEditorAssistSuggestion()
-    }
 
-    private func editorAssistIcon(for action: EditorAssistAction) -> String {
-        switch action {
-        case .rewriteSelection: "wand.and.stars"
-        case .tightenGoal: "target"
-        case .findAmbiguity: "questionmark.bubble"
-        case .generateAcceptanceCriteria: "checklist"
-        case .splitTask: "square.split.2x1"
+        Task {
+            await store.runEditorAssist(
+                action: action,
+                documentMarkdown: editorDocumentMarkdown,
+                target: workspaceState.currentAssistTarget
+            )
         }
     }
 
     private func save(_ task: FactoryTask) {
         let updated = draft.task(updating: task, acceptanceText: acceptanceText)
         store.saveTask(updated)
-        load(updated)
-    }
-
-    private func editorAssistPreviewText(for suggestion: EditorAssistSuggestion) -> String {
-        let replacement = suggestion.replacementMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !replacement.isEmpty {
-            return replacement
-        }
-        let rawOutput = suggestion.rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        return rawOutput.isEmpty ? "No generated result was returned." : rawOutput
+        workspaceState.load(updated)
     }
 
     private func syncEditorStateIfNeeded(_ completion: @escaping () -> Void) {
@@ -566,30 +528,25 @@ struct TaskDetailView: View {
             return
         }
         requestLatestMarkdown { markdown in
-            updateEditorDocumentMarkdown(markdown)
+            workspaceState.updateEditorDocumentMarkdown(markdown)
             completion()
         }
     }
 
     @ViewBuilder
     private func taskWorkspaceLayout(task: FactoryTask) -> some View {
-        HStack(alignment: .top, spacing: 18) {
-            Group {
-                if selectedStage == .write {
+        Group {
+            if selectedStage == .write {
+                taskWorkspaceContent(task: task)
+            } else {
+                ScrollView {
                     taskWorkspaceContent(task: task)
-                } else {
-                    ScrollView {
-                        taskWorkspaceContent(task: task)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .scrollDismissesKeyboard(.never)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .scrollDismissesKeyboard(.never)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-            writingAssistPanel
-                .frame(width: 300, alignment: .topLeading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     @ViewBuilder
@@ -1223,7 +1180,7 @@ struct TaskDetailView: View {
     private var artifactsSection: some View {
         let groups = store.artifactDisplayGroups
         return VStack(alignment: .leading, spacing: 18) {
-            Toggle("Show All Artifacts", isOn: $showAllArtifacts)
+            Toggle("Show All Artifacts", isOn: showAllArtifactsBinding)
                 .toggleStyle(.switch)
 
             artifactGroup(title: "Current", artifacts: groups.current, initiallyExpanded: true)
@@ -1492,19 +1449,6 @@ struct TaskDetailView: View {
         }
     }
 
-    private func loadIfNeeded(_ task: FactoryTask) {
-        guard loadedTaskID != task.id else { return }
-        load(task)
-    }
-
-    private func load(_ task: FactoryTask) {
-        draft = TaskDraft(task: task)
-        acceptanceText = task.acceptanceCriteria.joined(separator: "\n")
-        loadedTaskID = task.id
-        focusedField = nil
-        editorSelectionText = ""
-    }
-
     private func assistButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: systemImage)
@@ -1521,7 +1465,7 @@ private enum TaskEditorField: Hashable {
     case acceptanceCriteria
 }
 
-private enum TaskWorkspaceStage: String, CaseIterable, Identifiable {
+enum TaskWorkspaceStage: String, CaseIterable, Identifiable {
     case write
     case planReview
     case buildTest
@@ -1582,7 +1526,7 @@ private struct HeaderMetadataChip: View {
     }
 }
 
-private struct DraftQuality {
+struct DraftQuality {
     struct Check: Identifiable {
         var id: String { title }
         var title: String
@@ -1731,7 +1675,7 @@ private extension String {
     }
 }
 
-private struct TaskDraft {
+struct TaskDraft {
     var title = ""
     var type: TaskType = .planning
     var kind: FactoryTaskKind = .task
@@ -1881,4 +1825,194 @@ private struct ParsedBrief {
     var goal = ""
     var context = ""
     var scopingNotes = ""
+}
+
+struct TaskEditorSelectionState: Equatable {
+    var selectedText = ""
+    var isFocused = false
+    var activeSection: EditorAssistSection?
+    var cursorAtInsertionPoint = false
+    var changeToken = 0
+
+    var hasSelection: Bool {
+        !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+final class TaskWorkspaceState: ObservableObject {
+    @Published var draft = TaskDraft()
+    @Published var acceptanceText = ""
+    @Published var loadedTaskID: String?
+    @Published var selectedStage: TaskWorkspaceStage = .write
+    @Published var showAllArtifacts = false
+    @Published var selectionState = TaskEditorSelectionState()
+    @Published var inspectorPresented = true
+    @Published var customInlinePrompt = ""
+
+    var editorDocumentMarkdown: String {
+        TaskEditorDocument.markdown(brief: draft.brief, acceptanceText: acceptanceText)
+    }
+
+    var currentAssistTarget: EditorAssistTarget {
+        if selectionState.hasSelection {
+            return EditorAssistTarget(
+                kind: .selectedText,
+                selectedText: selectionState.selectedText,
+                activeSection: selectionState.activeSection
+            )
+        }
+
+        if let activeSection = selectionState.activeSection {
+            if selectionState.cursorAtInsertionPoint {
+                return EditorAssistTarget(kind: .cursorInsertionPoint, activeSection: activeSection)
+            }
+            return EditorAssistTarget(kind: .section(activeSection), activeSection: activeSection)
+        }
+
+        if selectionState.isFocused {
+            return EditorAssistTarget(kind: .cursorInsertionPoint)
+        }
+
+        return EditorAssistTarget(kind: .fullBrief)
+    }
+
+    func reset() {
+        draft = TaskDraft()
+        acceptanceText = ""
+        loadedTaskID = nil
+        selectedStage = .write
+        showAllArtifacts = false
+        selectionState = TaskEditorSelectionState()
+        customInlinePrompt = ""
+    }
+
+    func loadIfNeeded(_ task: FactoryTask) {
+        guard loadedTaskID != task.id else { return }
+        load(task)
+    }
+
+    func load(_ task: FactoryTask) {
+        draft = TaskDraft(task: task)
+        acceptanceText = task.acceptanceCriteria.joined(separator: "\n")
+        loadedTaskID = task.id
+        selectionState = TaskEditorSelectionState()
+        customInlinePrompt = ""
+    }
+
+    func updateEditorDocumentMarkdown(_ markdown: String) {
+        let document = TaskEditorDocument.parse(markdown)
+        draft.brief = document.brief
+        acceptanceText = document.acceptanceText
+    }
+
+    func updateSelectionState(_ next: TaskEditorSelectionState) {
+        let selectionChanged = next.selectedText != selectionState.selectedText
+            || next.activeSection != selectionState.activeSection
+            || next.isFocused != selectionState.isFocused
+            || next.cursorAtInsertionPoint != selectionState.cursorAtInsertionPoint
+        guard selectionChanged else { return }
+        selectionState = next
+    }
+
+    func applyProposal(_ proposal: AIAssistProposal, insertOnly: Bool) {
+        let current = editorDocumentMarkdown
+        let replacement = proposal.replacementMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !replacement.isEmpty else { return }
+
+        if insertOnly {
+            updateEditorDocumentMarkdown(insertMarkdown(replacement, into: current, target: proposal.target))
+            return
+        }
+
+        switch proposal.target.kind {
+        case .selectedText:
+            let selection = proposal.target.selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !selection.isEmpty, let range = current.range(of: selection) {
+                var updated = current
+                updated.replaceSubrange(range, with: replacement)
+                updateEditorDocumentMarkdown(updated)
+            } else {
+                updateEditorDocumentMarkdown(replacement)
+            }
+        case .section(let section):
+            updateEditorDocumentMarkdown(replaceSection(section, in: current, with: replacement))
+        case .cursorInsertionPoint:
+            if let section = proposal.target.activeSection {
+                updateEditorDocumentMarkdown(insertMarkdown(replacement, into: current, target: .init(kind: .section(section), activeSection: section)))
+            } else {
+                updateEditorDocumentMarkdown(insertMarkdown(replacement, into: current, target: proposal.target))
+            }
+        case .fullBrief:
+            updateEditorDocumentMarkdown(replacement)
+        }
+    }
+
+    private func insertMarkdown(_ replacement: String, into markdown: String, target: EditorAssistTarget) -> String {
+        switch target.kind {
+        case .section(let section):
+            let original = sectionBody(in: markdown, section: section) ?? ""
+            let combined = [original, replacement]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n")
+            return replaceSection(section, in: markdown, with: combined)
+        case .cursorInsertionPoint, .fullBrief, .selectedText:
+            let separator = markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
+            return markdown + separator + replacement
+        }
+    }
+
+    private func replaceSection(_ section: EditorAssistSection, in markdown: String, with replacement: String) -> String {
+        let normalizedReplacement = stripMatchingHeading(from: replacement, section: section)
+        let heading = heading(for: section)
+        let lines = markdown.components(separatedBy: .newlines)
+        guard let headingIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(heading) == .orderedSame }) else {
+            let separator = markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
+            return markdown + separator + heading + "\n" + normalizedReplacement
+        }
+
+        var endIndex = lines.count
+        if let nextIndex = lines[(headingIndex + 1)...].firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("## ") }) {
+            endIndex = nextIndex
+        }
+
+        var updatedLines = Array(lines[..<headingIndex])
+        updatedLines.append(lines[headingIndex])
+        if !normalizedReplacement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            updatedLines.append(contentsOf: normalizedReplacement.components(separatedBy: .newlines))
+        }
+        if endIndex < lines.count {
+            updatedLines.append(contentsOf: lines[endIndex...])
+        }
+        return updatedLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func sectionBody(in markdown: String, section: EditorAssistSection) -> String? {
+        let lines = markdown.components(separatedBy: .newlines)
+        let heading = heading(for: section)
+        guard let headingIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(heading) == .orderedSame }) else {
+            return nil
+        }
+        let bodyStart = headingIndex + 1
+        let endIndex = lines[bodyStart...].firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("## ") }) ?? lines.count
+        return lines[bodyStart..<endIndex].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func stripMatchingHeading(from replacement: String, section: EditorAssistSection) -> String {
+        let heading = heading(for: section)
+        let lines = replacement.components(separatedBy: .newlines)
+        guard let first = lines.first,
+              first.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(heading) == .orderedSame else {
+            return replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func heading(for section: EditorAssistSection) -> String {
+        switch section {
+        case .goal: "## Goal"
+        case .context: "## Context"
+        case .scoping: "## Scoping"
+        case .acceptanceCriteria: "## Acceptance Criteria"
+        }
+    }
 }

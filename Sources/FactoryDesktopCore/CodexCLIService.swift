@@ -17,8 +17,8 @@ public enum CodexCLIAction: Equatable {
     case version
     case openApp(workspacePath: String)
     case resume(sessionId: String)
-    case exec(workspacePath: String, instruction: String)
-    case execResume(sessionId: String, workspacePath: String, instruction: String)
+    case exec(workspacePath: String, instruction: String, sandboxMode: RunnerSandboxMode = .readOnly)
+    case execResume(sessionId: String, workspacePath: String, instruction: String, sandboxMode: RunnerSandboxMode = .readOnly)
 }
 
 public final class CodexCLIService {
@@ -60,18 +60,29 @@ public final class CodexCLIService {
         try await runCommand(commandRequest(for: .resume(sessionId: sessionId)))
     }
 
-    public func exec(workspacePath: String, instruction: String) async throws -> CommandResult {
+    public func exec(
+        workspacePath: String,
+        instruction: String,
+        sandboxMode: RunnerSandboxMode = .readOnly
+    ) async throws -> CommandResult {
         try await runCommand(commandRequest(for: .exec(
             workspacePath: workspacePath,
-            instruction: instruction
+            instruction: instruction,
+            sandboxMode: sandboxMode
         )))
     }
 
-    public func execResume(sessionId: String, workspacePath: String, instruction: String) async throws -> CommandResult {
+    public func execResume(
+        sessionId: String,
+        workspacePath: String,
+        instruction: String,
+        sandboxMode: RunnerSandboxMode = .readOnly
+    ) async throws -> CommandResult {
         try await runCommand(commandRequest(for: .execResume(
             sessionId: sessionId,
             workspacePath: workspacePath,
-            instruction: instruction
+            instruction: instruction,
+            sandboxMode: sandboxMode
         )))
     }
 
@@ -87,22 +98,22 @@ public final class CodexCLIService {
         case .resume(let sessionId):
             try validateSessionID(sessionId)
             return CommandRequest(executable: "codex", arguments: ["resume", sessionId])
-        case .exec(let workspacePath, let instruction):
+        case .exec(let workspacePath, let instruction, let sandboxMode):
             try validateWorkspacePath(workspacePath)
             let prompt = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalInstruction = prompt.isEmpty ? "Summarize current state." : prompt
             return CommandRequest(
                 executable: "codex",
-                arguments: ["exec", "-C", workspacePath, "-s", "read-only", finalInstruction]
+                arguments: ["exec", "-C", workspacePath, "-s", sandboxMode.codexCLIValue, finalInstruction]
             )
-        case .execResume(let sessionId, let workspacePath, let instruction):
+        case .execResume(let sessionId, let workspacePath, let instruction, let sandboxMode):
             try validateSessionID(sessionId)
             try validateWorkspacePath(workspacePath)
             let prompt = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalInstruction = prompt.isEmpty ? "Resume this Codex session and summarize current state." : prompt
             return CommandRequest(
                 executable: "codex",
-                arguments: ["exec", "-C", workspacePath, "-s", "read-only", "resume", sessionId, finalInstruction]
+                arguments: ["exec", "-C", workspacePath, "-s", sandboxMode.codexCLIValue, "resume", sessionId, finalInstruction]
             )
         }
     }
@@ -125,6 +136,19 @@ public final class CodexCLIService {
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
         guard sessionId.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
             throw FactoryError.commandRequiresApproval("codex resume \(sessionId)")
+        }
+    }
+}
+
+private extension RunnerSandboxMode {
+    var codexCLIValue: String {
+        switch self {
+        case .readOnly:
+            return "read-only"
+        case .workspaceWrite:
+            return "workspace-write"
+        case .unrestricted:
+            return "read-only"
         }
     }
 }

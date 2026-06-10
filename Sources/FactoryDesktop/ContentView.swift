@@ -5,6 +5,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var store: AppStore
     @EnvironmentObject private var router: AppRouter
+    @StateObject private var taskWorkspaceState = TaskWorkspaceState()
 
     var body: some View {
         Group {
@@ -53,22 +54,49 @@ struct ContentView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
         } detail: {
-            workspaceContent
+            workspaceShell
                 .navigationSplitViewColumnWidth(min: 760, ideal: 1180)
         }
         .navigationTitle(workspaceTitle)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    taskWorkspaceState.inspectorPresented.toggle()
+                } label: {
+                    Image(systemName: "sidebar.trailing")
+                }
+                .help(taskWorkspaceState.inspectorPresented ? "Hide Inspector" : "Show Inspector")
+            }
+        }
+    }
+
+    private var workspaceShell: some View {
+        HSplitView {
+            workspaceContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if taskWorkspaceState.inspectorPresented {
+                RightToolsInspectorView()
+                    .environmentObject(taskWorkspaceState)
+                    .frame(minWidth: 320, idealWidth: 420, maxWidth: 760, maxHeight: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
     private var workspaceContent: some View {
-        switch store.selectedWorkspaceScope {
-        case .project:
-            ProjectDashboardView()
-        case .kanban:
-            KanbanView()
-        case .task:
-            TaskDetailView()
+        Group {
+            switch store.selectedWorkspaceScope {
+            case .project:
+                ProjectDashboardView()
+            case .kanban:
+                KanbanView()
+            case .task:
+                TaskDetailView()
+            }
         }
+        .environmentObject(taskWorkspaceState)
     }
 
     private var workspaceTitle: String {

@@ -20,6 +20,14 @@ public final class AppStore: ObservableObject {
     @Published public private(set) var selectedTaskRunnerSessionLink: RunnerSessionLink?
     @Published public private(set) var runnerSessionLinks: [RunnerSessionLink] = []
     @Published public private(set) var latestRunnerRecommendation: RunnerRecommendation?
+    @Published public private(set) var runnerWorkspaces: [RunnerWorkspace] = []
+    @Published public private(set) var selectedRunnerWorkspace: RunnerWorkspace?
+    @Published public private(set) var selectedRunnerSession: RunnerSession?
+    @Published public private(set) var latestRunnerExecution: RunnerExecution?
+    @Published public private(set) var latestWorkerReport: WorkerReport?
+    @Published public private(set) var taskProposals: [TaskProposal] = []
+    @Published public private(set) var runnerNotifications: [RunnerNotification] = []
+    @Published public private(set) var latestLifecycleSnapshot: LifecycleSnapshot?
     @Published public private(set) var selectedCodexProjectLink: CodexProjectLink?
     @Published public private(set) var selectedTaskCodexSessionLink: CodexSessionLink?
     @Published public private(set) var codexSessionLinks: [CodexSessionLink] = []
@@ -34,6 +42,7 @@ public final class AppStore: ObservableObject {
     @Published public var selectedEditorAssistProvider: RunnerProvider = .codex
     @Published public private(set) var isEditorAssistRunning: Bool = false
     @Published public private(set) var latestEditorAssistSuggestion: EditorAssistSuggestion?
+    @Published public private(set) var latestAIAssistProposal: AIAssistProposal?
 
     public let paths: FactoryPaths
 
@@ -42,6 +51,7 @@ public final class AppStore: ObservableObject {
     private var commandRunner: CommandRunner
     private var codexCLIService: CodexCLIService
     private var runnerAdapters: [RunnerProvider: RunnerProviderAdapter]
+    private var lifecycleMonitorService: LifecycleMonitorService
     private var gitService: GitService?
     private var ollamaClient: OllamaClient
     private var handoffService: HandoffService
@@ -285,6 +295,7 @@ public final class AppStore: ObservableObject {
         self.commandRunner = CommandRunner()
         self.codexCLIService = codexCLIService ?? CodexCLIService(commandRunner: commandRunner)
         self.runnerAdapters = [:]
+        self.lifecycleMonitorService = LifecycleMonitorService(commandRunner: commandRunner)
         self.ollamaClient = OllamaClient()
         self.handoffService = HandoffService(paths: paths)
         self.runnerAdapters[.codex] = CodexRunnerAdapter(service: self.codexCLIService)
@@ -322,6 +333,7 @@ public final class AppStore: ObservableObject {
         }
         try reloadCodexLinks()
         try reloadRunsAndArtifacts()
+        try reloadWorkerState()
     }
 
     public func reloadRunsAndArtifacts() throws {
@@ -336,6 +348,7 @@ public final class AppStore: ObservableObject {
             taskEvents = []
         }
         try reloadCodexLinks()
+        try reloadWorkerState()
     }
 
     public func startAppUpdateMonitoring() {
@@ -437,6 +450,29 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    public func reloadWorkerState() throws {
+        guard let repository else { return }
+        if let task = selectedTask {
+            runnerWorkspaces = try repository.runnerWorkspaces(taskId: task.id)
+            selectedRunnerWorkspace = runnerWorkspaces.first
+            selectedRunnerSession = try repository.latestRunnerSession(taskId: task.id)
+            latestRunnerExecution = try repository.latestRunnerExecution(taskId: task.id)
+            latestWorkerReport = try repository.latestWorkerReport(taskId: task.id)
+            taskProposals = try repository.taskProposals(sourceTaskId: task.id)
+            runnerNotifications = try repository.runnerNotifications(taskId: task.id)
+            latestLifecycleSnapshot = try repository.latestLifecycleSnapshot(taskId: task.id)
+        } else {
+            runnerWorkspaces = []
+            selectedRunnerWorkspace = nil
+            selectedRunnerSession = nil
+            latestRunnerExecution = nil
+            latestWorkerReport = nil
+            taskProposals = []
+            runnerNotifications = []
+            latestLifecycleSnapshot = nil
+        }
+    }
+
     public func selectProject(_ projectID: String?) {
         selectedProjectID = projectID
         selectedTaskID = tasks.first { $0.projectId == projectID }?.id
@@ -447,6 +483,13 @@ public final class AppStore: ObservableObject {
         latestLifecycleSyncResult = nil
         latestRunnerRecommendation = nil
         latestCodexSessionRecommendation = nil
+        selectedRunnerWorkspace = nil
+        selectedRunnerSession = nil
+        latestRunnerExecution = nil
+        latestWorkerReport = nil
+        taskProposals = []
+        runnerNotifications = []
+        latestLifecycleSnapshot = nil
         Task { await refreshGitStatus() }
         do {
             try reloadRunsAndArtifacts()
@@ -467,6 +510,13 @@ public final class AppStore: ObservableObject {
         latestLifecycleSyncResult = nil
         latestRunnerRecommendation = nil
         latestCodexSessionRecommendation = nil
+        selectedRunnerWorkspace = nil
+        selectedRunnerSession = nil
+        latestRunnerExecution = nil
+        latestWorkerReport = nil
+        taskProposals = []
+        runnerNotifications = []
+        latestLifecycleSnapshot = nil
         Task { await refreshGitStatus() }
         do {
             try reloadRunsAndArtifacts()
@@ -1506,7 +1556,12 @@ public final class AppStore: ObservableObject {
         }
     }
 
-    public func runEditorAssist(action: EditorAssistAction, documentMarkdown: String, selectedText: String) async {
+    public func runEditorAssist(
+        action: EditorAssistAction,
+        documentMarkdown: String,
+        target: EditorAssistTarget,
+        customInstruction: String = ""
+    ) async {
         guard let repository, let project = selectedProject, let task = selectedTask else {
             errorMessage = FactoryError.missingSelection.localizedDescription
             return
@@ -1524,7 +1579,8 @@ public final class AppStore: ObservableObject {
             action: action,
             taskTitle: task.title,
             documentMarkdown: documentMarkdown,
-            selectedText: selectedText
+            target: target,
+            customInstruction: customInstruction
         )
         let directory = paths.runDirectory(project: project, task: task)
         let promptURL = directory.appendingPathComponent("\(task.id.shortID)-editor-assist-prompt.md")
@@ -1556,6 +1612,7 @@ public final class AppStore: ObservableObject {
                 sandboxMode: .readOnly
             )
             latestEditorAssistSuggestion = nil
+            latestAIAssistProposal = nil
             let result = try await executeEditorAssistRequest(request)
             try result.output.write(to: outputURL, atomically: true, encoding: .utf8)
 
@@ -1570,6 +1627,13 @@ public final class AppStore: ObservableObject {
             selectedRunOutput = result.output
             if result.succeeded {
                 latestEditorAssistSuggestion = EditorAssistSuggestion.parse(provider: provider, action: action, output: result.output)
+                latestAIAssistProposal = AIAssistProposal.parse(
+                    provider: provider,
+                    action: action,
+                    output: result.output,
+                    target: target,
+                    customInstruction: customInstruction
+                )
                 statusMessage = "Editor assist suggestion ready."
             } else {
                 errorMessage = result.output
@@ -1636,6 +1700,7 @@ public final class AppStore: ObservableObject {
 
     public func clearEditorAssistSuggestion() {
         latestEditorAssistSuggestion = nil
+        latestAIAssistProposal = nil
     }
 
     public func dispatchTask(taskID: String? = nil, provider: RunnerProvider = .codex) async {
@@ -1687,6 +1752,150 @@ public final class AppStore: ObservableObject {
             successfulStatus: .active,
             adapter: adapter
         )
+    }
+
+    public func assignSelectedTaskToAIWorker() async {
+        await assignTaskToAIWorker(taskID: selectedTask?.id)
+    }
+
+    public func assignTaskToAIWorker(taskID: String? = nil) async {
+        guard let repository, let project = selectedProject else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        guard let task = (taskID.flatMap { id in tasks.first { $0.id == id } }) ?? selectedTask else {
+            errorMessage = "Select a task to assign."
+            return
+        }
+        guard let adapter = runnerAdapters[.codex] else {
+            errorMessage = "Codex runner is not configured."
+            return
+        }
+        if project.type == .codeRepo {
+            guard await ensureLifecycleGateAllowsStart(project: project, selectedTask: task) else { return }
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        do {
+            var task = task
+            let workspace = try await ensureRunnerWorkspace(project: project, task: &task, repository: repository)
+            try await runWorkerLoop(
+                project: project,
+                task: task,
+                workspace: workspace,
+                existingSession: nil,
+                runReason: "assign_to_ai_worker",
+                adapter: adapter,
+                repository: repository
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            statusMessage = "AI Worker assignment failed."
+        }
+    }
+
+    public func resumeWorker() async {
+        guard let repository, let project = selectedProject, let task = selectedTask else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        guard let workspace = selectedRunnerWorkspace ?? (try? repository.latestRunnerWorkspace(taskId: task.id)),
+              let session = selectedRunnerSession ?? (try? repository.latestRunnerSession(taskId: task.id)) else {
+            await assignTaskToAIWorker(taskID: task.id)
+            return
+        }
+        guard let adapter = runnerAdapters[session.provider] else {
+            errorMessage = "Runner provider \(session.provider.displayName) is not configured."
+            return
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        do {
+            try await runWorkerLoop(
+                project: project,
+                task: task,
+                workspace: workspace,
+                existingSession: session,
+                runReason: "resume_ai_worker",
+                adapter: adapter,
+                repository: repository
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            statusMessage = "AI Worker resume failed."
+        }
+    }
+
+    public func reviewLatestWorkerReport() {
+        guard let report = latestWorkerReport else {
+            statusMessage = "No worker report is available."
+            return
+        }
+        selectedRunOutput = report.rawText.isEmpty ? report.summary : report.rawText
+        statusMessage = "Showing latest worker report."
+    }
+
+    public func viewLatestWorkerLogs() {
+        guard let path = latestRunnerExecution?.logPath ?? selectedRunnerSession?.transcriptPath else {
+            statusMessage = "No worker log is available."
+            return
+        }
+        selectedRunOutput = (try? String(contentsOfFile: path, encoding: .utf8)) ?? "Log file is missing: \(path)"
+        statusMessage = "Showing worker log."
+    }
+
+    public func createTask(from proposal: TaskProposal) {
+        perform {
+            guard let repository = self.repository else { throw FactoryError.missingSelection }
+            let task = try repository.acceptTaskProposal(id: proposal.id)
+            try self.reload()
+            self.selectedTaskID = task.id
+            self.selectedWorkspaceScope = .task
+            self.statusMessage = "Created task from worker proposal."
+        }
+    }
+
+    public func createAllProposedTasks() {
+        perform {
+            guard let repository = self.repository, let sourceTask = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            let proposals = try repository.taskProposals(sourceTaskId: sourceTask.id, status: .proposed)
+            var created: [FactoryTask] = []
+            for proposal in proposals {
+                created.append(try repository.acceptTaskProposal(id: proposal.id))
+            }
+            try self.reload()
+            self.selectedTaskID = created.first?.id ?? sourceTask.id
+            self.statusMessage = "Created \(created.count) proposed task\(created.count == 1 ? "" : "s")."
+        }
+    }
+
+    public func dismissTaskProposal(_ proposal: TaskProposal) {
+        perform {
+            guard let repository = self.repository else { throw FactoryError.missingSelection }
+            try repository.dismissTaskProposal(id: proposal.id)
+            try self.reloadWorkerState()
+            self.statusMessage = "Dismissed worker proposal."
+        }
+    }
+
+    public func dismissAllTaskProposals() {
+        perform {
+            guard let repository = self.repository, let task = self.selectedTask else {
+                throw FactoryError.missingSelection
+            }
+            let proposals = try repository.taskProposals(sourceTaskId: task.id, status: .proposed)
+            for proposal in proposals {
+                try repository.dismissTaskProposal(id: proposal.id)
+            }
+            try self.reloadWorkerState()
+            self.statusMessage = "Dismissed \(proposals.count) worker proposal\(proposals.count == 1 ? "" : "s")."
+        }
     }
 
     public func continueRunnerSession(taskID: String? = nil) async {
@@ -2466,6 +2675,290 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    private func ensureRunnerWorkspace(
+        project: Project,
+        task: inout FactoryTask,
+        repository: FactoryRepository
+    ) async throws -> RunnerWorkspace {
+        if let existing = try repository.latestRunnerWorkspace(taskId: task.id),
+           !existing.archived,
+           !existing.cleaned,
+           FileManager.default.fileExists(atPath: existing.worktreePath) || project.type != .codeRepo {
+            return existing
+        }
+
+        var branchName = task.codexBranch ?? task.localBranch ?? "worker/\(task.id.shortID)"
+        var worktreePath: String
+        if project.type == .codeRepo {
+            guard let gitService else { throw FactoryError.missingSelection }
+            if let codexPath = task.codexWorktreePath, Self.existingDirectory(codexPath) {
+                worktreePath = codexPath
+                branchName = task.codexBranch ?? branchName
+            } else if let localPath = task.localWorktreePath, Self.existingDirectory(localPath) {
+                worktreePath = localPath
+                branchName = task.localBranch ?? branchName
+            } else {
+                let result = try await gitService.createWorktree(project: project, task: task, flavor: .codex)
+                task.codexBranch = result.branch
+                task.codexWorktreePath = result.path
+                task.setBaseBranchCommit(await gitService.defaultBranchHead(project: project), for: .codex)
+                task.updatedAt = Date()
+                try repository.upsert(task: task)
+                branchName = result.branch
+                worktreePath = result.path
+            }
+        } else {
+            worktreePath = project.path
+            branchName = "manual/\(task.id.shortID)"
+        }
+
+        let baseCommit = project.type == .codeRepo ? await gitService?.defaultBranchHead(project: project) : nil
+        let headCommit = await repoHead(path: worktreePath)
+        let workspace = RunnerWorkspace(
+            projectId: project.id,
+            taskId: task.id,
+            branchName: branchName,
+            worktreePath: worktreePath,
+            baseCommit: task.codexBaseBranchCommit ?? task.localBaseBranchCommit ?? baseCommit,
+            headCommit: headCommit
+        )
+        try repository.upsert(runnerWorkspace: workspace)
+        try reload()
+        selectedTaskID = task.id
+        return workspace
+    }
+
+    private func runWorkerLoop(
+        project: Project,
+        task: FactoryTask,
+        workspace: RunnerWorkspace,
+        existingSession: RunnerSession?,
+        runReason: String,
+        adapter: RunnerProviderAdapter,
+        repository: FactoryRepository
+    ) async throws {
+        let startedAt = Date()
+        let directory = paths.runDirectory(project: project, task: task)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let promptURL = directory.appendingPathComponent("\(runReason)-\(UUID().uuidString.shortID)-prompt.md")
+        let logURL = directory.appendingPathComponent("\(runReason)-\(UUID().uuidString.shortID).log")
+        let prompt = workerPrompt(project: project, task: task)
+        try prompt.write(to: promptURL, atomically: true, encoding: .utf8)
+
+        var session = existingSession ?? RunnerSession(
+            workspaceId: workspace.id,
+            provider: .codex,
+            mode: .coding,
+            modelProfile: selectedRunnerProjectLink?.preferredModelProfile,
+            status: .active
+        )
+        session.status = .active
+        session.updatedAt = Date()
+        try repository.upsert(runnerSession: session)
+        try repository.insert(agentTurn: AgentTurn(sessionId: session.id, role: "user", content: prompt))
+
+        let linkedSessionID = session.externalSessionId
+        let commandRequest = try codexCLIService.commandRequest(for: linkedSessionID.map {
+            .execResume(sessionId: $0, workspacePath: workspace.worktreePath, instruction: prompt, sandboxMode: .workspaceWrite)
+        } ?? .exec(workspacePath: workspace.worktreePath, instruction: prompt, sandboxMode: .workspaceWrite))
+
+        var execution = RunnerExecution(
+            sessionId: session.id,
+            runReason: runReason,
+            command: commandRequest.displayString,
+            status: .running,
+            logPath: logURL.path,
+            beforeRepoState: await repoState(path: workspace.worktreePath),
+            startedAt: startedAt
+        )
+        try repository.upsert(runnerExecution: execution)
+        try markWorkerAssigned(task: task, executionID: execution.id, repository: repository)
+        try reloadWorkerState()
+        statusMessage = runReason == "assign_to_ai_worker" ? "AI Worker running..." : "AI Worker resumed..."
+
+        let request = RunnerRequest(
+            provider: .codex,
+            mode: .coding,
+            workspacePath: workspace.worktreePath,
+            taskID: task.id,
+            instruction: prompt,
+            modelProfile: selectedRunnerProjectLink?.preferredModelProfile,
+            linkedSessionID: linkedSessionID,
+            sandboxMode: .workspaceWrite
+        )
+        let result = try await adapter.execute(request)
+        let log = runnerLogText(
+            provider: request.provider,
+            mode: request.mode,
+            command: result.command.displayString,
+            startedAt: startedAt,
+            endedAt: result.endedAt,
+            exitCode: Int(result.exitCode),
+            standardOutput: result.standardOutput,
+            standardError: result.standardError
+        )
+        try log.write(to: logURL, atomically: true, encoding: .utf8)
+        try repository.insert(agentTurn: AgentTurn(sessionId: session.id, role: "assistant", content: result.output))
+
+        session.externalSessionId = result.sessionMetadata?.sessionID ?? session.externalSessionId
+        session.status = result.succeeded ? .completed : .failed
+        session.transcriptPath = logURL.path
+        session.updatedAt = result.endedAt
+        try repository.upsert(runnerSession: session)
+
+        execution.command = result.command.displayString
+        execution.status = result.succeeded ? .completed : .failed
+        execution.exitCode = Int(result.exitCode)
+        execution.afterRepoState = await repoState(path: workspace.worktreePath)
+        execution.endedAt = result.endedAt
+        try repository.upsert(runnerExecution: execution)
+
+        var updatedWorkspace = workspace
+        updatedWorkspace.headCommit = await repoHead(path: workspace.worktreePath)
+        updatedWorkspace.updatedAt = Date()
+        try repository.upsert(runnerWorkspace: updatedWorkspace)
+
+        try ingestWorkerReport(
+            result: result,
+            task: task,
+            session: session,
+            execution: execution,
+            repository: repository
+        )
+        try await refreshWorkerLifecycleSnapshot(project: project, task: task, repository: repository)
+        try reload()
+        selectedTaskID = task.id
+        selectedRunOutput = log
+        statusMessage = result.succeeded ? "AI Worker completed. Review the worker report." : "AI Worker failed. Review the worker log."
+    }
+
+    private func ingestWorkerReport(
+        result: RunnerResult,
+        task: FactoryTask,
+        session: RunnerSession,
+        execution: RunnerExecution,
+        repository: FactoryRepository
+    ) throws {
+        let parsed = WorkerReportParser.parse(
+            output: result.output,
+            sessionId: session.id,
+            executionId: execution.id,
+            sourceTaskId: task.id
+        )
+        guard let report = parsed.report else {
+            let failedReport = WorkerReport(
+                sessionId: session.id,
+                executionId: execution.id,
+                status: .failed,
+                summary: parsed.error ?? "Worker report could not be parsed.",
+                rawText: parsed.rawReportText
+            )
+            try repository.upsert(workerReport: failedReport)
+            try repository.insert(runnerNotification: RunnerNotification(
+                taskId: task.id,
+                sessionId: session.id,
+                executionId: execution.id,
+                level: .warning,
+                message: parsed.error ?? "Worker report needs review."
+            ))
+            return
+        }
+
+        try repository.upsert(workerReport: report)
+        for proposal in parsed.proposals {
+            try repository.upsert(taskProposal: proposal)
+        }
+        try applyWorkerReportStatus(report, to: task, executionID: execution.id, repository: repository)
+    }
+
+    private func markWorkerAssigned(
+        task: FactoryTask,
+        executionID: String,
+        repository: FactoryRepository
+    ) throws {
+        guard task.status != .done, task.status != .archived, task.status != .building else { return }
+        var updated = task
+        try updateStatus(
+            for: &updated,
+            to: .building,
+            source: .automatic,
+            eventKind: .statusChangedAutomatically,
+            message: "Assigned to AI Worker.",
+            repository: repository
+        )
+    }
+
+    private func applyWorkerReportStatus(
+        _ report: WorkerReport,
+        to task: FactoryTask,
+        executionID: String,
+        repository: FactoryRepository
+    ) throws {
+        guard task.status != .done, task.status != .archived else { return }
+        let nextStatus: TaskStatus?
+        switch report.status {
+        case .blocked:
+            nextStatus = .blocked
+        case .completed, .needsReview:
+            nextStatus = .readyForReview
+        case .failed:
+            nextStatus = nil
+        }
+        guard let nextStatus, nextStatus != task.status else { return }
+        var updated = task
+        try updateStatus(
+            for: &updated,
+            to: nextStatus,
+            source: .automatic,
+            eventKind: .statusChangedAutomatically,
+            message: "Worker report status: \(report.status.displayName).",
+            repository: repository
+        )
+    }
+
+    private func refreshWorkerLifecycleSnapshot(
+        project: Project,
+        task: FactoryTask,
+        repository: FactoryRepository
+    ) async throws {
+        let workspace = try repository.latestRunnerWorkspace(taskId: task.id)
+        let execution = try repository.latestRunnerExecution(taskId: task.id)
+        let report = try repository.latestWorkerReport(taskId: task.id)
+        let notifications = try repository.runnerNotifications(taskId: task.id, unreadOnly: true)
+        let proposals = try repository.taskProposals(sourceTaskId: task.id, status: .proposed)
+        let snapshot = await lifecycleMonitorService.snapshot(
+            project: project,
+            task: task,
+            workspace: workspace,
+            latestExecution: execution,
+            latestReport: report,
+            unseenNotifications: notifications.count,
+            proposedTasksCount: proposals.count
+        )
+        try repository.upsert(lifecycleSnapshot: snapshot)
+    }
+
+    private func repoState(path: String) async -> String? {
+        guard Self.existingDirectory(path) else { return nil }
+        let result = try? await commandRunner.run(CommandRequest(
+            executable: "git",
+            arguments: ["status", "--short", "--branch"],
+            workingDirectory: URL(fileURLWithPath: path)
+        ))
+        return result?.output
+    }
+
+    private func repoHead(path: String) async -> String? {
+        guard Self.existingDirectory(path) else { return nil }
+        let result = try? await commandRunner.run(CommandRequest(
+            executable: "git",
+            arguments: ["rev-parse", "--short", "HEAD"],
+            workingDirectory: URL(fileURLWithPath: path)
+        ))
+        guard result?.succeeded == true else { return nil }
+        return result?.output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func runCodexCommand(
         kind: CodexSessionCommandKind,
         summary: String,
@@ -3214,9 +3707,13 @@ public final class AppStore: ObservableObject {
         [task.localWorktreePath, task.codexWorktreePath]
             .compactMap { $0 }
             .contains { path in
-                var isDirectory: ObjCBool = false
-                return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+                Self.existingDirectory(path)
             }
+    }
+
+    private static func existingDirectory(_ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
     private func taskStateArtifactSummaries() -> [TaskArtifactSummary] {
@@ -3679,6 +4176,77 @@ public final class AppStore: ObservableObject {
 
         Verification commands:
         \(tests)
+        """
+    }
+
+    private func workerPrompt(project: Project, task: FactoryTask) -> String {
+        let acceptance = task.acceptanceCriteria.isEmpty
+            ? "- No explicit acceptance criteria provided."
+            : task.acceptanceCriteria.map { "- \($0)" }.joined(separator: "\n")
+        let verificationCommands = [
+            project.commandConfiguration.build,
+            project.commandConfiguration.unitTests,
+            project.commandConfiguration.integrationTests,
+            project.commandConfiguration.e2eTests,
+            project.commandConfiguration.visualQC
+        ]
+        .compactMap { $0 }
+        let tests = verificationCommands.isEmpty
+            ? "- No verification commands configured. If you do not run tests, say so explicitly."
+            : verificationCommands.map { "- \($0)" }.joined(separator: "\n")
+
+        return """
+        You are Factory Desktop's AI Worker for one FactoryTask.
+        Work inside the assigned workspace only. Make focused implementation changes for this task when needed.
+
+        Safety rules:
+        - Do not mark the task Done.
+        - Do not merge, push, delete worktrees, or clean worktrees.
+        - Do not create real backlog tasks.
+        - Keep changes scoped to this FactoryTask.
+        - If tests are not run, explicitly say tests were not run and why.
+
+        Project:
+        - Name: \(project.name)
+        - Type: \(project.type.rawValue)
+        - Path: \(project.path)
+        - Default branch: \(project.defaultBranch)
+
+        FactoryTask:
+        - ID: \(task.id)
+        - Title: \(task.title)
+        - Type: \(task.type.rawValue)
+        - Status: \(task.status.rawValue)
+        - Priority: \(task.priorityLabel.rawValue)
+        - Readiness: \(task.readiness.rawValue)
+
+        Goal:
+        \(task.goal.isEmpty ? task.title : task.goal)
+
+        Context:
+        \(task.context.isEmpty ? "No extra context provided." : task.context)
+
+        Acceptance criteria:
+        \(acceptance)
+
+        Suggested verification:
+        \(tests)
+
+        Finish your response with this exact structured block:
+
+        WORKER REPORT
+        Status: completed | needs_review | blocked | failed
+        Summary:
+        Files Changed:
+        Tests Run:
+        Risks:
+        Blockers:
+        Follow-up Tasks Proposed:
+        Next Recommended Action:
+        Recommended Task Status:
+
+        Follow-up tasks must be proposals only. Use "None" when there are none.
+        Recommended Task Status may be In Progress, Needs Review, Blocked, or blank. Never recommend Done.
         """
     }
 

@@ -1,9 +1,10 @@
+import FactoryDesktopCore
 import SwiftUI
 import WebKit
 
 struct RichTaskEditorView: NSViewRepresentable {
     @Binding var markdown: String
-    @Binding var selectedText: String
+    @Binding var selectionState: TaskEditorSelectionState
     @ObservedObject var bridge: RichTaskEditorBridge
     var isEditable = true
 
@@ -59,6 +60,9 @@ struct RichTaskEditorView: NSViewRepresentable {
 
         func unregisterBridge() {
             parent.bridge.requestLatestMarkdown = nil
+            parent.bridge.dismissInlineAI = nil
+            parent.bridge.openInlineAI = nil
+            parent.bridge.runInlineAction = nil
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -72,7 +76,33 @@ struct RichTaskEditorView: NSViewRepresentable {
 
             DispatchQueue.main.async {
                 if let selectedText = body["selectedText"] as? String {
-                    self.parent.selectedText = selectedText
+                    var selectionState = self.parent.selectionState
+                    selectionState.selectedText = selectedText
+                    if let isFocused = body["isFocused"] as? Bool {
+                        selectionState.isFocused = isFocused
+                    }
+                    if let activeSection = body["activeSection"] as? String {
+                        selectionState.activeSection = EditorAssistSection(rawValue: activeSection)
+                    } else {
+                        selectionState.activeSection = nil
+                    }
+                    if let cursorAtInsertionPoint = body["cursorAtInsertionPoint"] as? Bool {
+                        selectionState.cursorAtInsertionPoint = cursorAtInsertionPoint
+                    }
+                    if let changeToken = body["changeToken"] as? Int {
+                        selectionState.changeToken = changeToken
+                    }
+                    self.parent.selectionState = selectionState
+                }
+
+                if event == "dismissInlineAI" {
+                    self.parent.bridge.dismissInlineAI?()
+                } else if event == "openInlineAI" {
+                    self.parent.bridge.openInlineAI?()
+                } else if event == "inlineAIAction",
+                          let actionRawValue = body["action"] as? String,
+                          let action = EditorAssistAction(rawValue: actionRawValue) {
+                    self.parent.bridge.runInlineAction?(action)
                 }
 
                 switch event {
@@ -136,4 +166,7 @@ struct RichTaskEditorView: NSViewRepresentable {
 
 final class RichTaskEditorBridge: ObservableObject {
     var requestLatestMarkdown: (((@escaping (String) -> Void) -> Void))?
+    var dismissInlineAI: (() -> Void)?
+    var openInlineAI: (() -> Void)?
+    var runInlineAction: ((EditorAssistAction) -> Void)?
 }

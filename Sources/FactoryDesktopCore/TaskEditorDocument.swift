@@ -80,22 +80,157 @@ public struct TaskEditorDocument: Equatable, Sendable {
 }
 
 public enum EditorAssistAction: String, CaseIterable, Identifiable, Sendable {
+    case askAI = "ask_ai"
     case rewriteSelection = "rewrite_selection"
+    case makeClearer = "make_clearer"
+    case makeShorter = "make_shorter"
+    case continueWriting = "continue_writing"
     case tightenGoal = "tighten_goal"
     case findAmbiguity = "find_ambiguity"
     case generateAcceptanceCriteria = "generate_acceptance_criteria"
     case splitTask = "split_task"
+    case customAsk = "custom_ask"
 
     public var id: String { rawValue }
 
     public var displayName: String {
         switch self {
+        case .askAI: "Ask AI"
         case .rewriteSelection: "Rewrite Selection"
+        case .makeClearer: "Make Clearer"
+        case .makeShorter: "Make Shorter"
+        case .continueWriting: "Continue Writing"
         case .tightenGoal: "Tighten Goal"
         case .findAmbiguity: "Find Ambiguity"
         case .generateAcceptanceCriteria: "Generate Acceptance"
         case .splitTask: "Split Task"
+        case .customAsk: "Custom Ask"
         }
+    }
+}
+
+public enum EditorAssistSection: String, Codable, CaseIterable, Identifiable, Sendable {
+    case goal
+    case context
+    case scoping
+    case acceptanceCriteria
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .goal: "Goal"
+        case .context: "Context"
+        case .scoping: "Scoping"
+        case .acceptanceCriteria: "Acceptance Criteria"
+        }
+    }
+}
+
+public enum EditorAssistTargetKind: Equatable, Sendable {
+    case selectedText
+    case section(EditorAssistSection)
+    case cursorInsertionPoint
+    case fullBrief
+}
+
+public struct EditorAssistTarget: Equatable, Sendable {
+    public var kind: EditorAssistTargetKind
+    public var selectedText: String
+    public var activeSection: EditorAssistSection?
+
+    public init(kind: EditorAssistTargetKind, selectedText: String = "", activeSection: EditorAssistSection? = nil) {
+        self.kind = kind
+        self.selectedText = selectedText
+        self.activeSection = activeSection
+    }
+
+    public var label: String {
+        switch kind {
+        case .selectedText:
+            let count = selectedText.wordCount
+            let noun = count == 1 ? "word" : "words"
+            return "Selected text, \(count) \(noun)"
+        case .section(let section):
+            return "\(section.displayName) section"
+        case .cursorInsertionPoint:
+            return "Cursor insertion point"
+        case .fullBrief:
+            return "Full brief"
+        }
+    }
+}
+
+public struct AIAssistProposal: Identifiable, Equatable, Sendable {
+    public var id: String
+    public var provider: RunnerProvider
+    public var action: EditorAssistAction
+    public var summary: String
+    public var replacementMarkdown: String
+    public var rawOutput: String
+    public var createdAt: Date
+    public var target: EditorAssistTarget
+    public var customInstruction: String
+
+    public init(
+        id: String = UUID().uuidString,
+        provider: RunnerProvider,
+        action: EditorAssistAction,
+        summary: String,
+        replacementMarkdown: String,
+        rawOutput: String,
+        createdAt: Date = Date(),
+        target: EditorAssistTarget,
+        customInstruction: String = ""
+    ) {
+        self.id = id
+        self.provider = provider
+        self.action = action
+        self.summary = summary
+        self.replacementMarkdown = replacementMarkdown
+        self.rawOutput = rawOutput
+        self.createdAt = createdAt
+        self.target = target
+        self.customInstruction = customInstruction
+    }
+
+    public static func parse(
+        provider: RunnerProvider,
+        action: EditorAssistAction,
+        output: String,
+        target: EditorAssistTarget,
+        customInstruction: String = ""
+    ) -> AIAssistProposal {
+        let replacement = fencedMarkdown(in: output) ?? output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summary = firstSummaryLine(in: output, fallback: action.displayName)
+        return AIAssistProposal(
+            provider: provider,
+            action: action,
+            summary: summary,
+            replacementMarkdown: replacement,
+            rawOutput: output,
+            target: target,
+            customInstruction: customInstruction
+        )
+    }
+
+    private static func fencedMarkdown(in output: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: #"```(?:markdown|md)?\s*\n([\s\S]*?)\n```"#, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let range = NSRange(output.startIndex..<output.endIndex, in: output)
+        guard let match = regex.firstMatch(in: output, range: range),
+              let bodyRange = Range(match.range(at: 1), in: output) else {
+            return nil
+        }
+        let body = String(output[bodyRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return body.isEmpty ? nil : body
+    }
+
+    private static func firstSummaryLine(in output: String, fallback: String) -> String {
+        output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty && !$0.hasPrefix("```") } ?? fallback
     }
 }
 
@@ -177,25 +312,47 @@ public enum EditorAssistPrompt {
         action: EditorAssistAction,
         taskTitle: String,
         documentMarkdown: String,
-        selectedText: String
+        target: EditorAssistTarget,
+        customInstruction: String = ""
     ) -> String {
-        let trimmedSelection = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let selectionBlock = trimmedSelection.isEmpty ? "(no selection)" : trimmedSelection
-        return """
+        let selectionBlock = target.selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "(no selection)"
+            : target.selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let customBlock = customInstruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? ""
+            : """
+
+            Additional request:
+            \(customInstruction)
+            """
+        var prompt = """
         You are Factory Desktop's task-writing assistant.
         Suggest improvements only. Do not edit files, run commands, or change task state.
 
         Task: \(taskTitle)
         Action: \(action.displayName)
+        Target: \(target.label)
 
         Selected text:
         \(selectionBlock)
+        """
+        if !customBlock.isEmpty {
+            prompt += "\n\(customBlock)\n"
+        }
+        prompt += """
 
         Current task document:
         \(documentMarkdown)
 
-        Return a concise explanation followed by one fenced markdown block containing the exact replacement or insertion text.
+        Return a concise explanation followed by one fenced markdown block containing the exact replacement or insertion text for the target only.
         The user will review and accept or reject the suggestion manually.
         """
+        return prompt
+    }
+}
+
+private extension String {
+    var wordCount: Int {
+        split { $0.isWhitespace || $0.isNewline }.count
     }
 }

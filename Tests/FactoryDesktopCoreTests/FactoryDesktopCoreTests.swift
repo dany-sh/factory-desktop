@@ -183,7 +183,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
             action: .rewriteSelection,
             taskTitle: "Editor",
             documentMarkdown: "## Goal\nBetter editor",
-            selectedText: "Better editor"
+            target: EditorAssistTarget(kind: .selectedText, selectedText: "Better editor")
         )
 
         XCTAssertTrue(prompt.contains("Suggest improvements only."))
@@ -366,6 +366,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "git", arguments: ["worktree", "prune", "--dry-run"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "npm", arguments: ["run", "lint"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "read-only", "-o", "/tmp/review.md", "-"])))
+        XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "workspace-write", "Implement safely."])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "which", arguments: ["codex"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "codex", arguments: ["--version"])))
         XCTAssertNoThrow(try runner.validate(CommandRequest(executable: "codex", arguments: ["app", "/tmp/repo"])))
@@ -379,7 +380,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["merge-base", "abc123", "def456"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "git", arguments: ["checkout", "--", "."])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "rm", arguments: ["-rf", "/tmp/nope"])))
-        XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "workspace-write", "-"])))
+        XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "danger-full-access", "-"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["exec", "-C", "/tmp/repo", "-s", "read-only", "--add-dir", "/tmp/other", "-"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["resume", "../bad"])))
         XCTAssertThrowsError(try runner.validate(CommandRequest(executable: "codex", arguments: ["app", "relative/path"])))
@@ -2156,7 +2157,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
         try MigrationRunner(database: database, paths: paths).migrate()
 
         let rows = try database.query(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'tasks', 'runs', 'artifacts', 'task_events', 'schema_migrations', 'codex_project_links', 'codex_session_links');"
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'tasks', 'runs', 'artifacts', 'task_events', 'schema_migrations', 'codex_project_links', 'codex_session_links', 'runner_workspaces', 'runner_sessions', 'runner_executions', 'agent_turns', 'lifecycle_snapshots', 'runner_notifications', 'worker_reports', 'task_proposals');"
         )
         XCTAssertEqual(Set(rows.compactMap { $0["name"] ?? nil }), Set([
             "projects",
@@ -2166,7 +2167,15 @@ final class FactoryDesktopCoreTests: XCTestCase {
             "task_events",
             "schema_migrations",
             "codex_project_links",
-            "codex_session_links"
+            "codex_session_links",
+            "runner_workspaces",
+            "runner_sessions",
+            "runner_executions",
+            "agent_turns",
+            "lifecycle_snapshots",
+            "runner_notifications",
+            "worker_reports",
+            "task_proposals"
         ]))
     }
 
@@ -2313,6 +2322,132 @@ final class FactoryDesktopCoreTests: XCTestCase {
 
         try fixture.repository.deleteCodexProjectLink(projectId: project.id)
         XCTAssertNil(try fixture.repository.codexProjectLink(projectId: project.id))
+    }
+
+    func testWorkerReportParserCreatesReportAndTaskProposal() throws {
+        let output = """
+        Implementation finished.
+
+        WORKER REPORT
+        Status: needs_review
+        Summary: Added the worker loop.
+        Files Changed:
+        - Sources/AppStore.swift
+        Tests Run:
+        - swift test
+        Risks:
+        - UI needs manual QA.
+        Blockers:
+        - None
+        Follow-up Tasks Proposed:
+        - Add cancellation for long worker runs
+        Next Recommended Action: Review the diff.
+        Recommended Task Status: Needs Review
+        """
+
+        let parsed = WorkerReportParser.parse(
+            output: output,
+            sessionId: "session",
+            executionId: "execution",
+            sourceTaskId: "task"
+        )
+
+        let report = try XCTUnwrap(parsed.report)
+        XCTAssertTrue(parsed.isValid)
+        XCTAssertEqual(report.status, .needsReview)
+        XCTAssertEqual(report.filesChanged, ["Sources/AppStore.swift"])
+        XCTAssertEqual(report.testsRun, ["swift test"])
+        XCTAssertEqual(report.risks, ["UI needs manual QA."])
+        XCTAssertEqual(report.blockers, [])
+        XCTAssertEqual(report.recommendedTaskStatus, .readyForReview)
+        XCTAssertEqual(parsed.proposals.count, 1)
+        XCTAssertEqual(parsed.proposals.first?.title, "Add cancellation for long worker runs")
+    }
+
+    func testWorkerReportParserFailsWithoutStructuredReport() {
+        let parsed = WorkerReportParser.parse(
+            output: "No structured trailer.",
+            sessionId: "session",
+            executionId: "execution",
+            sourceTaskId: "task"
+        )
+
+        XCTAssertFalse(parsed.isValid)
+        XCTAssertNil(parsed.report)
+        XCTAssertEqual(parsed.proposals, [])
+        XCTAssertTrue(parsed.error?.contains("WORKER REPORT") == true)
+    }
+
+    func testRepositoryPersistsWorkerRecordsAndApprovesProposalAsFactoryTask() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Source")
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        let workspace = RunnerWorkspace(projectId: project.id, taskId: task.id, branchName: "manual/task", worktreePath: fixture.root.path)
+        try fixture.repository.upsert(runnerWorkspace: workspace)
+        let session = RunnerSession(workspaceId: workspace.id, provider: .codex, mode: .coding)
+        try fixture.repository.upsert(runnerSession: session)
+        let execution = RunnerExecution(sessionId: session.id, runReason: "assign_to_ai_worker", status: .completed)
+        try fixture.repository.upsert(runnerExecution: execution)
+        let report = WorkerReport(sessionId: session.id, executionId: execution.id, status: .needsReview, summary: "Ready")
+        try fixture.repository.upsert(workerReport: report)
+        let proposal = TaskProposal(
+            sourceTaskId: task.id,
+            sourceSessionId: session.id,
+            title: "Follow up",
+            goal: "Handle follow up",
+            acceptanceCriteria: ["Follow up is handled"],
+            reasonDiscovered: "Worker found it",
+            suggestedPriority: .high,
+            suggestedStage: .ready
+        )
+        try fixture.repository.upsert(taskProposal: proposal)
+
+        let storedWorkspace = try XCTUnwrap(fixture.repository.runnerWorkspaces(taskId: task.id).first)
+        XCTAssertEqual(storedWorkspace.id, workspace.id)
+        XCTAssertEqual(storedWorkspace.taskId, workspace.taskId)
+        XCTAssertEqual(storedWorkspace.worktreePath, workspace.worktreePath)
+        XCTAssertEqual(try fixture.repository.latestRunnerSession(taskId: task.id)?.id, session.id)
+        XCTAssertEqual(try fixture.repository.latestRunnerExecution(taskId: task.id)?.id, execution.id)
+        XCTAssertEqual(try fixture.repository.latestWorkerReport(taskId: task.id)?.id, report.id)
+        XCTAssertEqual(try fixture.repository.taskProposals(sourceTaskId: task.id, status: .proposed).count, 1)
+
+        let created = try fixture.repository.acceptTaskProposal(id: proposal.id)
+        XCTAssertEqual(created.projectId, project.id)
+        XCTAssertEqual(created.parentTaskId, task.id)
+        XCTAssertEqual(created.title, "Follow up")
+        XCTAssertEqual(created.status, .ready)
+        XCTAssertEqual(created.priorityLabel, .high)
+        XCTAssertEqual(created.acceptanceCriteria, ["Follow up is handled"])
+        XCTAssertEqual(try fixture.repository.taskProposals(sourceTaskId: task.id, status: .proposed), [])
+        XCTAssertEqual(try fixture.repository.taskProposals(sourceTaskId: task.id, status: .accepted).first?.createdTaskId, created.id)
+    }
+
+    func testDismissedWorkerProposalDoesNotCreateTask() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Source")
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+        let workspace = RunnerWorkspace(projectId: project.id, taskId: task.id, branchName: "manual/task", worktreePath: fixture.root.path)
+        try fixture.repository.upsert(runnerWorkspace: workspace)
+        let session = RunnerSession(workspaceId: workspace.id, provider: .codex, mode: .coding)
+        try fixture.repository.upsert(runnerSession: session)
+        let proposal = TaskProposal(
+            sourceTaskId: task.id,
+            sourceSessionId: session.id,
+            title: "Dismiss me",
+            goal: "Should not exist",
+            reasonDiscovered: "Test"
+        )
+        try fixture.repository.upsert(taskProposal: proposal)
+
+        try fixture.repository.dismissTaskProposal(id: proposal.id)
+
+        XCTAssertEqual(try fixture.repository.taskProposals(sourceTaskId: task.id, status: .dismissed).first?.id, proposal.id)
+        XCTAssertFalse(try fixture.repository.tasks(projectId: project.id).contains { $0.title == "Dismiss me" })
     }
 
     func testRepositoryPersistsAndQueriesCodexSessionLinks() throws {
@@ -2647,6 +2782,97 @@ final class FactoryDesktopCoreTests: XCTestCase {
     }
 
     @MainActor
+    func testAssignToAIWorkerCreatesWorkspaceSessionExecutionAndMovesInProgressThenNeedsReview() async throws {
+        let fixture = try makeWorkerStoreFixture(workerOutput: """
+        Work completed.
+
+        WORKER REPORT
+        Status: needs_review
+        Summary: Implemented the slice.
+        Files Changed:
+        - Sources/AppStore.swift
+        Tests Run:
+        - swift test
+        Risks:
+        - Manual UI QA still useful.
+        Blockers:
+        - None
+        Follow-up Tasks Proposed:
+        - Add worker cancellation
+        Next Recommended Action: Review report.
+        Recommended Task Status: Needs Review
+        """)
+
+        await fixture.store.assignSelectedTaskToAIWorker()
+
+        let storedTask = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first { $0.id == fixture.task.id })
+        let workspace = try XCTUnwrap(fixture.repository.latestRunnerWorkspace(taskId: fixture.task.id))
+        let session = try XCTUnwrap(fixture.repository.latestRunnerSession(taskId: fixture.task.id))
+        let execution = try XCTUnwrap(fixture.repository.latestRunnerExecution(taskId: fixture.task.id))
+        let report = try XCTUnwrap(fixture.repository.latestWorkerReport(taskId: fixture.task.id))
+        let proposals = try fixture.repository.taskProposals(sourceTaskId: fixture.task.id, status: .proposed)
+        let events = try fixture.repository.taskEvents(taskId: fixture.task.id)
+
+        XCTAssertEqual(workspace.taskId, fixture.task.id)
+        XCTAssertEqual(workspace.worktreePath, fixture.root.path)
+        XCTAssertEqual(session.workspaceId, workspace.id)
+        XCTAssertEqual(session.provider, .codex)
+        XCTAssertEqual(session.status, .completed)
+        XCTAssertEqual(execution.sessionId, session.id)
+        XCTAssertEqual(execution.status, .completed)
+        XCTAssertEqual(report.status, .needsReview)
+        XCTAssertEqual(proposals.map(\.title), ["Add worker cancellation"])
+        XCTAssertEqual(storedTask.status, .readyForReview)
+        XCTAssertTrue(events.contains { $0.newStatus == .building && $0.message == "Assigned to AI Worker." })
+        XCTAssertTrue(events.contains { $0.newStatus == .readyForReview && $0.message.contains("Worker report status") })
+    }
+
+    @MainActor
+    func testBlockedWorkerReportMovesTaskToBlocked() async throws {
+        let fixture = try makeWorkerStoreFixture(workerOutput: """
+        Blocked.
+
+        WORKER REPORT
+        Status: blocked
+        Summary: Cannot continue without credentials.
+        Files Changed:
+        - None
+        Tests Run:
+        - Tests were not run because the worker is blocked.
+        Risks:
+        - Unknown production credentials.
+        Blockers:
+        - Missing credentials.
+        Follow-up Tasks Proposed:
+        - None
+        Next Recommended Action: Resolve credentials.
+        Recommended Task Status: Blocked
+        """)
+
+        await fixture.store.assignSelectedTaskToAIWorker()
+
+        let storedTask = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first { $0.id == fixture.task.id })
+        let report = try XCTUnwrap(fixture.repository.latestWorkerReport(taskId: fixture.task.id))
+        XCTAssertEqual(report.status, .blocked)
+        XCTAssertEqual(storedTask.status, .blocked)
+    }
+
+    @MainActor
+    func testUnparseableWorkerReportDoesNotMoveBeyondAssignedStatus() async throws {
+        let fixture = try makeWorkerStoreFixture(workerOutput: "I did work but forgot the structured report.")
+
+        await fixture.store.assignSelectedTaskToAIWorker()
+
+        let storedTask = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first { $0.id == fixture.task.id })
+        let report = try XCTUnwrap(fixture.repository.latestWorkerReport(taskId: fixture.task.id))
+        let notifications = try fixture.repository.runnerNotifications(taskId: fixture.task.id)
+        XCTAssertEqual(storedTask.status, .building)
+        XCTAssertEqual(report.status, .failed)
+        XCTAssertEqual(notifications.first?.level, .warning)
+        XCTAssertTrue(notifications.first?.message.contains("WORKER REPORT") == true)
+    }
+
+    @MainActor
     func testScopingWorkItemUpdatesSameFactoryTask() async throws {
         let fixture = try makeRepositoryFixture()
         let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
@@ -2846,6 +3072,18 @@ final class FactoryDesktopCoreTests: XCTestCase {
             project: project,
             task: task
         )
+    }
+
+    @MainActor
+    private func makeWorkerStoreFixture(workerOutput: String) throws -> CodexStoreFixture {
+        try makeCodexStoreFixture(taskStatus: .ready) { request in
+            CommandResult(
+                command: request.displayString,
+                exitCode: 0,
+                standardOutput: "session id: worker-session-123\n\(workerOutput)",
+                standardError: ""
+            )
+        }
     }
 
     @MainActor

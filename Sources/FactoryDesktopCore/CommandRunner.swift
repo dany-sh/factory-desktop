@@ -181,7 +181,8 @@ public final class CommandRunner {
         case "resume":
             return arguments.count == 2 && isSafeCodexSessionID(arguments[1])
         case "exec":
-            guard optionValue(in: arguments, short: "-s", long: "--sandbox") == "read-only" else { return false }
+            guard let sandbox = optionValue(in: arguments, short: "-s", long: "--sandbox"),
+                  sandbox == "read-only" || sandbox == "workspace-write" else { return false }
             guard optionValue(in: arguments, short: "-C", long: "--cd").map(isSafeAbsolutePath) == true else { return false }
             return true
         default:

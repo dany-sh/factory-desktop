@@ -1,5 +1,6 @@
 (function () {
   var currentMarkdown = "";
+  var selectionChangeToken = 0;
 
   function post(message) {
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.factoryEditor) {
@@ -158,17 +159,91 @@
     return editor.selection ? editor.selection.getContent({ format: "text" }) : "";
   }
 
+  function selectionRange(editor) {
+    if (!editor.selection) { return null; }
+    return editor.selection.getRng() || null;
+  }
+
+  function cursorAtInsertionPoint(editor) {
+    var range = selectionRange(editor);
+    return !!(range && range.collapsed);
+  }
+
+  function blockNodeForSelection(editor) {
+    if (!editor.selection) { return null; }
+    var node = editor.selection.getNode();
+    if (!node) { return null; }
+    if (node.nodeType === Node.TEXT_NODE) {
+      node = node.parentNode;
+    }
+    while (node && node !== editor.getBody()) {
+      var tag = node.tagName ? node.tagName.toLowerCase() : "";
+      if (/^(p|div|li|h1|h2|h3|h4|h5|h6|blockquote|pre|ul|ol)$/.test(tag)) {
+        return node;
+      }
+      node = node.parentNode;
+    }
+    return editor.getBody();
+  }
+
+  function normalizeSectionName(value) {
+    var trimmed = String(value || "").trim().toLowerCase();
+    if (trimmed === "goal") { return "goal"; }
+    if (trimmed === "context") { return "context"; }
+    if (trimmed === "scoping") { return "scoping"; }
+    if (trimmed === "acceptance criteria" || trimmed === "acceptance") { return "acceptanceCriteria"; }
+    return null;
+  }
+
+  function activeSection(editor) {
+    var block = blockNodeForSelection(editor);
+    if (!block) { return null; }
+
+    var node = block;
+    while (node && node !== editor.getBody()) {
+      if (node.tagName && /^h[1-6]$/i.test(node.tagName)) {
+        return normalizeSectionName(node.textContent);
+      }
+      node = node.previousSibling;
+    }
+
+    while (block && block.parentNode && block.parentNode !== editor.getBody()) {
+      block = block.parentNode;
+      var sibling = block.previousSibling;
+      while (sibling) {
+        if (sibling.tagName && /^h[1-6]$/i.test(sibling.tagName)) {
+          return normalizeSectionName(sibling.textContent);
+        }
+        sibling = sibling.previousSibling;
+      }
+    }
+
+    return null;
+  }
+
+  function postSelectionState(editor, eventName) {
+    selectionChangeToken += 1;
+    post({
+      event: eventName || "selection",
+      markdown: currentMarkdown,
+      selectedText: selectedText(editor),
+      isFocused: editor.hasFocus(),
+      activeSection: activeSection(editor),
+      cursorAtInsertionPoint: cursorAtInsertionPoint(editor),
+      changeToken: selectionChangeToken
+    });
+  }
+
   function postChange(editor) {
     currentMarkdown = htmlToMarkdown(editor.getContent());
-    post({
-      event: "change",
-      markdown: currentMarkdown,
-      selectedText: selectedText(editor)
-    });
+    postSelectionState(editor, "change");
   }
 
   function scheduleChange(editor) {
     postChange(editor);
+    window.setTimeout(function () {
+      updateInlineAI(editor);
+    }, 0);
   }
 
   function insertSection(editor, heading, body) {
@@ -184,12 +259,196 @@
     editor.focus();
   }
 
+  function firstUsefulRect(rectList) {
+    if (!rectList || !rectList.length) { return null; }
+    for (var index = rectList.length - 1; index >= 0; index -= 1) {
+      var rect = rectList[index];
+      if (rect && (rect.width > 0 || rect.height > 0)) {
+        return rect;
+      }
+    }
+    return rectList[0] || null;
+  }
+
+  function editorFrameRect(editor) {
+    var frame = editor.iframeElement;
+    if (!frame && editor.getContentAreaContainer) {
+      frame = editor.getContentAreaContainer().querySelector("iframe");
+    }
+    return frame ? frame.getBoundingClientRect() : { top: 0, left: 0, width: 0, height: 0 };
+  }
+
+  function viewportRectToPage(editor, rect) {
+    if (!rect) { return null; }
+    var frameRect = editorFrameRect(editor);
+    return {
+      top: frameRect.top + window.scrollY + rect.top,
+      left: frameRect.left + window.scrollX + rect.left,
+      width: rect.width,
+      height: rect.height,
+      bottom: frameRect.top + window.scrollY + rect.bottom,
+      right: frameRect.left + window.scrollX + rect.right
+    };
+  }
+
+  function selectionRect(editor) {
+    var range = selectionRange(editor);
+    if (!range || range.collapsed) { return null; }
+    var rect = firstUsefulRect(range.getClientRects()) || range.getBoundingClientRect();
+    return viewportRectToPage(editor, rect);
+  }
+
+  function caretRect(editor) {
+    var range = selectionRange(editor);
+    if (!range || !range.collapsed) { return null; }
+
+    var directRect = firstUsefulRect(range.getClientRects()) || range.getBoundingClientRect();
+    if (directRect && (directRect.width > 0 || directRect.height > 0)) {
+      return viewportRectToPage(editor, directRect);
+    }
+
+    var marker = editor.getDoc().createElement("span");
+    marker.className = "factory-inline-ai-caret";
+    marker.textContent = "\u200b";
+
+    var markerRange = range.cloneRange();
+    markerRange.insertNode(marker);
+    var rect = marker.getBoundingClientRect();
+    marker.parentNode.removeChild(marker);
+    editor.selection.setRng(range);
+    return viewportRectToPage(editor, rect);
+  }
+
+  function blockRect(editor) {
+    var block = blockNodeForSelection(editor);
+    if (!block || !block.getBoundingClientRect) { return null; }
+    return viewportRectToPage(editor, block.getBoundingClientRect());
+  }
+
+  function isEmptyInsertionContext(editor) {
+    if (!cursorAtInsertionPoint(editor) || selectedText(editor).trim()) {
+      return false;
+    }
+    var block = blockNodeForSelection(editor);
+    if (!block) { return false; }
+    var tag = block.tagName ? block.tagName.toLowerCase() : "";
+    if (!/^(p|div|li|blockquote)$/.test(tag)) {
+      return false;
+    }
+    return !String(block.textContent || "").replace(/\u200b/g, "").trim();
+  }
+
+  function createInlineActionButton(doc, label, action, className) {
+    var button = doc.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    button.addEventListener("mousedown", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    button.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      post({ event: "inlineAIAction", action: action });
+    });
+    return button;
+  }
+
+  function ensureInlineAI(editor) {
+    if (editor.factoryInlineAI) {
+      return editor.factoryInlineAI;
+    }
+
+    var root = document.createElement("div");
+    root.className = "factory-inline-ai";
+    root.setAttribute("aria-hidden", "true");
+    root.style.display = "none";
+
+    var pill = createInlineActionButton(document, "+ Ask AI to write here", "ask_ai", "factory-inline-ai-pill");
+    var menu = document.createElement("div");
+    menu.className = "factory-inline-ai-menu";
+    menu.appendChild(createInlineActionButton(document, "Rewrite", "rewrite_selection", "factory-inline-ai-chip"));
+    menu.appendChild(createInlineActionButton(document, "Make clearer", "make_clearer", "factory-inline-ai-chip"));
+    menu.appendChild(createInlineActionButton(document, "Shorter", "make_shorter", "factory-inline-ai-chip"));
+    menu.appendChild(createInlineActionButton(document, "Ask AI", "ask_ai", "factory-inline-ai-chip factory-inline-ai-chip-primary"));
+
+    root.appendChild(pill);
+    root.appendChild(menu);
+    document.body.appendChild(root);
+
+    editor.factoryInlineAI = {
+      root: root,
+      pill: pill,
+      menu: menu
+    };
+    return editor.factoryInlineAI;
+  }
+
+  function hideInlineAI(editor) {
+    var inlineAI = ensureInlineAI(editor);
+    inlineAI.root.style.display = "none";
+    inlineAI.root.setAttribute("aria-hidden", "true");
+    inlineAI.root.classList.remove("factory-inline-ai-selection");
+    inlineAI.root.classList.remove("factory-inline-ai-cursor");
+  }
+
+  function showInlineAI(editor, mode, rect) {
+    if (!rect) {
+      hideInlineAI(editor);
+      return;
+    }
+
+    var inlineAI = ensureInlineAI(editor);
+    inlineAI.root.style.display = "block";
+    inlineAI.root.setAttribute("aria-hidden", "false");
+    inlineAI.root.classList.toggle("factory-inline-ai-selection", mode === "selection");
+    inlineAI.root.classList.toggle("factory-inline-ai-cursor", mode === "cursor");
+    inlineAI.pill.style.display = mode === "cursor" ? "inline-flex" : "none";
+    inlineAI.menu.style.display = mode === "selection" ? "inline-flex" : "none";
+
+    var top = mode === "selection"
+      ? rect.top - 40
+      : rect.top + Math.max(rect.height, 22) + 8;
+    var left = mode === "selection"
+      ? rect.left + Math.max(rect.width / 2, 0)
+      : rect.left + 2;
+
+    inlineAI.root.style.top = Math.max(top, 12) + "px";
+    inlineAI.root.style.left = Math.max(left, 12) + "px";
+  }
+
+  function updateInlineAI(editor) {
+    if (!editor || editor.removed || !editor.hasFocus()) {
+      if (editor && editor.factoryInlineAI) {
+        hideInlineAI(editor);
+      }
+      return;
+    }
+
+    var selection = selectedText(editor).trim();
+    if (selection) {
+      showInlineAI(editor, "selection", selectionRect(editor));
+      return;
+    }
+
+    if (isEmptyInsertionContext(editor)) {
+      showInlineAI(editor, "cursor", caretRect(editor) || blockRect(editor));
+      return;
+    }
+
+    hideInlineAI(editor);
+  }
+
   window.FactoryEditor = {
     setMarkdown: function (markdown) {
       currentMarkdown = String(markdown || "");
       var editor = tinymce.get("factory-editor");
       if (editor) {
         editor.setContent(markdownToHtml(currentMarkdown));
+        window.setTimeout(function () {
+          updateInlineAI(editor);
+        }, 0);
       }
     },
     getMarkdown: function () {
@@ -201,6 +460,7 @@
       if (!editor) { return; }
       editor.insertContent(markdownToHtml(markdown));
       postChange(editor);
+      updateInlineAI(editor);
     }
   };
 
@@ -217,6 +477,10 @@
     height: "100%",
     skin: "oxide",
     content_css: "default",
+    content_style: [
+      "body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; }",
+      ".factory-inline-ai-caret { display: inline-block; width: 1px; overflow: hidden; }"
+    ].join("\n"),
     plugins: "advlist autolink code link lists preview quickbars searchreplace wordcount",
     toolbar: "undo redo | blocks | bold italic blockquote code | bullist numlist | link searchreplace | insertGoal insertContext insertScoping insertAcceptance | preview code",
     quickbars_selection_toolbar: "bold italic | quicklink blockquote",
@@ -253,17 +517,44 @@
         scheduleChange(editor);
       });
       editor.on("NodeChange SelectionChange", function () {
-        post({
-          event: "selection",
-          markdown: currentMarkdown,
-          selectedText: selectedText(editor)
-        });
+        postSelectionState(editor, "selection");
+        updateInlineAI(editor);
+      });
+      editor.on("focus", function () {
+        postSelectionState(editor, "focus");
+        updateInlineAI(editor);
+      });
+      editor.on("blur", function () {
+        postSelectionState(editor, "blur");
+        hideInlineAI(editor);
+      });
+      editor.on("keydown", function (event) {
+        if (event.key === "Escape") {
+          hideInlineAI(editor);
+          post({ event: "dismissInlineAI" });
+        }
+        if ((event.metaKey || event.ctrlKey) && String(event.key).toLowerCase() === "k") {
+          event.preventDefault();
+          post({ event: "openInlineAI" });
+        }
+      });
+      editor.on("ScrollContent", function () {
+        updateInlineAI(editor);
+      });
+      editor.on("remove", function () {
+        if (editor.factoryInlineAI && editor.factoryInlineAI.root.parentNode) {
+          editor.factoryInlineAI.root.parentNode.removeChild(editor.factoryInlineAI.root);
+        }
       });
     },
     init_instance_callback: function (editor) {
+      editor.getWin().addEventListener("scroll", function () {
+        updateInlineAI(editor);
+      });
       post({ event: "ready", markdown: currentMarkdown, selectedText: "" });
       window.setTimeout(function () {
         postChange(editor);
+        updateInlineAI(editor);
       }, 0);
     }
   });

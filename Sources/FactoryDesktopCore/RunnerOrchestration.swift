@@ -22,12 +22,14 @@ public final class CodexRunnerAdapter: RunnerProviderAdapter {
             commandRequest = try service.commandRequest(for: .execResume(
                 sessionId: linkedSessionID,
                 workspacePath: request.workspacePath,
-                instruction: request.instruction
+                instruction: request.instruction,
+                sandboxMode: request.sandboxMode ?? .readOnly
             ))
         } else {
             commandRequest = try service.commandRequest(for: .exec(
                 workspacePath: request.workspacePath,
-                instruction: request.instruction
+                instruction: request.instruction,
+                sandboxMode: request.sandboxMode ?? .readOnly
             ))
         }
 
@@ -41,12 +43,14 @@ public final class CodexRunnerAdapter: RunnerProviderAdapter {
             rawResult = try await service.execResume(
                 sessionId: request.linkedSessionID ?? "",
                 workspacePath: request.workspacePath,
-                instruction: request.instruction
+                instruction: request.instruction,
+                sandboxMode: request.sandboxMode ?? .readOnly
             )
         } else {
             rawResult = try await service.exec(
                 workspacePath: request.workspacePath,
-                instruction: request.instruction
+                instruction: request.instruction,
+                sandboxMode: request.sandboxMode ?? .readOnly
             )
         }
         let endedAt = Date()
