@@ -497,7 +497,7 @@ public final class FactoryRepository {
             SELECT id, session_id, role, content, created_at
             FROM agent_turns
             WHERE session_id = ?
-            ORDER BY created_at DESC;
+            ORDER BY created_at ASC;
             """,
             binds: [.text(sessionId)]
         )

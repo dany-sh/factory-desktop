@@ -30,6 +30,7 @@ public final class AppStore: ObservableObject {
     @Published public private(set) var latestLifecycleSnapshot: LifecycleSnapshot?
     @Published public private(set) var workerRunDetail: WorkerRunDetail?
     @Published public var isWorkerRunDetailPresented = false
+    @Published public private(set) var workerRawLogsInitiallyExpanded = false
     @Published public private(set) var activeWorkerProcesses: [WorkerProcessSnapshot] = []
     @Published public private(set) var selectedCodexProjectLink: CodexProjectLink?
     @Published public private(set) var selectedTaskCodexSessionLink: CodexSessionLink?
@@ -118,6 +119,19 @@ public final class AppStore: ObservableObject {
     public var runsForSelectedTask: [RunRecord] {
         guard let task = selectedTask else { return [] }
         return runs.filter { $0.taskId == task.id }
+    }
+
+    public var workerConversationPreview: WorkerConversationPreview {
+        WorkerConversationBuilder.preview(
+            task: selectedTask,
+            execution: latestRunnerExecution,
+            processStatus: workerProcessStatus(for: latestRunnerExecution),
+            report: latestWorkerReport,
+            proposals: taskProposals,
+            notifications: runnerNotifications,
+            lifecycleSnapshot: latestLifecycleSnapshot,
+            diffSnapshot: gitSnapshot
+        )
     }
 
     public var latestPlanArtifact: Artifact? {
@@ -494,26 +508,32 @@ public final class AppStore: ObservableObject {
         let execution = try executionId.flatMap { try repository.runnerExecution(id: $0) } ?? repository.latestRunnerExecution(taskId: task.id)
         let session = try execution.flatMap { try repository.runnerSession(id: $0.sessionId) } ?? repository.latestRunnerSession(taskId: task.id)
         let workspace = try session.flatMap { try repository.runnerWorkspace(id: $0.workspaceId) } ?? repository.latestRunnerWorkspace(taskId: task.id)
+        let agentTurns = try session.map { try repository.agentTurns(sessionId: $0.id) } ?? []
         let prompt: String
-        if let session {
-            prompt = try repository.agentTurns(sessionId: session.id)
+        if !agentTurns.isEmpty {
+            prompt = agentTurns
                 .first { $0.role.lowercased() == "user" }?
                 .content ?? ""
         } else {
             prompt = ""
         }
         let report = try execution.flatMap { try repository.workerReport(executionId: $0.id) } ?? repository.latestWorkerReport(taskId: task.id)
+        let detailDiffSnapshot = workspace.flatMap { workerWorkspace in
+            gitSnapshot.worktreePath == workerWorkspace.worktreePath ? gitSnapshot : nil
+        }
         return WorkerRunDetail(
             task: task,
             workspace: workspace,
             session: session,
             execution: execution,
             prompt: prompt,
+            agentTurns: agentTurns,
             report: report,
             proposals: try repository.taskProposals(sourceTaskId: task.id),
             lifecycleSnapshots: try repository.lifecycleSnapshots(taskId: task.id),
             notifications: try repository.runnerNotifications(taskId: task.id),
-            events: try repository.taskEvents(taskId: task.id)
+            events: try repository.taskEvents(taskId: task.id),
+            diffSnapshot: detailDiffSnapshot
         )
     }
 
@@ -1825,11 +1845,11 @@ public final class AppStore: ObservableObject {
         )
     }
 
-    public func assignSelectedTaskToAIWorker() async {
-        await assignTaskToAIWorker(taskID: selectedTask?.id)
+    public func assignSelectedTaskToAIWorker(additionalInstruction: String = "") async {
+        await assignTaskToAIWorker(taskID: selectedTask?.id, additionalInstruction: additionalInstruction)
     }
 
-    public func assignTaskToAIWorker(taskID: String? = nil) async {
+    public func assignTaskToAIWorker(taskID: String? = nil, additionalInstruction: String = "") async {
         guard let repository, let project = selectedProject else {
             errorMessage = FactoryError.missingSelection.localizedDescription
             return
@@ -1858,6 +1878,7 @@ public final class AppStore: ObservableObject {
                 workspace: workspace,
                 existingSession: nil,
                 runReason: "assign_to_ai_worker",
+                additionalInstruction: additionalInstruction,
                 adapter: adapter,
                 repository: repository
             )
@@ -1867,11 +1888,15 @@ public final class AppStore: ObservableObject {
         }
     }
 
-    public func resumeWorker() async {
-        await resumeWorker(taskID: selectedTask?.id, sessionID: selectedRunnerSession?.id)
+    public func resumeWorker(additionalInstruction: String = "") async {
+        await resumeWorker(
+            taskID: selectedTask?.id,
+            sessionID: selectedRunnerSession?.id,
+            additionalInstruction: additionalInstruction
+        )
     }
 
-    private func resumeWorker(taskID: String?, sessionID: String?) async {
+    private func resumeWorker(taskID: String?, sessionID: String?, additionalInstruction: String = "") async {
         guard let repository, let project = selectedProject else {
             errorMessage = FactoryError.missingSelection.localizedDescription
             return
@@ -1882,7 +1907,7 @@ public final class AppStore: ObservableObject {
         }
         guard let workspace = selectedRunnerWorkspace ?? (try? repository.latestRunnerWorkspace(taskId: task.id)),
               let session = sessionID.flatMap({ try? repository.runnerSession(id: $0) }) ?? selectedRunnerSession ?? (try? repository.latestRunnerSession(taskId: task.id)) else {
-            await assignTaskToAIWorker(taskID: task.id)
+            await assignTaskToAIWorker(taskID: task.id, additionalInstruction: additionalInstruction)
             return
         }
         guard let adapter = runnerAdapters[session.provider] else {
@@ -1900,6 +1925,7 @@ public final class AppStore: ObservableObject {
                 workspace: workspace,
                 existingSession: session,
                 runReason: "resume_ai_worker",
+                additionalInstruction: additionalInstruction,
                 adapter: adapter,
                 repository: repository
             )
@@ -1919,20 +1945,36 @@ public final class AppStore: ObservableObject {
     }
 
     public func viewLatestWorkerLogs() {
-        guard let path = latestRunnerExecution?.logPath ?? selectedRunnerSession?.transcriptPath else {
+        guard latestRunnerExecution?.logPath ?? selectedRunnerSession?.transcriptPath != nil else {
             statusMessage = "No worker log is available."
             return
         }
-        selectedRunOutput = (try? String(contentsOfFile: path, encoding: .utf8)) ?? "Log file is missing: \(path)"
-        statusMessage = "Showing worker log."
+        showWorkerRunDetail(executionId: latestRunnerExecution?.id, expandRawLogs: true)
+        statusMessage = "Showing worker conversation logs."
     }
 
-    public func showWorkerRunDetail(executionId: String? = nil) {
+    public func showWorkerRunDetail(executionId: String? = nil, expandRawLogs: Bool = false) {
         perform {
             guard let task = self.selectedTask else { throw FactoryError.missingSelection }
+            self.workerRawLogsInitiallyExpanded = expandRawLogs
             self.workerRunDetail = try self.makeWorkerRunDetail(task: task, executionId: executionId)
             self.isWorkerRunDetailPresented = true
-            self.statusMessage = "Showing worker run detail."
+            self.statusMessage = "Showing worker conversation."
+            Task { await self.refreshWorkerRunDetailDiffSnapshot() }
+        }
+    }
+
+    private func refreshWorkerRunDetailDiffSnapshot() async {
+        guard let gitService, var detail = workerRunDetail, let path = detail.workspace?.worktreePath else { return }
+        do {
+            detail.diffSnapshot = try await gitService.snapshot(worktreePath: path)
+            guard workerRunDetail?.task.id == detail.task.id,
+                  workerRunDetail?.execution?.id == detail.execution?.id else {
+                return
+            }
+            workerRunDetail = detail
+        } catch {
+            // The conversation can still render from the worker report when the worktree is unavailable.
         }
     }
 
@@ -3072,6 +3114,7 @@ public final class AppStore: ObservableObject {
         workspace: RunnerWorkspace,
         existingSession: RunnerSession?,
         runReason: String,
+        additionalInstruction: String = "",
         adapter: RunnerProviderAdapter,
         repository: FactoryRepository
     ) async throws {
@@ -3080,7 +3123,7 @@ public final class AppStore: ObservableObject {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let promptURL = directory.appendingPathComponent("\(runReason)-\(UUID().uuidString.shortID)-prompt.md")
         let logURL = directory.appendingPathComponent("\(runReason)-\(UUID().uuidString.shortID).log")
-        let prompt = workerPrompt(project: project, task: task)
+        let prompt = workerPrompt(project: project, task: task, additionalInstruction: additionalInstruction)
         try prompt.write(to: promptURL, atomically: true, encoding: .utf8)
 
         var session = existingSession ?? RunnerSession(
@@ -4561,7 +4604,7 @@ public final class AppStore: ObservableObject {
         """
     }
 
-    private func workerPrompt(project: Project, task: FactoryTask) -> String {
+    private func workerPrompt(project: Project, task: FactoryTask, additionalInstruction: String = "") -> String {
         let acceptance = task.acceptanceCriteria.isEmpty
             ? "- No explicit acceptance criteria provided."
             : task.acceptanceCriteria.map { "- \($0)" }.joined(separator: "\n")
@@ -4576,6 +4619,14 @@ public final class AppStore: ObservableObject {
         let tests = verificationCommands.isEmpty
             ? "- No verification commands configured. If you do not run tests, say so explicitly."
             : verificationCommands.map { "- \($0)" }.joined(separator: "\n")
+        let followUp = additionalInstruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        let followUpSection = followUp.isEmpty ? "" : """
+
+        User follow-up instruction for this worker turn:
+        \(followUp)
+
+        Follow the user follow-up where it is consistent with the task and safety rules.
+        """
 
         return """
         You are Factory Desktop's AI Worker for one FactoryTask.
@@ -4613,6 +4664,7 @@ public final class AppStore: ObservableObject {
 
         Suggested verification:
         \(tests)
+        \(followUpSection)
 
         Finish your response with this exact structured block:
 

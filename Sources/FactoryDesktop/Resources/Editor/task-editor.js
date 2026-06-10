@@ -553,7 +553,7 @@
       });
       post({ event: "ready", markdown: currentMarkdown, selectedText: "" });
       window.setTimeout(function () {
-        postChange(editor);
+        postSelectionState(editor, "selection");
         updateInlineAI(editor);
       }, 0);
     }

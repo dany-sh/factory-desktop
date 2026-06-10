@@ -23,7 +23,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $store.isWorkerRunDetailPresented) {
             if let detail = store.workerRunDetail {
-                WorkerRunDetailView(detail: detail)
+                WorkerRunDetailView(detail: detail, rawLogsInitiallyExpanded: store.workerRawLogsInitiallyExpanded)
                     .environmentObject(store)
             }
         }

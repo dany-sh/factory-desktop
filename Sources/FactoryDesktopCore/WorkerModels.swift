@@ -409,11 +409,13 @@ public struct WorkerRunDetail: Equatable {
     public var session: RunnerSession?
     public var execution: RunnerExecution?
     public var prompt: String
+    public var agentTurns: [AgentTurn]
     public var report: WorkerReport?
     public var proposals: [TaskProposal]
     public var lifecycleSnapshots: [LifecycleSnapshot]
     public var notifications: [RunnerNotification]
     public var events: [TaskEvent]
+    public var diffSnapshot: GitSnapshot?
 
     public init(
         task: FactoryTask,
@@ -421,22 +423,26 @@ public struct WorkerRunDetail: Equatable {
         session: RunnerSession?,
         execution: RunnerExecution?,
         prompt: String,
+        agentTurns: [AgentTurn] = [],
         report: WorkerReport?,
         proposals: [TaskProposal],
         lifecycleSnapshots: [LifecycleSnapshot],
         notifications: [RunnerNotification],
-        events: [TaskEvent]
+        events: [TaskEvent],
+        diffSnapshot: GitSnapshot? = nil
     ) {
         self.task = task
         self.workspace = workspace
         self.session = session
         self.execution = execution
         self.prompt = prompt
+        self.agentTurns = agentTurns
         self.report = report
         self.proposals = proposals
         self.lifecycleSnapshots = lifecycleSnapshots
         self.notifications = notifications
         self.events = events
+        self.diffSnapshot = diffSnapshot
     }
 }
 

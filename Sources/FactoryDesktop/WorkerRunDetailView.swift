@@ -1,4 +1,5 @@
 import FactoryDesktopCore
+import MarkdownUI
 import SwiftUI
 
 struct WorkerRunDetailView: View {
@@ -6,359 +7,357 @@ struct WorkerRunDetailView: View {
     @Environment(\.dismiss) private var dismiss
 
     let detail: WorkerRunDetail
+    @State private var followUpText = ""
+    @State private var rawLogsExpanded: Bool
+
+    init(detail: WorkerRunDetail, rawLogsInitiallyExpanded: Bool = false) {
+        self.detail = detail
+        _rawLogsExpanded = State(initialValue: rawLogsInitiallyExpanded)
+    }
+
+    private var conversation: WorkerConversation {
+        WorkerConversationBuilder.build(
+            detail: detail,
+            processStatus: store.workerProcessStatus(for: detail.execution)
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    controls
-                    summaryGrid
-                    promptSection
-                    reportSection
-                    proposalsSection
-                    lifecycleSection
-                    notificationsSection
-                    eventsSection
-                }
-                .padding(20)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            WorkerConversationView(
+                conversation: conversation,
+                rawLogsExpanded: $rawLogsExpanded,
+                createProposal: { store.createTask(from: $0) },
+                dismissProposal: { store.dismissTaskProposal($0) },
+                openLog: { Task { await store.openWorkerLog() } },
+                openWorktree: { Task { await store.openWorkerWorktree() } }
+            )
+            Divider()
+            WorkerComposerView(
+                text: $followUpText,
+                isWorking: store.isWorking,
+                isCancellable: store.workerRunIsCancellable(detail.execution),
+                submitTitle: detail.session == nil ? "Assign" : "Resume",
+                submitSystemImage: detail.session == nil ? "sparkles" : "play.circle",
+                onSubmit: submitFollowUp,
+                onStop: { Task { await store.cancelWorkerRun() } }
+            )
         }
-        .frame(minWidth: 760, minHeight: 720)
+        .frame(minWidth: 820, minHeight: 720)
         .task {
             await store.refreshActiveWorkerProcesses()
         }
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: 12) {
             Image(systemName: "sparkles")
                 .font(.title2)
                 .foregroundStyle(Color.accentColor)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Worker Run Detail")
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("AI Worker Conversation")
                     .font(.title3.weight(.semibold))
-                Text("\(detail.task.title) · \(detail.task.id.shortID)")
+                Text("\(conversation.preview.statusLine) · \(detail.task.title)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                    .lineLimit(2)
             }
             Spacer()
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
+            HStack(spacing: 8) {
+                if detail.workspace?.worktreePath != nil {
+                    Button {
+                        Task { await store.openWorkerWorktree() }
+                    } label: {
+                        Label("Worktree", systemImage: "folder")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .help("Close")
             }
-            .buttonStyle(.borderless)
-            .help("Close")
         }
         .padding(20)
     }
 
-    private var controls: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Button {
-                    Task { await store.openWorkerLog() }
-                } label: {
-                    Label("Open Log", systemImage: "doc.plaintext")
-                }
-                .disabled(detail.execution?.logPath == nil)
-
-                Button {
-                    Task { await store.openWorkerWorktree() }
-                } label: {
-                    Label("Open Worktree", systemImage: "folder")
-                }
-                .disabled(detail.workspace?.worktreePath == nil)
-
-                Button {
-                    Task { await store.resumeWorker() }
-                } label: {
-                    Label("Resume Worker", systemImage: "play.circle")
-                }
-                .disabled(detail.session == nil || store.isWorking)
-
-                Button {
-                    Task { await store.retryWorkerRun() }
-                } label: {
-                    Label("Retry Run", systemImage: "arrow.clockwise")
-                }
-                .disabled(store.isWorking)
+    private func submitFollowUp(_ text: String) {
+        let instruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        followUpText = ""
+        Task {
+            if detail.session == nil {
+                await store.assignSelectedTaskToAIWorker(additionalInstruction: instruction)
+            } else {
+                await store.resumeWorker(additionalInstruction: instruction)
             }
-            HStack(spacing: 8) {
-                Button {
-                    store.markWorkerRunFailed()
-                } label: {
-                    Label("Mark Failed", systemImage: "exclamationmark.octagon")
-                }
-                .disabled(detail.execution == nil || store.isWorking)
-
-                Button {
-                    store.markWorkerNeedsReview()
-                } label: {
-                    Label("Mark Needs Review", systemImage: "eye")
-                }
-                .disabled(store.isWorking)
-
-                Button {
-                    store.retryParseWorkerReport()
-                } label: {
-                    Label("Retry Parse", systemImage: "text.magnifyingglass")
-                }
-                .disabled(detail.report?.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-
-                Button {
-                    Task { await store.cancelWorkerRun() }
-                } label: {
-                    Label("Stop", systemImage: "stop.circle")
-                }
-                .disabled(!store.workerRunIsCancellable(detail.execution))
-                .help("Stop is unavailable for completed or detached runs.")
-            }
-            Text(store.workerRunIsCancellable(detail.execution) ? "Stop sends a graceful termination request, then force-kills only if the worker does not exit." : "Stop is unavailable for completed or detached runs.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .controlSize(.small)
-    }
-
-    private var summaryGrid: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 10)], alignment: .leading, spacing: 10) {
-            detailRow("Task", "\(detail.task.title) · \(detail.task.id.shortID)")
-            detailRow("Workspace", detail.workspace?.worktreePath ?? "Unavailable")
-            detailRow("Attempt", detail.execution?.runReason ?? "Unavailable")
-            detailRow("Provider", detail.session?.provider.displayName ?? "Unavailable")
-            detailRow("Execution Status", detail.execution?.status.displayName ?? "Unavailable")
-            detailRow("Process Status", store.workerProcessStatus(for: detail.execution).displayName)
-            detailRow("Command", detail.execution?.command ?? "Unavailable", monospace: true)
-            detailRow("Started", detail.execution?.startedAt.formatted(date: .abbreviated, time: .standard) ?? "Unavailable")
-            detailRow("Ended", detail.execution?.endedAt?.formatted(date: .abbreviated, time: .standard) ?? "Still running or unavailable")
-            detailRow("Exit Code", detail.execution?.exitCode.map(String.init) ?? "Unavailable")
-            detailRow("Log Path", detail.execution?.logPath ?? "Unavailable", monospace: true)
         }
     }
+}
 
-    private var promptSection: some View {
-        detailTextSection(
-            title: "Prompt Sent to Codex",
-            text: detail.prompt,
-            emptyText: "No prompt was recorded for this session."
-        )
+private struct WorkerConversationView: View {
+    var conversation: WorkerConversation
+    @Binding var rawLogsExpanded: Bool
+    var createProposal: (TaskProposal) -> Void
+    var dismissProposal: (TaskProposal) -> Void
+    var openLog: () -> Void
+    var openWorktree: () -> Void
+
+    var body: some View {
+        ScrollView {
+            ConversationTimelineView(
+                events: conversation.events,
+                rawLogsExpanded: $rawLogsExpanded,
+                createProposal: createProposal,
+                dismissProposal: dismissProposal,
+                openLog: openLog,
+                openWorktree: openWorktree
+            )
+            .padding(20)
+            .frame(maxWidth: 920, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .top)
+        }
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.72))
+    }
+}
+
+private struct ConversationTimelineView: View {
+    var events: [WorkerConversationEvent]
+    @Binding var rawLogsExpanded: Bool
+    var createProposal: (TaskProposal) -> Void
+    var dismissProposal: (TaskProposal) -> Void
+    var openLog: () -> Void
+    var openWorktree: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(events) { event in
+                HStack(alignment: .top, spacing: 12) {
+                    timelineMarker(for: event.kind)
+                    eventView(event)
+                }
+            }
+        }
     }
 
     @ViewBuilder
-    private var reportSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("Worker Report")
-            if let report = detail.report {
-                HStack(spacing: 8) {
-                    WorkerDetailChip(label: "Report", value: report.status.displayName)
-                    WorkerDetailChip(label: "Parse", value: report.parseStatus.displayName)
-                    if let recommended = report.recommendedTaskStatus {
-                        WorkerDetailChip(label: "Recommended", value: recommended.displayName)
+    private func eventView(_ event: WorkerConversationEvent) -> some View {
+        switch event.kind {
+        case let .assignment(assignment):
+            WorkerMessageBubble(role: "Factory", systemImage: "building.2", text: assignment.summary)
+        case let .workerMessage(message):
+            WorkerMessageBubble(role: message.isFinal ? "Worker" : "Worker Update", systemImage: "sparkles", text: message.text)
+        case let .toolSummary(summary):
+            ToolSummaryCard(summary: summary)
+        case let .checkResult(result):
+            VerificationCard(result: result)
+        case let .changedFiles(changedFiles):
+            ChangedFilesCard(changedFiles: changedFiles, openWorktree: openWorktree)
+        case let .report(report):
+            WorkerReportCard(report: report)
+        case let .proposedTask(proposedTask):
+            ProposedTaskCard(
+                proposal: proposedTask.proposal,
+                createProposal: createProposal,
+                dismissProposal: dismissProposal
+            )
+        case let .automationEvent(automation):
+            AutomationEventCard(event: automation)
+        case let .warning(warning):
+            WarningCard(warning: warning)
+        case let .rawLogReference(reference):
+            RawLogsDisclosure(
+                reference: reference,
+                isExpanded: $rawLogsExpanded,
+                openLog: openLog
+            )
+        }
+    }
+
+    private func timelineMarker(for kind: WorkerConversationEvent.Kind) -> some View {
+        let image: String
+        let tint: Color
+        switch kind {
+        case .assignment:
+            image = "building.2"
+            tint = .accentColor
+        case .workerMessage:
+            image = "sparkles"
+            tint = .accentColor
+        case .toolSummary:
+            image = "terminal"
+            tint = .secondary
+        case .checkResult:
+            image = "checkmark.seal"
+            tint = .green
+        case .changedFiles:
+            image = "doc.on.doc"
+            tint = .blue
+        case .report:
+            image = "doc.text.magnifyingglass"
+            tint = .accentColor
+        case .proposedTask:
+            image = "plus.square.on.square"
+            tint = .purple
+        case .automationEvent:
+            image = "gearshape"
+            tint = .secondary
+        case .warning:
+            image = "exclamationmark.triangle"
+            tint = .orange
+        case .rawLogReference:
+            image = "ladybug"
+            tint = .secondary
+        }
+        return Image(systemName: image)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(tint)
+            .frame(width: 26, height: 26)
+            .background(.background, in: Circle())
+    }
+}
+
+private struct WorkerMessageBubble: View {
+    var role: String
+    var systemImage: String
+    var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(role, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Markdown(text)
+                .textSelection(.enabled)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(cardStroke)
+    }
+}
+
+private struct ToolSummaryCard: View {
+    var summary: WorkerConversationEvent.ToolSummary
+
+    var body: some View {
+        CompactConversationCard(systemImage: "terminal", title: summary.title) {
+            HStack(spacing: 8) {
+                StatusPill(summary.status)
+                Text(summary.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+        }
+    }
+}
+
+private struct VerificationCard: View {
+    var result: WorkerConversationEvent.CheckResult
+
+    var body: some View {
+        CompactConversationCard(systemImage: "checkmark.seal", title: "Verification") {
+            Text(result.summary)
+                .font(.subheadline.weight(.semibold))
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(result.rows.enumerated()), id: \.offset) { _, row in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: row.status == "Failed" ? "xmark.circle" : "checkmark.circle")
+                            .foregroundStyle(row.status == "Failed" ? Color.red : Color.green)
+                        Text(row.label)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                        Spacer()
+                        StatusPill(row.status)
                     }
                 }
-                if let parseError = report.parseError, !parseError.isEmpty {
-                    Label(parseError, systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-                if !report.summary.isEmpty {
-                    Text(report.summary)
-                        .font(.body)
-                        .textSelection(.enabled)
-                }
-                valueList("Files Changed", values: report.filesChanged)
-                valueList("Tests Run", values: report.testsRun)
-                valueList("Risks", values: report.risks)
-                valueList("Blockers", values: report.blockers)
-                if !report.nextRecommendedAction.isEmpty {
-                    detailRow("Next Recommended Action", report.nextRecommendedAction)
-                }
-                detailTextSection(title: "Raw Report Text", text: report.rawText, emptyText: "No raw report text was captured.")
-            } else {
-                Text("No worker report was recorded.")
-                    .foregroundStyle(.secondary)
             }
         }
     }
+}
 
-    @ViewBuilder
-    private var proposalsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("Proposed Follow-up Tasks")
-            let proposed = detail.proposals.filter { $0.status == .proposed }
-            if proposed.isEmpty {
-                Text("No proposed follow-up tasks.")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(proposed) { proposal in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text(proposal.title)
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Button("Create Task") {
-                                store.createTask(from: proposal)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-                        Text(proposal.reasonDiscovered)
+private struct ChangedFilesCard: View {
+    var changedFiles: WorkerConversationEvent.ChangedFiles
+    var openWorktree: () -> Void
+
+    var body: some View {
+        CompactConversationCard(systemImage: "doc.on.doc", title: "Changed Files") {
+            HStack {
+                Text(changedFiles.summary)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button {
+                    openWorktree()
+                } label: {
+                    Label("Open", systemImage: "folder")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            if !changedFiles.files.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(changedFiles.files.prefix(8), id: \.self) { file in
+                        Text(file)
+                            .font(.system(.caption, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                    if changedFiles.files.count > 8 {
+                        Text("+ \(changedFiles.files.count - 8) more")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        if !proposal.sourceFiles.isEmpty {
-                            Text(proposal.sourceFiles.joined(separator: ", "))
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                        }
                     }
-                    .padding(.vertical, 6)
                 }
             }
-        }
-    }
-
-    @ViewBuilder
-    private var lifecycleSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("Lifecycle Snapshots")
-            if detail.lifecycleSnapshots.isEmpty {
-                Text("No lifecycle snapshots yet.")
+            if !changedFiles.diffStat.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(changedFiles.diffStat)
+                    .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
-            } else {
-                ForEach(detail.lifecycleSnapshots) { snapshot in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
-                            WorkerDetailChip(label: "Worktree", value: snapshot.worktreeExists ? "Exists" : "Missing")
-                            WorkerDetailChip(label: "Branch", value: snapshot.branchExists ? "Exists" : "Missing")
-                            WorkerDetailChip(label: "Dirty", value: snapshot.dirtyState)
-                            Text(snapshot.createdAt.formatted(date: .abbreviated, time: .shortened))
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                        }
-                        Text(snapshot.recommendedAction)
-                            .font(.caption.weight(.semibold))
-                        valueList("Evidence", values: snapshot.evidence)
-                    }
-                    .padding(.vertical, 6)
-                }
+                    .lineLimit(5)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+}
+
+private struct WorkerReportCard: View {
+    var report: WorkerConversationEvent.Report
+
+    var body: some View {
+        CompactConversationCard(systemImage: "doc.text.magnifyingglass", title: "Worker Report") {
+            HStack(spacing: 8) {
+                StatusPill(report.status.displayName)
+                StatusPill("Parse: \(report.parseStatus.displayName)")
+            }
+            if let parseError = report.parseError, !parseError.isEmpty {
+                Label(parseError, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if !report.summary.isEmpty {
+                Markdown(report.summary)
+                    .textSelection(.enabled)
+            }
+            valueList(title: "Risks", values: report.risks)
+            valueList(title: "Blockers", values: report.blockers)
+            if !report.nextRecommendedAction.isEmpty {
+                LabeledValue(label: "Next", value: report.nextRecommendedAction)
             }
         }
     }
 
-    @ViewBuilder
-    private var notificationsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("Notifications")
-            if detail.notifications.isEmpty {
-                Text("No worker notifications.")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(detail.notifications) { notification in
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: notification.level == .error ? "xmark.octagon" : "exclamationmark.triangle")
-                            .foregroundStyle(notification.level == .error ? Color.red : Color.orange)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(notification.message)
-                                .font(.caption)
-                                .textSelection(.enabled)
-                            Text(notification.createdAt.formatted(date: .abbreviated, time: .shortened))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                        Spacer()
-                        Button(notification.isRead ? "Dismissed" : "Dismiss") {
-                            store.dismissRunnerNotification(notification)
-                        }
-                        .buttonStyle(.borderless)
-                        .controlSize(.small)
-                        .disabled(notification.isRead)
-                    }
-                    .padding(.vertical, 5)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var eventsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("Automation and Task Events")
-            if detail.events.isEmpty {
-                Text("No task events recorded.")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(detail.events) { event in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            Text(event.kind.displayName)
-                                .font(.subheadline.weight(.semibold))
-                            if let previous = event.previousStatus, let new = event.newStatus {
-                                Text("\(previous.displayName) -> \(new.displayName)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Text(event.createdAt.formatted(date: .abbreviated, time: .shortened))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                        if !event.message.isEmpty {
-                            Text(event.message)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                        }
-                    }
-                    .padding(.vertical, 5)
-                }
-            }
-        }
-    }
-
-    private func detailRow(_ label: String, _ value: String, monospace: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(monospace ? .system(.caption, design: .monospaced) : .caption)
-                .lineLimit(4)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(8)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private func detailTextSection(title: String, text: String, emptyText: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            sectionTitle(title)
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(emptyText)
-                    .foregroundStyle(.secondary)
-            } else {
-                ScrollView {
-                    Text(text)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                }
-                .frame(minHeight: 120, maxHeight: 260)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
-    }
-
-    private func valueList(_ title: String, values: [String]) -> some View {
+    private func valueList(title: String, values: [String]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.caption2.weight(.semibold))
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             if values.isEmpty {
                 Text("None")
@@ -373,27 +372,246 @@ struct WorkerRunDetailView: View {
             }
         }
     }
+}
 
-    private func sectionTitle(_ title: String) -> some View {
-        Text(title)
-            .font(.headline)
+private struct ProposedTaskCard: View {
+    var proposal: TaskProposal
+    var createProposal: (TaskProposal) -> Void
+    var dismissProposal: (TaskProposal) -> Void
+
+    var body: some View {
+        CompactConversationCard(systemImage: "plus.square.on.square", title: "Proposed Task") {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(proposal.title)
+                        .font(.subheadline.weight(.semibold))
+                    Text(proposal.reasonDiscovered)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    HStack(spacing: 8) {
+                        StatusPill(proposal.suggestedPriority.displayName)
+                        StatusPill(proposal.suggestedStage.displayName)
+                        StatusPill(proposal.status.rawValue.capitalized)
+                    }
+                }
+                Spacer()
+                if proposal.status == .proposed {
+                    VStack(spacing: 6) {
+                        Button("Create Task") {
+                            createProposal(proposal)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("Dismiss") {
+                            dismissProposal(proposal)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    .controlSize(.small)
+                }
+            }
+        }
     }
 }
 
-private struct WorkerDetailChip: View {
+private struct AutomationEventCard: View {
+    var event: WorkerConversationEvent.AutomationEvent
+
+    var body: some View {
+        CompactConversationCard(systemImage: "gearshape", title: event.title) {
+            if let previous = event.previousStatus, let new = event.newStatus {
+                Text("\(previous.displayName) -> \(new.displayName)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            if !event.message.isEmpty {
+                Text(event.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(4)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+}
+
+private struct WarningCard: View {
+    var warning: WorkerConversationEvent.Warning
+
+    var body: some View {
+        CompactConversationCard(systemImage: warning.level == .error ? "xmark.octagon" : "exclamationmark.triangle", title: warning.level.rawValue.capitalized) {
+            Text(warning.message)
+                .font(.caption)
+                .foregroundStyle(warning.level == .error ? Color.red : Color.orange)
+                .textSelection(.enabled)
+        }
+    }
+}
+
+private struct RawLogsDisclosure: View {
+    var reference: WorkerConversationEvent.RawLogReference
+    @Binding var isExpanded: Bool
+    var openLog: () -> Void
+    @State private var logText: String?
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 12) {
+                if let logPath = reference.logPath {
+                    HStack {
+                        LabeledValue(label: "Log", value: URL(fileURLWithPath: logPath).lastPathComponent)
+                        Spacer()
+                        Button {
+                            openLog()
+                        } label: {
+                            Label("Open Log", systemImage: "doc.plaintext")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    rawTextBlock(logText ?? "Loading raw log...")
+                        .onAppear(perform: loadLogIfNeeded)
+                }
+                if !reference.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    debugSection(title: "Prompt Snapshot", text: reference.prompt)
+                }
+                if !reference.rawReport.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    debugSection(title: "Raw Report", text: reference.rawReport)
+                }
+            }
+            .padding(.top, 10)
+        } label: {
+            Label(isExpanded ? "Hide Raw Logs" : "View Raw Logs / Show Raw Output", systemImage: "ladybug")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(cardStroke)
+    }
+
+    private func debugSection(title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            rawTextBlock(text)
+        }
+    }
+
+    private func rawTextBlock(_ text: String) -> some View {
+        ScrollView {
+            Text(text)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+        }
+        .frame(minHeight: 90, maxHeight: 220)
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func loadLogIfNeeded() {
+        guard logText == nil, let logPath = reference.logPath else { return }
+        logText = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? "Log file is unavailable."
+    }
+}
+
+private struct WorkerComposerView: View {
+    @Binding var text: String
+    var isWorking: Bool
+    var isCancellable: Bool
+    var submitTitle: String
+    var submitSystemImage: String
+    var onSubmit: (String) -> Void
+    var onStop: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                TextField("Add optional follow-up instruction...", text: $text, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...4)
+                Button {
+                    onSubmit(text)
+                } label: {
+                    Label(submitTitle, systemImage: submitSystemImage)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isWorking)
+                if isCancellable {
+                    Button {
+                        onStop()
+                    } label: {
+                        Label("Stop", systemImage: "stop.circle")
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            Text("Follow-up text is appended to the next worker turn; the worker report format remains required.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .background(.bar)
+    }
+}
+
+private struct CompactConversationCard<Content: View>: View {
+    var systemImage: String
+    var title: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(cardStroke)
+    }
+}
+
+private struct StatusPill: View {
+    var text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.quaternary.opacity(0.5), in: Capsule())
+    }
+}
+
+private struct LabeledValue: View {
     var label: String
     var value: String
 
     var body: some View {
-        HStack(spacing: 4) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(label)
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
             Text(value)
-                .font(.caption2.weight(.semibold))
+                .font(.caption)
+                .lineLimit(3)
+                .textSelection(.enabled)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(.quaternary.opacity(0.5), in: Capsule())
     }
+}
+
+private var cardStroke: some View {
+    RoundedRectangle(cornerRadius: 8)
+        .stroke(.separator.opacity(0.55))
 }

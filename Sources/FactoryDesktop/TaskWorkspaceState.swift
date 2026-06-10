@@ -72,6 +72,7 @@ final class TaskWorkspaceState: ObservableObject {
         showAllArtifacts = false
         selectionState = TaskEditorSelectionState()
         customInlinePrompt = ""
+        editorBridge.resetForNoTask()
     }
 
     func loadIfNeeded(_ task: FactoryTask) {
@@ -80,6 +81,7 @@ final class TaskWorkspaceState: ObservableObject {
 
     func load(_ task: FactoryTask) {
         let previousTaskID = activeTaskID
+        editorBridge.prepareForTask(task.id)
         activeTaskID = task.id
         activeDraftState = draftStore.activate(task: task)
         if previousTaskID != task.id {

@@ -119,6 +119,10 @@ public final class GitService {
 
     public func snapshot(project: Project, task: FactoryTask?) async throws -> GitSnapshot {
         let worktreePath = preferredWorktreePath(project: project, task: task)
+        return try await snapshot(worktreePath: worktreePath)
+    }
+
+    public func snapshot(worktreePath: String) async throws -> GitSnapshot {
         guard Self.pathIsExistingDirectory(worktreePath) else {
             throw FactoryError.missingWorktreePath(worktreePath)
         }

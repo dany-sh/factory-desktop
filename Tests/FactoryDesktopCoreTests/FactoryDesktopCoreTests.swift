@@ -2610,6 +2610,176 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertTrue(report.rawText.contains("Missing several"))
     }
 
+    func testWorkerConversationBuilderCreatesSemanticTimelineAndHidesRawReportFromBubble() throws {
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let task = FactoryTask(id: "task", projectId: "project", title: "Build worker conversation", goal: "Replace raw logs.")
+        let workspace = RunnerWorkspace(
+            id: "workspace",
+            projectId: "project",
+            taskId: task.id,
+            branchName: "codex/task",
+            worktreePath: "/Users/dany/Developer/factory-desktop"
+        )
+        let session = RunnerSession(
+            id: "session",
+            workspaceId: workspace.id,
+            provider: .codex,
+            mode: .coding,
+            createdAt: startedAt,
+            updatedAt: startedAt
+        )
+        let execution = RunnerExecution(
+            id: "execution",
+            sessionId: session.id,
+            runReason: "assign_to_ai_worker",
+            command: "codex exec -C /Users/dany/Developer/factory-desktop",
+            status: .completed,
+            exitCode: 0,
+            logPath: "/Users/dany/.factory/runs/project/task/worker.log",
+            startedAt: startedAt,
+            endedAt: startedAt.addingTimeInterval(60)
+        )
+        let assistantTurn = AgentTurn(
+            id: "assistant",
+            sessionId: session.id,
+            role: "assistant",
+            content: """
+            Implemented the conversation timeline.
+
+            WORKER REPORT
+            Status: needs_review
+            Summary: Done.
+            """,
+            createdAt: startedAt.addingTimeInterval(40)
+        )
+        let report = WorkerReport(
+            id: "report",
+            sessionId: session.id,
+            executionId: execution.id,
+            status: .needsReview,
+            summary: "Implemented the conversation timeline.",
+            filesChanged: ["Sources/FactoryDesktop/WorkerRunDetailView.swift"],
+            testsRun: ["swift test"],
+            risks: ["Manual UI QA still useful."],
+            blockers: [],
+            nextRecommendedAction: "Review the diff.",
+            rawText: "WORKER REPORT\nStatus: needs_review"
+        )
+        let proposal = TaskProposal(
+            id: "proposal",
+            sourceTaskId: task.id,
+            sourceSessionId: session.id,
+            title: "Add visual QA",
+            goal: "Verify conversation layout.",
+            reasonDiscovered: "Timeline needs visual checks."
+        )
+        let notification = RunnerNotification(
+            id: "notification",
+            taskId: task.id,
+            sessionId: session.id,
+            executionId: execution.id,
+            level: .warning,
+            message: "Worker report partially parsed.",
+            createdAt: startedAt.addingTimeInterval(70)
+        )
+        let event = TaskEvent(
+            id: "event",
+            taskId: task.id,
+            kind: .statusChangedAutomatically,
+            source: .automatic,
+            message: "Worker moved task to review.",
+            previousStatus: .building,
+            newStatus: .readyForReview,
+            createdAt: startedAt.addingTimeInterval(80)
+        )
+        let detail = WorkerRunDetail(
+            task: task,
+            workspace: workspace,
+            session: session,
+            execution: execution,
+            prompt: "Full prompt should stay debug-only.",
+            agentTurns: [assistantTurn],
+            report: report,
+            proposals: [proposal],
+            lifecycleSnapshots: [],
+            notifications: [notification],
+            events: [event],
+            diffSnapshot: GitSnapshot(
+                diffStat: " Sources/FactoryDesktop/WorkerRunDetailView.swift | 12 ++++++------\n 1 file changed, 6 insertions(+), 6 deletions(-)",
+                changedFiles: [" M Sources/FactoryDesktop/WorkerRunDetailView.swift"],
+                worktreePath: workspace.worktreePath
+            )
+        )
+
+        let conversation = WorkerConversationBuilder.build(detail: detail, processStatus: .completed)
+
+        XCTAssertTrue(conversation.events.contains { event in if case .assignment = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .toolSummary = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .workerMessage = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .checkResult = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .changedFiles = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .report = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .proposedTask = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .warning = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .automationEvent = event.kind { return true }; return false })
+        XCTAssertTrue(conversation.events.contains { event in if case .rawLogReference = event.kind { return true }; return false })
+
+        let workerMessage = try XCTUnwrap(conversation.events.compactMap { event -> WorkerConversationEvent.WorkerMessage? in
+            if case let .workerMessage(message) = event.kind { return message }
+            return nil
+        }.first)
+        XCTAssertTrue(workerMessage.text.contains("Implemented the conversation timeline."))
+        XCTAssertFalse(workerMessage.text.contains("WORKER REPORT"))
+
+        let proposedTask = try XCTUnwrap(conversation.events.compactMap { event -> WorkerConversationEvent.ProposedTask? in
+            if case let .proposedTask(proposedTask) = event.kind { return proposedTask }
+            return nil
+        }.first)
+        XCTAssertEqual(proposedTask.proposal.status, .proposed)
+    }
+
+    func testWorkerConversationPreviewScrubsCommandsPathsAndMetadata() {
+        let task = FactoryTask(id: "task", projectId: "project", title: "Worker UI")
+        let execution = RunnerExecution(
+            sessionId: "session",
+            runReason: "assign_to_ai_worker",
+            command: "codex exec -C /Users/dany/Developer/factory-desktop",
+            status: .completed,
+            logPath: "/Users/dany/.factory/runs/project/task/worker.log"
+        )
+        let report = WorkerReport(
+            sessionId: "session",
+            executionId: execution.id,
+            status: .needsReview,
+            summary: "`git status --short` in /Users/dany/Developer/factory-desktop produced raw output.",
+            filesChanged: ["Sources/AppStore.swift"],
+            testsRun: ["swift test"],
+            nextRecommendedAction: "Open /Users/dany/.factory/runs/project/task/worker.log"
+        )
+
+        let preview = WorkerConversationBuilder.preview(
+            task: task,
+            execution: execution,
+            processStatus: .completed,
+            report: report,
+            proposals: [],
+            notifications: [],
+            lifecycleSnapshot: nil,
+            diffSnapshot: GitSnapshot(
+                diffStat: " Sources/AppStore.swift | 2 ++\n 1 file changed, 2 insertions(+)",
+                changedFiles: [" M Sources/AppStore.swift"],
+                worktreePath: "/Users/dany/Developer/factory-desktop"
+            )
+        )
+
+        XCTAssertFalse(preview.latestMeaningfulMessage.contains("/Users/dany"))
+        XCTAssertFalse(preview.latestMeaningfulMessage.lowercased().contains("git status"))
+        XCTAssertFalse(preview.latestMeaningfulMessage.lowercased().contains("codex exec"))
+        XCTAssertFalse(preview.nextRecommendedAction.contains("/Users/dany"))
+        XCTAssertEqual(preview.changedFilesSummary, "1 changed file · 1 file changed, 2 insertions(+)")
+        XCTAssertEqual(preview.verificationDigest, "swift test")
+    }
+
     func testRepositoryPersistsWorkerRecordsAndApprovesProposalAsFactoryTask() throws {
         let fixture = try makeRepositoryFixture()
         let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
@@ -3107,10 +3277,46 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(detail.execution?.command, execution.command)
         XCTAssertEqual(detail.execution?.logPath, execution.logPath)
         XCTAssertTrue(detail.prompt.contains("WORKER REPORT"))
+        XCTAssertEqual(detail.agentTurns.map(\.role), ["user", "assistant"])
         XCTAssertEqual(detail.report?.id, report.id)
         XCTAssertEqual(detail.proposals.map(\.title), ["Add worker cancellation"])
         XCTAssertFalse(detail.lifecycleSnapshots.isEmpty)
         XCTAssertTrue(detail.events.contains { $0.message.contains("Evidence: execution") })
+    }
+
+    @MainActor
+    func testWorkerComposerFollowUpInstructionIsAppendedWithoutBreakingReportParsing() async throws {
+        let fixture = try makeWorkerStoreFixture(workerOutput: """
+        Work completed.
+
+        WORKER REPORT
+        Status: needs_review
+        Summary: Follow-up instruction handled.
+        Files Changed:
+        - None
+        Tests Run:
+        - swift test
+        Risks:
+        - None
+        Blockers:
+        - None
+        Follow-up Tasks Proposed:
+        - None
+        Next Recommended Action: Review.
+        Recommended Task Status: Needs Review
+        """)
+
+        await fixture.store.assignSelectedTaskToAIWorker(additionalInstruction: "Keep the inspector compact.")
+
+        let session = try XCTUnwrap(fixture.repository.latestRunnerSession(taskId: fixture.task.id))
+        let turns = try fixture.repository.agentTurns(sessionId: session.id)
+        XCTAssertEqual(turns.map(\.role), ["user", "assistant"])
+        XCTAssertTrue(turns.first?.content.contains("User follow-up instruction for this worker turn:") == true)
+        XCTAssertTrue(turns.first?.content.contains("Keep the inspector compact.") == true)
+
+        let report = try XCTUnwrap(fixture.repository.latestWorkerReport(taskId: fixture.task.id))
+        XCTAssertEqual(report.status, .needsReview)
+        XCTAssertEqual(report.summary, "Follow-up instruction handled.")
     }
 
     @MainActor

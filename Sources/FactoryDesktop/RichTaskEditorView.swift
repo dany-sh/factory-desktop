@@ -126,6 +126,7 @@ struct RichTaskEditorView: NSViewRepresentable {
                     }
                 case "change":
                     guard let markdown = body["markdown"] as? String else { return }
+                    guard self.parent.bridge.shouldAcceptInboundMarkdown(markdown, parentMarkdown: self.parent.markdown) else { return }
                     self.isApplyingWebChange = true
                     self.parent.bridge.lastAppliedMarkdown = markdown
                     self.shouldSkipNextSwiftUpdate = true
@@ -148,6 +149,7 @@ struct RichTaskEditorView: NSViewRepresentable {
             }
             guard force || markdown != parent.bridge.lastAppliedMarkdown else { return }
             parent.bridge.lastAppliedMarkdown = markdown
+            parent.bridge.markHydrated(markdown: markdown)
             let script = "window.FactoryEditor && window.FactoryEditor.setMarkdown(\(Self.javascriptLiteral(markdown)));"
             webView.evaluateJavaScript(script)
         }
@@ -185,4 +187,32 @@ final class RichTaskEditorBridge: ObservableObject {
     var runInlineAction: ((EditorAssistAction) -> Void)?
     fileprivate var webView: WKWebView?
     fileprivate var lastAppliedMarkdown: String?
+    private var preparedTaskID: String?
+    private var hasHydratedPreparedTask = false
+
+    func prepareForTask(_ taskID: String) {
+        guard preparedTaskID != taskID else { return }
+        preparedTaskID = taskID
+        hasHydratedPreparedTask = false
+        lastAppliedMarkdown = nil
+    }
+
+    func resetForNoTask() {
+        preparedTaskID = nil
+        hasHydratedPreparedTask = false
+        lastAppliedMarkdown = nil
+        isReady = false
+    }
+
+    fileprivate func shouldAcceptInboundMarkdown(_ markdown: String, parentMarkdown: String) -> Bool {
+        if hasHydratedPreparedTask {
+            return true
+        }
+        return markdown == parentMarkdown && preparedTaskID == nil
+    }
+
+    fileprivate func markHydrated(markdown: String) {
+        hasHydratedPreparedTask = true
+        lastAppliedMarkdown = markdown
+    }
 }

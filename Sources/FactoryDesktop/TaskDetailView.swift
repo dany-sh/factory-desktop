@@ -509,6 +509,25 @@ struct TaskDetailView: View {
         .allowsHitTesting(false)
     }
 
+    private var loadingTaskEditorCanvas: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Task Brief")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            taskBriefLoadingOverlay
+                .frame(minHeight: 520)
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(.separator.opacity(0.6))
+        )
+    }
+
     private var editorDocumentMarkdown: String {
         workspaceState.editorDocumentMarkdown
     }
@@ -669,9 +688,17 @@ struct TaskDetailView: View {
 
     private func writeSection(task: FactoryTask) -> some View {
         VStack(alignment: .leading, spacing: 18) {
-            taskEditorCanvas
+            if isTaskDraftReady(for: task) {
+                taskEditorCanvas
+            } else {
+                loadingTaskEditorCanvas
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func isTaskDraftReady(for task: FactoryTask) -> Bool {
+        workspaceState.activeTaskID == task.id && workspaceState.activeDraftState != nil
     }
 
     private var workflowHealthPanel: some View {

@@ -66,131 +66,54 @@ struct RightToolsInspectorView: View {
             title: "AI Worker",
             isExpanded: $workerExpanded
         ) {
+            let preview = store.workerConversationPreview
             VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    inspectorActionButton("Assign", systemImage: "sparkles") {
-                        Task { await store.assignSelectedTaskToAIWorker() }
-                    }
-                    inspectorActionButton("Resume", systemImage: "play.circle") {
-                        Task { await store.resumeWorker() }
-                    }
-                    .disabled(store.selectedRunnerSession == nil || store.isWorking)
-                }
-
-                HStack {
-                    inspectorActionButton("Review Report", systemImage: "doc.text.magnifyingglass") {
-                        store.reviewLatestWorkerReport()
-                    }
-                    .disabled(store.latestWorkerReport == nil || store.isWorking)
-                    inspectorActionButton("Detail", systemImage: "sidebar.right") {
-                        store.showWorkerRunDetail()
-                    }
-                    .disabled(store.latestRunnerExecution == nil && store.latestWorkerReport == nil)
-                }
-
-                HStack {
-                    inspectorActionButton("View Logs", systemImage: "doc.plaintext") {
-                        store.viewLatestWorkerLogs()
-                    }
-                    .disabled(store.latestRunnerExecution?.logPath == nil || store.isWorking)
-                }
-
-                inspectorActionButton("Create Proposed Tasks", systemImage: "plus.square.on.square") {
-                    store.createAllProposedTasks()
-                }
-                .disabled(!store.taskProposals.contains { $0.status == .proposed } || store.isWorking)
-
-                Divider()
-
-                if let workspace = store.selectedRunnerWorkspace {
-                    InspectorMetricRow(label: "Workspace", value: workspace.worktreePath)
-                    InspectorMetricRow(label: "Branch", value: workspace.branchName)
-                } else {
-                    Text("No runner workspace yet.")
+                InspectorMetricRow(label: "Status", value: preview.statusLine)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Latest Message")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(preview.latestMeaningfulMessage)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(4)
                 }
-
-                if let session = store.selectedRunnerSession {
-                    InspectorMetricRow(label: "Session", value: session.externalSessionId ?? session.id.shortID)
-                    InspectorMetricRow(label: "Provider", value: session.provider.displayName)
-                    InspectorMetricRow(label: "Status", value: session.status.displayName)
+                LazyVGrid(columns: [GridItem(.flexible())], alignment: .leading, spacing: 7) {
+                    CompactStatusChip(label: "Verification", value: preview.verificationDigest)
+                    CompactStatusChip(label: "Changed", value: preview.changedFilesSummary)
                 }
+                InspectorMetricRow(label: "Next Recommended Action", value: preview.nextRecommendedAction)
 
-                if let execution = store.latestRunnerExecution {
+                HStack {
                     Button {
-                        store.showWorkerRunDetail(executionId: execution.id)
+                        store.showWorkerRunDetail()
                     } label: {
-                        HStack {
-                            InspectorMetricRow(label: "Latest Execution", value: "\(execution.status.displayName) · \(execution.runReason)")
-                            Spacer()
-                            Image(systemName: "sidebar.right")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    InspectorMetricRow(label: "Process", value: store.workerProcessStatus(for: execution).displayName)
-                    if store.workerRunIsCancellable(execution) {
-                        inspectorActionButton("Stop Worker", systemImage: "stop.circle") {
-                            Task { await store.cancelWorkerRun() }
-                        }
-                    }
-                }
-
-                if let report = store.latestWorkerReport {
-                    Divider()
-                    InspectorMetricRow(label: "Report", value: report.status.displayName)
-                    if !report.summary.isEmpty {
-                        Text(report.summary)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    workerList("Files Changed", values: report.filesChanged)
-                    workerList("Tests Run", values: report.testsRun)
-                    workerList("Risks", values: report.risks)
-                    workerList("Blockers", values: report.blockers)
-                    if !report.nextRecommendedAction.isEmpty {
-                        InspectorMetricRow(label: "Next Recommended Action", value: report.nextRecommendedAction)
-                    }
-                    Button {
-                        store.showWorkerRunDetail(executionId: report.executionId)
-                    } label: {
-                        Label("Open Worker Run Detail", systemImage: "sidebar.right")
+                        Label("Open Conversation", systemImage: "sidebar.right")
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                }
+                    .disabled(store.selectedTask == nil)
 
-                let proposed = store.taskProposals.filter { $0.status == .proposed }
-                if !proposed.isEmpty {
-                    Divider()
-                    Text("Proposed Follow-up Tasks")
-                        .font(.caption.weight(.semibold))
-                    ForEach(proposed) { proposal in
-                        proposalRow(proposal)
+                    Button {
+                        reviewDiffFromInspector()
+                    } label: {
+                        Label("Review Diff", systemImage: "doc.text.magnifyingglass")
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    HStack {
-                        Button("Create All") {
-                            store.createAllProposedTasks()
-                        }
-                        .buttonStyle(.bordered)
-                        Button("Dismiss All") {
-                            store.dismissAllTaskProposals()
-                        }
-                        .buttonStyle(.borderless)
-                    }
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .disabled(store.selectedTask == nil || store.isWorking)
                 }
-
-                if let snapshot = store.latestLifecycleSnapshot {
-                    Divider()
-                    InspectorMetricRow(label: "Lifecycle Recommendation", value: snapshot.recommendedAction)
-                    HStack(spacing: 8) {
-                        CompactStatusChip(label: "Worktree", value: snapshot.worktreeExists ? "Exists" : "Missing")
-                        CompactStatusChip(label: "Branch", value: snapshot.branchExists ? "Exists" : "Missing")
-                        CompactStatusChip(label: "Proposals", value: "\(snapshot.proposedTasksCount)")
-                    }
+                Button {
+                    store.viewLatestWorkerLogs()
+                } label: {
+                    Label("View Logs", systemImage: "doc.plaintext")
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!preview.hasRawLogs)
             }
         }
     }
@@ -558,6 +481,12 @@ struct RightToolsInspectorView: View {
 
         let rawOutput = proposal.rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         return rawOutput.isEmpty ? "No generated result was returned." : rawOutput
+    }
+
+    private func reviewDiffFromInspector() {
+        store.showTaskWorkspace()
+        workspaceState.selectedStage = .diff
+        Task { await store.refreshGitStatus() }
     }
 
     private func workerList(_ title: String, values: [String]) -> some View {
