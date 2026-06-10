@@ -25,6 +25,13 @@ public final class AppStore: ObservableObject {
     @Published public private(set) var selectedRunnerSession: RunnerSession?
     @Published public private(set) var latestRunnerExecution: RunnerExecution?
     @Published public private(set) var latestWorkerReport: WorkerReport?
+    @Published public private(set) var workerEvents: [WorkerEvent] = []
+    @Published public private(set) var workerContextItems: [WorkerContextItem] = []
+    @Published public private(set) var workerPromptSnapshots: [WorkerPromptSnapshot] = []
+    @Published public private(set) var workerEvidence: [WorkerEvidence] = []
+    @Published public private(set) var workerMessageQueue: [WorkerMessageQueueItem] = []
+    @Published public private(set) var workerToolApprovals: [WorkerToolApproval] = []
+    @Published public private(set) var workerComposerState = WorkerComposerState()
     @Published public private(set) var taskProposals: [TaskProposal] = []
     @Published public private(set) var runnerNotifications: [RunnerNotification] = []
     @Published public private(set) var latestLifecycleSnapshot: LifecycleSnapshot?
@@ -132,6 +139,34 @@ public final class AppStore: ObservableObject {
             lifecycleSnapshot: latestLifecycleSnapshot,
             diffSnapshot: gitSnapshot
         )
+    }
+
+    public var workerTimelineEventsV2: [WorkerEvent] {
+        var merged: [WorkerEvent] = workerEvents
+        if let detail = workerRunDetail, selectedTask?.id == detail.task.id {
+            merged.append(contentsOf: WorkerEventNormalizer.normalizedEvents(
+                detail: detail,
+                processStatus: workerProcessStatus(for: detail.execution)
+            ))
+        }
+
+        var seen = Set<String>()
+        return merged
+            .sorted { left, right in
+                if left.createdAt != right.createdAt {
+                    return left.createdAt < right.createdAt
+                }
+                return left.id < right.id
+            }
+            .filter { event in
+                guard !seen.contains(event.id) else { return false }
+                seen.insert(event.id)
+                return true
+            }
+    }
+
+    public var workerTimelineV2: WorkerTimeline {
+        WorkerTimelineBuilderV2.build(events: workerTimelineEventsV2)
     }
 
     public var latestPlanArtifact: Artifact? {
@@ -484,6 +519,22 @@ public final class AppStore: ObservableObject {
             selectedRunnerSession = try repository.latestRunnerSession(taskId: task.id)
             latestRunnerExecution = try repository.latestRunnerExecution(taskId: task.id)
             latestWorkerReport = try repository.latestWorkerReport(taskId: task.id)
+            workerEvents = try repository.workerEvents(taskId: task.id)
+            workerContextItems = try repository.workerContextItems(taskId: task.id)
+            workerPromptSnapshots = try repository.workerPromptSnapshots(taskId: task.id)
+            workerEvidence = try repository.workerEvidence(taskId: task.id)
+            workerMessageQueue = try repository.workerMessageQueue(taskId: task.id)
+            workerToolApprovals = try repository.workerToolApprovals(taskId: task.id)
+            let draftText = try repository.workerComposerDraft(taskId: task.id, sessionId: selectedRunnerSession?.id)
+            workerComposerState = WorkerComposerState(
+                taskId: task.id,
+                sessionId: selectedRunnerSession?.id,
+                phase: workerComposerPhase(task: task, execution: latestRunnerExecution, queuedMessages: workerMessageQueue),
+                draft: draftText,
+                parsedMentions: WorkerComposerMentionParser.parse(draftText),
+                queuedCount: workerMessageQueue.filter { $0.status == .queued }.count,
+                supportsSteering: false
+            )
             taskProposals = try repository.taskProposals(sourceTaskId: task.id)
             runnerNotifications = try repository.runnerNotifications(taskId: task.id)
             latestLifecycleSnapshot = try repository.latestLifecycleSnapshot(taskId: task.id)
@@ -496,11 +547,38 @@ public final class AppStore: ObservableObject {
             selectedRunnerSession = nil
             latestRunnerExecution = nil
             latestWorkerReport = nil
+            workerEvents = []
+            workerContextItems = []
+            workerPromptSnapshots = []
+            workerEvidence = []
+            workerMessageQueue = []
+            workerToolApprovals = []
+            workerComposerState = WorkerComposerState()
             taskProposals = []
             runnerNotifications = []
             latestLifecycleSnapshot = nil
             workerRunDetail = nil
         }
+    }
+
+    private func workerComposerPhase(
+        task: FactoryTask,
+        execution: RunnerExecution?,
+        queuedMessages: [WorkerMessageQueueItem]
+    ) -> WorkerComposerPhase {
+        if isWorking {
+            return .sending
+        }
+        if workerProcessStatus(for: execution) == .running || execution?.status == .running {
+            return queuedMessages.contains { $0.status == .queued } ? .queued : .running
+        }
+        if queuedMessages.contains(where: { $0.status == .queued }) {
+            return .queued
+        }
+        if task.status == .blocked {
+            return .feedback
+        }
+        return .idle
     }
 
     private func makeWorkerRunDetail(task: FactoryTask, executionId: String? = nil) throws -> WorkerRunDetail {
@@ -565,6 +643,200 @@ public final class AppStore: ObservableObject {
     public func workerRunIsCancellable(_ execution: RunnerExecution?) -> Bool {
         guard let execution else { return false }
         return workerProcessSnapshot(executionId: execution.id)?.status == .running
+    }
+
+    public func updateWorkerComposerDraft(_ draft: String) {
+        workerComposerState.draft = draft
+        workerComposerState.parsedMentions = WorkerComposerMentionParser.parse(draft)
+        guard let repository, let task = selectedTask else { return }
+        do {
+            try repository.upsertWorkerComposerDraft(
+                taskId: task.id,
+                sessionId: selectedRunnerSession?.id,
+                draftText: draft
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func submitWorkerComposerDraft(steer: Bool = false) async {
+        await sendWorkerMessage(workerComposerState.draft, steer: steer, forceSend: false)
+    }
+
+    public func sendQueuedWorkerMessageNow(_ item: WorkerMessageQueueItem) async {
+        guard let repository else { return }
+        do {
+            try repository.updateWorkerQueuedMessageStatus(id: item.id, status: .sent)
+            try reloadWorkerState()
+            await sendWorkerMessage(item.body, steer: false, forceSend: true)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func deleteQueuedWorkerMessage(_ item: WorkerMessageQueueItem) {
+        perform {
+            guard let repository = self.repository else { return }
+            try repository.deleteWorkerQueuedMessage(id: item.id)
+            try self.reloadWorkerState()
+            self.statusMessage = "Removed queued worker message."
+        }
+    }
+
+    public func stopWorkerFromComposer() async {
+        workerComposerState.phase = .stopping
+        await cancelWorkerRun()
+        workerComposerState.phase = workerComposerPhase(
+            task: selectedTask ?? FactoryTask(projectId: "", title: ""),
+            execution: latestRunnerExecution,
+            queuedMessages: workerMessageQueue
+        )
+    }
+
+    private func sendWorkerMessage(_ text: String, steer: Bool, forceSend: Bool) async {
+        guard let repository, let task = selectedTask else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let activeRun = isWorking || workerProcessStatus(for: latestRunnerExecution) == .running || latestRunnerExecution?.status == .running
+        if activeRun && !steer && !forceSend {
+            queueWorkerMessage(trimmed, repository: repository, task: task)
+            return
+        }
+
+        workerComposerState.phase = .sending
+        do {
+            try persistWorkerTurnContext(instruction: trimmed, task: task, repository: repository)
+            try repository.upsertWorkerComposerDraft(taskId: task.id, sessionId: selectedRunnerSession?.id, draftText: "")
+            workerComposerState.draft = ""
+            workerComposerState.parsedMentions = []
+            try reloadWorkerState()
+        } catch {
+            errorMessage = error.localizedDescription
+            workerComposerState.phase = .idle
+            return
+        }
+
+        if selectedRunnerSession == nil {
+            await assignSelectedTaskToAIWorker(additionalInstruction: trimmed)
+        } else {
+            await resumeWorker(additionalInstruction: trimmed)
+        }
+
+        do {
+            try reloadWorkerState()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func queueWorkerMessage(_ text: String, repository: FactoryRepository, task: FactoryTask) {
+        do {
+            let mentions = WorkerComposerMentionParser.parse(text)
+            let item = WorkerMessageQueueItem(
+                taskId: task.id,
+                sessionId: selectedRunnerSession?.id,
+                body: text,
+                mentions: mentions
+            )
+            try repository.upsert(workerMessageQueueItem: item)
+            try repository.insert(workerEvent: WorkerEvent(
+                taskId: task.id,
+                sessionId: selectedRunnerSession?.id,
+                executionId: latestRunnerExecution?.id,
+                branchKey: selectedRunnerWorkspace?.branchName ?? selectedRunnerWorkspace?.worktreePath,
+                kind: .message,
+                source: .user,
+                payloadJSON: WorkerEventPayload(
+                    role: "User",
+                    title: "Queued Message",
+                    body: text,
+                    status: "Queued",
+                    mentions: mentions
+                ).json
+            ))
+            try repository.upsertWorkerComposerDraft(taskId: task.id, sessionId: selectedRunnerSession?.id, draftText: "")
+            try reloadWorkerState()
+            statusMessage = "Queued worker message."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func persistWorkerTurnContext(
+        instruction: String,
+        task: FactoryTask,
+        repository: FactoryRepository
+    ) throws {
+        let mentions = WorkerComposerMentionParser.parse(instruction)
+        let contextPack = ContextPackBuilder.build(
+            project: selectedProject,
+            task: task,
+            diffSnapshot: gitSnapshot,
+            artifacts: artifacts,
+            runs: runsForSelectedTask,
+            reviewFeedback: latestDiffReviewText,
+            previousSummary: latestWorkerReport?.summary ?? ""
+        )
+        var itemIds: [String] = []
+        var hashes: [String] = []
+        for var item in contextPack.items {
+            item.sessionId = selectedRunnerSession?.id
+            try repository.insert(workerContextItem: item)
+            if item.included {
+                itemIds.append(item.id)
+                hashes.append(item.contentHash)
+            }
+        }
+
+        let promptText = workerTurnPromptText(instruction: instruction, contextItems: contextPack.items)
+        try repository.insert(workerPromptSnapshot: WorkerPromptSnapshot(
+            taskId: task.id,
+            sessionId: selectedRunnerSession?.id,
+            executionId: latestRunnerExecution?.id,
+            selectedContextItemIds: itemIds,
+            contextHashes: hashes,
+            tokenCount: contextPack.tokenCount,
+            budget: contextPack.budget,
+            provider: selectedRunnerProjectLink?.preferredModelProfile?.provider ?? .codex,
+            model: selectedRunnerProjectLink?.preferredModelProfile?.modelName ?? selectedModel,
+            promptMetadataJSON: contextPack.promptMetadataJSON,
+            promptText: promptText
+        ))
+        try repository.insert(workerEvent: WorkerEvent(
+            taskId: task.id,
+            sessionId: selectedRunnerSession?.id,
+            executionId: latestRunnerExecution?.id,
+            branchKey: selectedRunnerWorkspace?.branchName ?? selectedRunnerWorkspace?.worktreePath,
+            kind: .message,
+            source: .user,
+            payloadJSON: WorkerEventPayload(
+                role: "User",
+                title: "Instruction",
+                body: instruction,
+                mentions: mentions
+            ).json
+        ))
+    }
+
+    private func workerTurnPromptText(instruction: String, contextItems: [WorkerContextItem]) -> String {
+        let included = contextItems.filter(\.included)
+        let contextList = included.map { item in
+            "- [\(item.kind.displayName)] \(item.title) \(item.path.map { "(\($0))" } ?? "")"
+        }.joined(separator: "\n")
+        return """
+        # Worker Turn
+
+        ## Instruction
+        \(instruction)
+
+        ## Context Items
+        \(contextList.isEmpty ? "- No explicit context items selected." : contextList)
+        """
     }
 
     public func selectProject(_ projectID: String?) {

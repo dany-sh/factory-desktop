@@ -884,6 +884,341 @@ public final class FactoryRepository {
         return rows.map(lifecycleSnapshot(from:))
     }
 
+    public func insert(workerEvent event: WorkerEvent) throws {
+        try database.execute(
+            """
+            INSERT INTO worker_events (
+              id, task_id, session_id, execution_id, parent_event_id, branch_key, kind, created_at,
+              source, payload_json, raw_artifact_id, raw_log_reference
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            binds: [
+                .text(event.id),
+                .text(event.taskId),
+                .text(event.sessionId),
+                .text(event.executionId),
+                .text(event.parentEventId),
+                .text(event.branchKey),
+                .text(event.kind.rawValue),
+                .text(DateCoding.string(from: event.createdAt)),
+                .text(event.source.rawValue),
+                .text(event.payloadJSON),
+                .text(event.rawArtifactId),
+                .text(event.rawLogReference)
+            ]
+        )
+    }
+
+    public func workerEvents(taskId: String, includeRaw: Bool = true, limit: Int = 500) throws -> [WorkerEvent] {
+        let rawFilter = includeRaw ? "" : "AND kind != 'rawLog'"
+        let rows = try database.query(
+            """
+            SELECT id, task_id, session_id, execution_id, parent_event_id, branch_key, kind, created_at,
+                   source, payload_json, raw_artifact_id, raw_log_reference
+            FROM worker_events
+            WHERE task_id = ? \(rawFilter)
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?;
+            """,
+            binds: [.text(taskId), .int(limit)]
+        )
+        return rows.map(workerEvent(from:))
+    }
+
+    public func insert(workerContextItem item: WorkerContextItem) throws {
+        try database.execute(
+            """
+            INSERT INTO worker_context_items (
+              id, task_id, session_id, kind, title, path, value, content_hash, token_count, included, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            binds: [
+                .text(item.id),
+                .text(item.taskId),
+                .text(item.sessionId),
+                .text(item.kind.rawValue),
+                .text(item.title),
+                .text(item.path),
+                .text(item.value),
+                .text(item.contentHash),
+                .int(item.tokenCount),
+                .int(item.included ? 1 : 0),
+                .text(DateCoding.string(from: item.createdAt))
+            ]
+        )
+    }
+
+    public func workerContextItems(taskId: String, limit: Int = 100) throws -> [WorkerContextItem] {
+        let rows = try database.query(
+            """
+            SELECT id, task_id, session_id, kind, title, path, value, content_hash, token_count, included, created_at
+            FROM worker_context_items
+            WHERE task_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?;
+            """,
+            binds: [.text(taskId), .int(limit)]
+        )
+        return rows.map(workerContextItem(from:))
+    }
+
+    public func insert(workerPromptSnapshot snapshot: WorkerPromptSnapshot) throws {
+        try database.execute(
+            """
+            INSERT INTO worker_prompt_snapshots (
+              id, task_id, session_id, execution_id, selected_context_items_json, context_hashes_json,
+              token_count, budget, provider, model, prompt_metadata_json, prompt_text, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            binds: [
+                .text(snapshot.id),
+                .text(snapshot.taskId),
+                .text(snapshot.sessionId),
+                .text(snapshot.executionId),
+                .text(JSONCoding.encodeArray(snapshot.selectedContextItemIds)),
+                .text(JSONCoding.encodeArray(snapshot.contextHashes)),
+                .int(snapshot.tokenCount),
+                .int(snapshot.budget),
+                .text(snapshot.provider.rawValue),
+                .text(snapshot.model),
+                .text(snapshot.promptMetadataJSON),
+                .text(snapshot.promptText),
+                .text(DateCoding.string(from: snapshot.createdAt))
+            ]
+        )
+    }
+
+    public func workerPromptSnapshots(taskId: String, limit: Int = 20) throws -> [WorkerPromptSnapshot] {
+        let rows = try database.query(
+            """
+            SELECT id, task_id, session_id, execution_id, selected_context_items_json, context_hashes_json,
+                   token_count, budget, provider, model, prompt_metadata_json, prompt_text, created_at
+            FROM worker_prompt_snapshots
+            WHERE task_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?;
+            """,
+            binds: [.text(taskId), .int(limit)]
+        )
+        return rows.map(workerPromptSnapshot(from:))
+    }
+
+    public func latestWorkerPromptSnapshot(taskId: String) throws -> WorkerPromptSnapshot? {
+        try workerPromptSnapshots(taskId: taskId, limit: 1).first
+    }
+
+    public func upsert(workerEvidence evidence: WorkerEvidence) throws {
+        try database.execute(
+            """
+            INSERT INTO worker_evidence (
+              id, task_id, session_id, execution_id, kind, title, summary, artifact_id, path, event_id, payload_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              kind = excluded.kind,
+              title = excluded.title,
+              summary = excluded.summary,
+              artifact_id = excluded.artifact_id,
+              path = excluded.path,
+              event_id = excluded.event_id,
+              payload_json = excluded.payload_json;
+            """,
+            binds: [
+                .text(evidence.id),
+                .text(evidence.taskId),
+                .text(evidence.sessionId),
+                .text(evidence.executionId),
+                .text(evidence.kind.rawValue),
+                .text(evidence.title),
+                .text(evidence.summary),
+                .text(evidence.artifactId),
+                .text(evidence.path),
+                .text(evidence.eventId),
+                .text(evidence.payloadJSON),
+                .text(DateCoding.string(from: evidence.createdAt))
+            ]
+        )
+    }
+
+    public func workerEvidence(taskId: String, limit: Int = 100) throws -> [WorkerEvidence] {
+        let rows = try database.query(
+            """
+            SELECT id, task_id, session_id, execution_id, kind, title, summary, artifact_id, path, event_id, payload_json, created_at
+            FROM worker_evidence
+            WHERE task_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?;
+            """,
+            binds: [.text(taskId), .int(limit)]
+        )
+        return rows.map(workerEvidence(from:))
+    }
+
+    public func upsertWorkerComposerDraft(taskId: String, sessionId: String?, draftText: String) throws {
+        let id = workerComposerDraftID(taskId: taskId, sessionId: sessionId)
+        try database.execute(
+            """
+            INSERT INTO worker_composer_drafts (id, task_id, session_id, draft_text, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              draft_text = excluded.draft_text,
+              updated_at = excluded.updated_at;
+            """,
+            binds: [
+                .text(id),
+                .text(taskId),
+                .text(sessionId),
+                .text(draftText),
+                .text(DateCoding.string(from: Date()))
+            ]
+        )
+    }
+
+    public func workerComposerDraft(taskId: String, sessionId: String?) throws -> String {
+        let id = workerComposerDraftID(taskId: taskId, sessionId: sessionId)
+        let rows = try database.query(
+            """
+            SELECT draft_text
+            FROM worker_composer_drafts
+            WHERE id = ?
+            LIMIT 1;
+            """,
+            binds: [.text(id)]
+        )
+        return rows.first?.optional("draft_text") ?? ""
+    }
+
+    public func upsert(workerMessageQueueItem item: WorkerMessageQueueItem) throws {
+        try database.execute(
+            """
+            INSERT INTO worker_message_queue (
+              id, task_id, session_id, body, mentions_json, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              body = excluded.body,
+              mentions_json = excluded.mentions_json,
+              status = excluded.status,
+              updated_at = excluded.updated_at;
+            """,
+            binds: [
+                .text(item.id),
+                .text(item.taskId),
+                .text(item.sessionId),
+                .text(item.body),
+                .text(JSONCoding.encode(item.mentions)),
+                .text(item.status.rawValue),
+                .text(DateCoding.string(from: item.createdAt)),
+                .text(DateCoding.string(from: item.updatedAt))
+            ]
+        )
+    }
+
+    public func workerMessageQueue(taskId: String, status: WorkerQueuedMessageStatus? = nil) throws -> [WorkerMessageQueueItem] {
+        let rows: [[String: String?]]
+        if let status {
+            rows = try database.query(
+                """
+                SELECT id, task_id, session_id, body, mentions_json, status, created_at, updated_at
+                FROM worker_message_queue
+                WHERE task_id = ? AND status = ?
+                ORDER BY created_at ASC;
+                """,
+                binds: [.text(taskId), .text(status.rawValue)]
+            )
+        } else {
+            rows = try database.query(
+                """
+                SELECT id, task_id, session_id, body, mentions_json, status, created_at, updated_at
+                FROM worker_message_queue
+                WHERE task_id = ?
+                ORDER BY created_at ASC;
+                """,
+                binds: [.text(taskId)]
+            )
+        }
+        return rows.map(workerMessageQueueItem(from:))
+    }
+
+    public func deleteWorkerQueuedMessage(id: String) throws {
+        try database.execute("DELETE FROM worker_message_queue WHERE id = ?;", binds: [.text(id)])
+    }
+
+    public func updateWorkerQueuedMessageStatus(id: String, status: WorkerQueuedMessageStatus) throws {
+        try database.execute(
+            """
+            UPDATE worker_message_queue
+            SET status = ?,
+                updated_at = ?
+            WHERE id = ?;
+            """,
+            binds: [
+                .text(status.rawValue),
+                .text(DateCoding.string(from: Date())),
+                .text(id)
+            ]
+        )
+    }
+
+    public func upsert(workerToolApproval approval: WorkerToolApproval) throws {
+        try database.execute(
+            """
+            INSERT INTO worker_tool_approvals (
+              id, task_id, session_id, execution_id, event_id, title, requested_action, status, payload_json, decided_at, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              title = excluded.title,
+              requested_action = excluded.requested_action,
+              status = excluded.status,
+              payload_json = excluded.payload_json,
+              decided_at = excluded.decided_at;
+            """,
+            binds: [
+                .text(approval.id),
+                .text(approval.taskId),
+                .text(approval.sessionId),
+                .text(approval.executionId),
+                .text(approval.eventId),
+                .text(approval.title),
+                .text(approval.requestedAction),
+                .text(approval.status.rawValue),
+                .text(approval.payloadJSON),
+                .text(approval.decidedAt.map(DateCoding.string(from:))),
+                .text(DateCoding.string(from: approval.createdAt))
+            ]
+        )
+    }
+
+    public func workerToolApprovals(taskId: String, status: WorkerToolApprovalStatus? = nil) throws -> [WorkerToolApproval] {
+        let rows: [[String: String?]]
+        if let status {
+            rows = try database.query(
+                """
+                SELECT id, task_id, session_id, execution_id, event_id, title, requested_action, status, payload_json, decided_at, created_at
+                FROM worker_tool_approvals
+                WHERE task_id = ? AND status = ?
+                ORDER BY created_at DESC;
+                """,
+                binds: [.text(taskId), .text(status.rawValue)]
+            )
+        } else {
+            rows = try database.query(
+                """
+                SELECT id, task_id, session_id, execution_id, event_id, title, requested_action, status, payload_json, decided_at, created_at
+                FROM worker_tool_approvals
+                WHERE task_id = ?
+                ORDER BY created_at DESC;
+                """,
+                binds: [.text(taskId)]
+            )
+        }
+        return rows.map(workerToolApproval(from:))
+    }
+
     public func upsert(codexSessionLink link: CodexSessionLink) throws {
         try database.execute(
             """
@@ -1474,6 +1809,107 @@ public final class FactoryRepository {
             artifactId: row.optional("artifact_id"),
             createdAt: DateCoding.date(from: row.required("created_at"))
         )
+    }
+
+    private func workerEvent(from row: [String: String?]) -> WorkerEvent {
+        WorkerEvent(
+            id: row.required("id"),
+            taskId: row.required("task_id"),
+            sessionId: row.optional("session_id"),
+            executionId: row.optional("execution_id"),
+            parentEventId: row.optional("parent_event_id"),
+            branchKey: row.optional("branch_key"),
+            kind: WorkerEventKind(rawValue: row.optional("kind") ?? "") ?? .rawLog,
+            createdAt: DateCoding.date(from: row.required("created_at")),
+            source: WorkerEventSource(rawValue: row.optional("source") ?? "") ?? .system,
+            payloadJSON: row.optional("payload_json") ?? "{}",
+            rawArtifactId: row.optional("raw_artifact_id"),
+            rawLogReference: row.optional("raw_log_reference")
+        )
+    }
+
+    private func workerContextItem(from row: [String: String?]) -> WorkerContextItem {
+        WorkerContextItem(
+            id: row.required("id"),
+            taskId: row.required("task_id"),
+            sessionId: row.optional("session_id"),
+            kind: WorkerContextItemKind(rawValue: row.optional("kind") ?? "") ?? .task,
+            title: row.required("title"),
+            path: row.optional("path"),
+            value: row.optional("value") ?? "",
+            contentHash: row.optional("content_hash") ?? "",
+            tokenCount: row.optional("token_count").flatMap(Int.init) ?? 0,
+            included: row.bool("included"),
+            createdAt: DateCoding.date(from: row.required("created_at"))
+        )
+    }
+
+    private func workerPromptSnapshot(from row: [String: String?]) -> WorkerPromptSnapshot {
+        WorkerPromptSnapshot(
+            id: row.required("id"),
+            taskId: row.required("task_id"),
+            sessionId: row.optional("session_id"),
+            executionId: row.optional("execution_id"),
+            selectedContextItemIds: JSONCoding.decodeArray(row.optional("selected_context_items_json")),
+            contextHashes: JSONCoding.decodeArray(row.optional("context_hashes_json")),
+            tokenCount: row.optional("token_count").flatMap(Int.init) ?? 0,
+            budget: row.optional("budget").flatMap(Int.init) ?? 0,
+            provider: RunnerProvider(rawValue: row.optional("provider") ?? "") ?? .unknown,
+            model: row.optional("model"),
+            promptMetadataJSON: row.optional("prompt_metadata_json") ?? "{}",
+            promptText: row.optional("prompt_text") ?? "",
+            createdAt: DateCoding.date(from: row.required("created_at"))
+        )
+    }
+
+    private func workerEvidence(from row: [String: String?]) -> WorkerEvidence {
+        WorkerEvidence(
+            id: row.required("id"),
+            taskId: row.required("task_id"),
+            sessionId: row.optional("session_id"),
+            executionId: row.optional("execution_id"),
+            kind: WorkerEvidenceKind(rawValue: row.optional("kind") ?? "") ?? .artifact,
+            title: row.required("title"),
+            summary: row.optional("summary") ?? "",
+            artifactId: row.optional("artifact_id"),
+            path: row.optional("path"),
+            eventId: row.optional("event_id"),
+            payloadJSON: row.optional("payload_json") ?? "{}",
+            createdAt: DateCoding.date(from: row.required("created_at"))
+        )
+    }
+
+    private func workerMessageQueueItem(from row: [String: String?]) -> WorkerMessageQueueItem {
+        WorkerMessageQueueItem(
+            id: row.required("id"),
+            taskId: row.required("task_id"),
+            sessionId: row.optional("session_id"),
+            body: row.optional("body") ?? "",
+            mentions: JSONCoding.decode(row.optional("mentions_json"), as: [WorkerComposerMention].self) ?? [],
+            status: WorkerQueuedMessageStatus(rawValue: row.optional("status") ?? "") ?? .queued,
+            createdAt: DateCoding.date(from: row.required("created_at")),
+            updatedAt: DateCoding.date(from: row.required("updated_at"))
+        )
+    }
+
+    private func workerToolApproval(from row: [String: String?]) -> WorkerToolApproval {
+        WorkerToolApproval(
+            id: row.required("id"),
+            taskId: row.required("task_id"),
+            sessionId: row.optional("session_id"),
+            executionId: row.optional("execution_id"),
+            eventId: row.optional("event_id"),
+            title: row.required("title"),
+            requestedAction: row.optional("requested_action") ?? "",
+            status: WorkerToolApprovalStatus(rawValue: row.optional("status") ?? "") ?? .pending,
+            payloadJSON: row.optional("payload_json") ?? "{}",
+            decidedAt: row.optional("decided_at").map(DateCoding.date(from:)),
+            createdAt: DateCoding.date(from: row.required("created_at"))
+        )
+    }
+
+    private func workerComposerDraftID(taskId: String, sessionId: String?) -> String {
+        "\(taskId)|\(sessionId ?? "none")"
     }
 }
 

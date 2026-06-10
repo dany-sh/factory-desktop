@@ -611,6 +611,136 @@ public final class MigrationRunner {
             ALTER TABLE worker_reports ADD COLUMN parse_status TEXT NOT NULL DEFAULT 'parsed';
             ALTER TABLE worker_reports ADD COLUMN parse_error TEXT;
             """
+        ),
+        Migration(
+            version: 11,
+            name: "worker_chat_workspace_v2",
+            sql: """
+            CREATE TABLE IF NOT EXISTS worker_events (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              session_id TEXT,
+              execution_id TEXT,
+              parent_event_id TEXT,
+              branch_key TEXT,
+              kind TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              source TEXT NOT NULL,
+              payload_json TEXT NOT NULL DEFAULT '{}',
+              raw_artifact_id TEXT,
+              raw_log_reference TEXT,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(session_id) REFERENCES runner_sessions(id) ON DELETE SET NULL,
+              FOREIGN KEY(execution_id) REFERENCES runner_executions(id) ON DELETE SET NULL,
+              FOREIGN KEY(parent_event_id) REFERENCES worker_events(id) ON DELETE SET NULL,
+              FOREIGN KEY(raw_artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS worker_context_items (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              session_id TEXT,
+              kind TEXT NOT NULL,
+              title TEXT NOT NULL,
+              path TEXT,
+              value TEXT NOT NULL DEFAULT '',
+              content_hash TEXT NOT NULL,
+              token_count INTEGER NOT NULL DEFAULT 0,
+              included INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(session_id) REFERENCES runner_sessions(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS worker_prompt_snapshots (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              session_id TEXT,
+              execution_id TEXT,
+              selected_context_items_json TEXT NOT NULL DEFAULT '[]',
+              context_hashes_json TEXT NOT NULL DEFAULT '[]',
+              token_count INTEGER NOT NULL DEFAULT 0,
+              budget INTEGER NOT NULL DEFAULT 0,
+              provider TEXT NOT NULL,
+              model TEXT,
+              prompt_metadata_json TEXT NOT NULL DEFAULT '{}',
+              prompt_text TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(session_id) REFERENCES runner_sessions(id) ON DELETE SET NULL,
+              FOREIGN KEY(execution_id) REFERENCES runner_executions(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS worker_evidence (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              session_id TEXT,
+              execution_id TEXT,
+              kind TEXT NOT NULL,
+              title TEXT NOT NULL,
+              summary TEXT NOT NULL DEFAULT '',
+              artifact_id TEXT,
+              path TEXT,
+              event_id TEXT,
+              payload_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(session_id) REFERENCES runner_sessions(id) ON DELETE SET NULL,
+              FOREIGN KEY(execution_id) REFERENCES runner_executions(id) ON DELETE SET NULL,
+              FOREIGN KEY(artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL,
+              FOREIGN KEY(event_id) REFERENCES worker_events(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS worker_composer_drafts (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              session_id TEXT,
+              draft_text TEXT NOT NULL DEFAULT '',
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(session_id) REFERENCES runner_sessions(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS worker_message_queue (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              session_id TEXT,
+              body TEXT NOT NULL,
+              mentions_json TEXT NOT NULL DEFAULT '[]',
+              status TEXT NOT NULL DEFAULT 'queued',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(session_id) REFERENCES runner_sessions(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS worker_tool_approvals (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              session_id TEXT,
+              execution_id TEXT,
+              event_id TEXT,
+              title TEXT NOT NULL,
+              requested_action TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              payload_json TEXT NOT NULL DEFAULT '{}',
+              decided_at TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+              FOREIGN KEY(session_id) REFERENCES runner_sessions(id) ON DELETE SET NULL,
+              FOREIGN KEY(execution_id) REFERENCES runner_executions(id) ON DELETE SET NULL,
+              FOREIGN KEY(event_id) REFERENCES worker_events(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_worker_events_task_created ON worker_events(task_id, created_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_worker_events_session_created ON worker_events(session_id, created_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_worker_context_items_task_created ON worker_context_items(task_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_worker_prompt_snapshots_task_created ON worker_prompt_snapshots(task_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_worker_evidence_task_created ON worker_evidence(task_id, created_at DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_composer_drafts_task_session ON worker_composer_drafts(id);
+            CREATE INDEX IF NOT EXISTS idx_worker_message_queue_task_status ON worker_message_queue(task_id, status, created_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_worker_tool_approvals_task_status ON worker_tool_approvals(task_id, status, created_at DESC);
+            """
         )
     ]
 }

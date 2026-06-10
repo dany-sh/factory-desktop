@@ -495,6 +495,233 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(try decoder.decode(FactoryTask.self, from: encoder.encode(task)), task)
     }
 
+    func testWorkerV2RepositoryPersistsAppendOnlyEventsSnapshotsDraftsAndQueue() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Worker cockpit")
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        let event = WorkerEvent(
+            id: "event-1",
+            taskId: task.id,
+            kind: .message,
+            source: .user,
+            payloadJSON: WorkerEventPayload(role: "User", body: "Please continue.").json
+        )
+        try fixture.repository.insert(workerEvent: event)
+
+        let contextItem = WorkerContextItem(
+            id: "context-1",
+            taskId: task.id,
+            kind: .task,
+            title: "Task Brief",
+            value: "Build the worker chat workspace."
+        )
+        try fixture.repository.insert(workerContextItem: contextItem)
+        try fixture.repository.insert(workerPromptSnapshot: WorkerPromptSnapshot(
+            id: "snapshot-1",
+            taskId: task.id,
+            selectedContextItemIds: [contextItem.id],
+            contextHashes: [contextItem.contentHash],
+            tokenCount: contextItem.tokenCount,
+            budget: 16_000,
+            provider: .codex,
+            model: "gpt-5",
+            promptText: "Prompt"
+        ))
+        try fixture.repository.upsertWorkerComposerDraft(taskId: task.id, sessionId: nil, draftText: "draft text")
+        try fixture.repository.upsert(workerMessageQueueItem: WorkerMessageQueueItem(
+            id: "queue-1",
+            taskId: task.id,
+            body: "queued",
+            mentions: WorkerComposerMentionParser.parse("@diff /status")
+        ))
+
+        let storedEvents = try fixture.repository.workerEvents(taskId: task.id)
+        XCTAssertEqual(storedEvents.count, 1)
+        XCTAssertEqual(storedEvents.first?.id, event.id)
+        XCTAssertEqual(storedEvents.first?.kind, .message)
+        XCTAssertEqual(storedEvents.first?.payload.body, "Please continue.")
+        XCTAssertEqual(try fixture.repository.workerContextItems(taskId: task.id).first?.id, contextItem.id)
+        XCTAssertEqual(try fixture.repository.latestWorkerPromptSnapshot(taskId: task.id)?.selectedContextItemIds, [contextItem.id])
+        XCTAssertEqual(try fixture.repository.workerComposerDraft(taskId: task.id, sessionId: nil), "draft text")
+        XCTAssertEqual(try fixture.repository.workerMessageQueue(taskId: task.id, status: .queued).first?.mentions.map(\.rawText), ["@diff", "/status"])
+    }
+
+    func testWorkerEventNormalizerBuildsReviewFirstEventsFromLegacyWorkerDetail() {
+        let task = FactoryTask(
+            id: "task",
+            projectId: "project",
+            title: "Normalize worker output",
+            goal: "Replace raw logs with useful events."
+        )
+        let workspace = RunnerWorkspace(
+            id: "workspace",
+            projectId: task.projectId,
+            taskId: task.id,
+            branchName: "codex/task",
+            worktreePath: "/tmp/task"
+        )
+        let session = RunnerSession(id: "session", workspaceId: workspace.id, provider: .codex, mode: .coding)
+        let execution = RunnerExecution(
+            id: "execution",
+            sessionId: session.id,
+            runReason: "assign_to_ai_worker",
+            command: "codex exec",
+            status: .completed,
+            exitCode: 0,
+            logPath: "/tmp/worker.log"
+        )
+        let report = WorkerReport(
+            id: "report",
+            sessionId: session.id,
+            executionId: execution.id,
+            status: .needsReview,
+            summary: "Implemented workspace shell.",
+            filesChanged: ["Sources/FactoryDesktop/WorkerChatWorkspaceView.swift"],
+            testsRun: ["swift test passed"],
+            risks: [],
+            blockers: [],
+            nextRecommendedAction: "Review the diff."
+        )
+        let detail = WorkerRunDetail(
+            task: task,
+            workspace: workspace,
+            session: session,
+            execution: execution,
+            prompt: "Do the work",
+            agentTurns: [
+                AgentTurn(id: "turn-user", sessionId: session.id, role: "user", content: "Do the work"),
+                AgentTurn(id: "turn-assistant", sessionId: session.id, role: "assistant", content: "Finished.\n\nWORKER REPORT\nStatus: needs review")
+            ],
+            report: report,
+            proposals: [],
+            lifecycleSnapshots: [],
+            notifications: [],
+            events: [],
+            diffSnapshot: GitSnapshot(diffStat: "1 file changed", changedFiles: ["Sources/FactoryDesktop/WorkerChatWorkspaceView.swift"])
+        )
+
+        let events = WorkerEventNormalizer.normalizedEvents(detail: detail, processStatus: .completed)
+        let kinds = Set(events.map(\.kind))
+
+        XCTAssertTrue(kinds.contains(.message))
+        XCTAssertTrue(kinds.contains(.command))
+        XCTAssertTrue(kinds.contains(.check))
+        XCTAssertTrue(kinds.contains(.fileChange))
+        XCTAssertTrue(kinds.contains(.report))
+        XCTAssertTrue(kinds.contains(.rawLog))
+        XCTAssertFalse(events.contains { $0.payload.body?.contains("WORKER REPORT") == true })
+    }
+
+    func testWorkerTimelineV2HidesRawLogsAndGroupsToolResults() {
+        let call = WorkerEvent(
+            id: "tool-call",
+            taskId: "task",
+            kind: .toolCall,
+            createdAt: Date(timeIntervalSince1970: 10),
+            source: .tool,
+            payloadJSON: WorkerEventPayload(title: "Read File", summary: "Sources/App.swift").json
+        )
+        let result = WorkerEvent(
+            id: "tool-result",
+            taskId: "task",
+            parentEventId: call.id,
+            kind: .toolResult,
+            createdAt: Date(timeIntervalSince1970: 11),
+            source: .tool,
+            payloadJSON: WorkerEventPayload(status: "Succeeded", outputTail: "42 lines").json
+        )
+        let raw = WorkerEvent(
+            id: "raw",
+            taskId: "task",
+            kind: .rawLog,
+            createdAt: Date(timeIntervalSince1970: 12),
+            source: .runner,
+            payloadJSON: WorkerEventPayload(title: "Raw").json
+        )
+
+        let timeline = WorkerTimelineBuilderV2.build(events: [raw, result, call])
+
+        XCTAssertEqual(timeline.hiddenRawLogCount, 1)
+        XCTAssertEqual(timeline.items.count, 1)
+        XCTAssertEqual(timeline.items.first?.kind, .tool)
+        XCTAssertEqual(timeline.items.first?.rawEventIds, ["tool-call", "tool-result"])
+        XCTAssertEqual(timeline.items.first?.body, "42 lines")
+    }
+
+    @MainActor
+    func testWorkerComposerQueuesDraftWhileExecutionIsRunning() async throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Queue worker feedback")
+        let workspace = RunnerWorkspace(id: "workspace", projectId: project.id, taskId: task.id, branchName: "codex/task", worktreePath: fixture.root.path)
+        let session = RunnerSession(id: "session", workspaceId: workspace.id, provider: .codex, mode: .coding)
+        let execution = RunnerExecution(id: "execution", sessionId: session.id, runReason: "assign_to_ai_worker", status: .running)
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+        try fixture.repository.upsert(runnerWorkspace: workspace)
+        try fixture.repository.upsert(runnerSession: session)
+        try fixture.repository.upsert(runnerExecution: execution)
+
+        let registry = WorkerProcessRegistry()
+        let store = AppStore(paths: fixture.paths, workerProcessRegistry: registry)
+        store.selectedProjectID = project.id
+        store.selectedTaskID = task.id
+        try store.reloadRunsAndArtifacts()
+        await registry.register(
+            WorkerProcessRegistration(
+                executionId: execution.id,
+                sessionId: session.id,
+                taskId: task.id,
+                startedAt: execution.startedAt,
+                command: "codex exec",
+                workingDirectory: workspace.worktreePath
+            ),
+            handle: MockWorkerProcessHandle()
+        )
+        await store.refreshActiveWorkerProcesses()
+        store.updateWorkerComposerDraft("@file Sources/App.swift tighten this")
+
+        await store.submitWorkerComposerDraft()
+
+        XCTAssertEqual(store.workerComposerState.draft, "")
+        XCTAssertEqual(store.workerMessageQueue.filter { $0.status == .queued }.count, 1)
+        XCTAssertEqual(store.workerMessageQueue.first?.mentions.first?.kind, .file)
+        XCTAssertTrue(store.workerEvents.contains { $0.payload.status == "Queued" })
+    }
+
+    func testContextPackBuilderIncludesTaskDiffChecksArtifactsAndPathAwareRules() throws {
+        let root = makeTemporaryDirectory()
+        let rules = root.appendingPathComponent(".factory/rules", isDirectory: true)
+        try FileManager.default.createDirectory(at: rules, withIntermediateDirectories: true)
+        try "Global guidance".write(to: root.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
+        try "Swift file guidance".write(to: rules.appendingPathComponent("workerchat.md"), atomically: true, encoding: .utf8)
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: root.path)
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Context", goal: "Build context snapshots.")
+        let artifact = Artifact(id: "artifact", taskId: task.id, type: .plan, path: root.appendingPathComponent("plan.md").path, description: "Plan")
+        let run = RunRecord(projectId: project.id, taskId: task.id, executor: "local", status: .succeeded, command: "swift test", summary: "Passed")
+
+        let pack = ContextPackBuilder.build(
+            project: project,
+            task: task,
+            diffSnapshot: GitSnapshot(diffStat: "1 file changed", changedFiles: ["Sources/workerchat/View.swift"]),
+            artifacts: [artifact],
+            runs: [run],
+            reviewFeedback: "Looks ready.",
+            previousSummary: "Prior worker summary."
+        )
+
+        XCTAssertTrue(pack.items.contains { $0.kind == .task })
+        XCTAssertTrue(pack.items.contains { $0.kind == .diff })
+        XCTAssertTrue(pack.items.contains { $0.kind == .check })
+        XCTAssertTrue(pack.items.contains { $0.kind == .artifact })
+        XCTAssertTrue(pack.items.contains { $0.kind == .projectGuidance && $0.title == "AGENTS.md" })
+        XCTAssertTrue(pack.items.contains { $0.kind == .repoRule && $0.title == "workerchat.md" })
+        XCTAssertGreaterThan(pack.tokenCount, 0)
+    }
+
     func testRunDirectoryUsesFullTaskID() {
         let paths = FactoryPaths(root: URL(fileURLWithPath: "/tmp/factory-test-root"))
         let project = Project(id: "project-1", name: "Demo Project", type: .codeRepo, path: "/tmp/demo")

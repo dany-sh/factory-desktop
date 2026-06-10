@@ -249,11 +249,6 @@ struct TaskDetailView: View {
                         }
                         .disabled(store.latestWorkerReport == nil || store.isWorking)
 
-                        actionButton("Worker Workspace", systemImage: "person.text.rectangle") {
-                            openWorkerWorkspace()
-                        }
-                        .disabled(store.selectedTask == nil)
-
                         actionButton("Create Proposed Tasks", systemImage: "plus.square.on.square") {
                             store.createAllProposedTasks()
                         }
@@ -1588,7 +1583,7 @@ struct TaskDetailView: View {
     }
 
     private func workerSection(task: FactoryTask) -> some View {
-        WorkerWorkspaceView(
+        WorkerChatWorkspaceView(
             task: task,
             openDiff: openWorkerDiff
         )
