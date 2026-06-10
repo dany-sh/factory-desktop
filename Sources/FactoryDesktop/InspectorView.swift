@@ -31,6 +31,9 @@ struct RightToolsInspectorView: View {
             .padding(12)
         }
         .onAppear(perform: syncWorkspaceState)
+        .task {
+            await store.refreshActiveWorkerProcesses()
+        }
         .onChange(of: store.selectedTask?.id) { _, _ in
             syncWorkspaceState()
         }
@@ -126,6 +129,12 @@ struct RightToolsInspectorView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    InspectorMetricRow(label: "Process", value: store.workerProcessStatus(for: execution).displayName)
+                    if store.workerRunIsCancellable(execution) {
+                        inspectorActionButton("Stop Worker", systemImage: "stop.circle") {
+                            Task { await store.cancelWorkerRun() }
+                        }
+                    }
                 }
 
                 if let report = store.latestWorkerReport {

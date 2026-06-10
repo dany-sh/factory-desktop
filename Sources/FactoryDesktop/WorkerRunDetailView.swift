@@ -27,6 +27,9 @@ struct WorkerRunDetailView: View {
             }
         }
         .frame(minWidth: 760, minHeight: 720)
+        .task {
+            await store.refreshActiveWorkerProcesses()
+        }
     }
 
     private var header: some View {
@@ -107,13 +110,15 @@ struct WorkerRunDetailView: View {
                 }
                 .disabled(detail.report?.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
 
-                Button {} label: {
+                Button {
+                    Task { await store.cancelWorkerRun() }
+                } label: {
                     Label("Stop", systemImage: "stop.circle")
                 }
-                .disabled(true)
+                .disabled(!store.workerRunIsCancellable(detail.execution))
                 .help("Stop is unavailable for completed or detached runs.")
             }
-            Text("Stop is unavailable for completed or detached runs.")
+            Text(store.workerRunIsCancellable(detail.execution) ? "Stop sends a graceful termination request, then force-kills only if the worker does not exit." : "Stop is unavailable for completed or detached runs.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -127,6 +132,7 @@ struct WorkerRunDetailView: View {
             detailRow("Attempt", detail.execution?.runReason ?? "Unavailable")
             detailRow("Provider", detail.session?.provider.displayName ?? "Unavailable")
             detailRow("Execution Status", detail.execution?.status.displayName ?? "Unavailable")
+            detailRow("Process Status", store.workerProcessStatus(for: detail.execution).displayName)
             detailRow("Command", detail.execution?.command ?? "Unavailable", monospace: true)
             detailRow("Started", detail.execution?.startedAt.formatted(date: .abbreviated, time: .standard) ?? "Unavailable")
             detailRow("Ended", detail.execution?.endedAt?.formatted(date: .abbreviated, time: .standard) ?? "Still running or unavailable")

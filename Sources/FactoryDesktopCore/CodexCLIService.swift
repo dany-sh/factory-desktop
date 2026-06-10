@@ -86,6 +86,10 @@ public final class CodexCLIService {
         )))
     }
 
+    public func run(_ request: CommandRequest) async throws -> CommandResult {
+        try await runCommand(request)
+    }
+
     public func commandRequest(for action: CodexCLIAction) throws -> CommandRequest {
         switch action {
         case .locate:

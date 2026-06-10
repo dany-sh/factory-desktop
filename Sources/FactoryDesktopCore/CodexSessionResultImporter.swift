@@ -42,6 +42,24 @@ public enum CodexSessionResultImporter {
         return failurePhrases.contains { normalized.contains($0) }
     }
 
+    public static func detectSessionID(in output: String) -> String? {
+        let patterns = [
+            #"session[_ ]id[:=]\s*([A-Za-z0-9._-]+)"#,
+            #"resume\s+([A-Za-z0-9._-]+)"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            guard let match = regex.firstMatch(in: output, options: [], range: range),
+                  match.numberOfRanges > 1,
+                  let sessionRange = Range(match.range(at: 1), in: output) else {
+                continue
+            }
+            return String(output[sessionRange])
+        }
+        return nil
+    }
+
     private static func isNoiseLine(_ line: String) -> Bool {
         let normalized = line.lowercased()
         return normalized.hasPrefix("warning:") ||

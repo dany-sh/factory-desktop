@@ -451,6 +451,18 @@ public final class FactoryRepository {
         return rows.first.map(runnerExecution(from:))
     }
 
+    public func markRunningRunnerExecutionsDetached() throws {
+        try database.execute(
+            """
+            UPDATE runner_executions
+            SET status = 'detached',
+                ended_at = COALESCE(ended_at, ?)
+            WHERE status = 'running';
+            """,
+            binds: [.text(DateCoding.string(from: Date()))]
+        )
+    }
+
     public func runnerSession(id: String) throws -> RunnerSession? {
         let rows = try database.query(
             """

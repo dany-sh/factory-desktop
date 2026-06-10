@@ -96,11 +96,21 @@ public enum RunnerExecutionStatus: String, CaseIterable, Codable, Identifiable, 
     case completed
     case failed
     case cancelled
+    case detached
+    case unknown
 
     public var id: String { rawValue }
 
     public var displayName: String {
-        rawValue.replacingOccurrences(of: "_", with: " ").capitalized
+        switch self {
+        case .queued: "Queued"
+        case .running: "Running"
+        case .completed: "Completed"
+        case .failed: "Failed"
+        case .cancelled: "Cancelled"
+        case .detached: "Detached"
+        case .unknown: "Unknown"
+        }
     }
 }
 

@@ -31,6 +31,7 @@ public struct CommandResult: Equatable {
     public var exitCode: Int32
     public var standardOutput: String
     public var standardError: String
+    public var wasCancelled: Bool
 
     public var output: String {
         [standardOutput, standardError]
@@ -45,13 +46,15 @@ public struct CommandResult: Equatable {
         self.exitCode = exitCode
         self.standardOutput = output
         self.standardError = ""
+        self.wasCancelled = false
     }
 
-    public init(command: String, exitCode: Int32, standardOutput: String, standardError: String) {
+    public init(command: String, exitCode: Int32, standardOutput: String, standardError: String, wasCancelled: Bool = false) {
         self.command = command
         self.exitCode = exitCode
         self.standardOutput = standardOutput
         self.standardError = standardError
+        self.wasCancelled = wasCancelled
     }
 }
 
@@ -102,6 +105,67 @@ public final class CommandRunner {
                 exitCode: process.terminationStatus,
                 standardOutput: String(data: outputData, encoding: .utf8) ?? "",
                 standardError: String(data: errorData, encoding: .utf8) ?? ""
+            )
+        }.value
+    }
+
+    public func runCancellable(
+        _ request: CommandRequest,
+        registration: WorkerProcessRegistration,
+        registry: WorkerProcessRegistry
+    ) async throws -> CommandResult {
+        try validate(request)
+
+        return try await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = [request.executable] + request.arguments
+            if let workingDirectory = request.workingDirectory {
+                process.currentDirectoryURL = workingDirectory
+            }
+
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            process.standardOutput = outputPipe
+            process.standardError = errorPipe
+            let inputPipe: Pipe?
+            if request.standardInput != nil {
+                let pipe = Pipe()
+                process.standardInput = pipe
+                inputPipe = pipe
+            } else {
+                inputPipe = nil
+            }
+
+            try process.run()
+            let handle = ProcessWorkerHandle(process: process)
+            await registry.register(registration, handle: handle)
+
+            let outputTask = Task {
+                outputPipe.fileHandleForReading.readDataToEndOfFile()
+            }
+            let errorTask = Task {
+                errorPipe.fileHandleForReading.readDataToEndOfFile()
+            }
+            if let standardInput = request.standardInput, let inputPipe {
+                inputPipe.fileHandleForWriting.write(Data(standardInput.utf8))
+                try? inputPipe.fileHandleForWriting.close()
+            }
+            process.waitUntilExit()
+
+            let outputData = await outputTask.value
+            let errorData = await errorTask.value
+            let wasCancelled = handle.cancellationRequested
+            await registry.unregister(
+                executionId: registration.executionId,
+                finalStatus: wasCancelled ? .cancelled : (process.terminationStatus == 0 ? .completed : .failed)
+            )
+            return CommandResult(
+                command: request.displayString,
+                exitCode: process.terminationStatus,
+                standardOutput: String(data: outputData, encoding: .utf8) ?? "",
+                standardError: String(data: errorData, encoding: .utf8) ?? "",
+                wasCancelled: wasCancelled
             )
         }.value
     }

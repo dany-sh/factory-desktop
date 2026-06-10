@@ -2934,6 +2934,145 @@ final class FactoryDesktopCoreTests: XCTestCase {
     }
 
     @MainActor
+    func testRunningWorkerRegistersActiveProcessAndStopIsEnabledOnlyWhileLive() async throws {
+        let registry = WorkerProcessRegistry()
+        let executor = MockWorkerCommandExecutor(
+            registry: registry,
+            output: "session id: worker-session-123\nWorker still running.",
+            waitsForCancellation: true
+        )
+        let fixture = try makeWorkerStoreFixture(
+            workerOutput: "",
+            registry: registry,
+            workerCommandExecutor: executor
+        )
+
+        let task = Task { await fixture.store.assignSelectedTaskToAIWorker() }
+        let snapshot = try await waitForWorkerProcess(registry: registry)
+        await fixture.store.refreshActiveWorkerProcesses()
+        let execution = try XCTUnwrap(try fixture.repository.latestRunnerExecution(taskId: fixture.task.id))
+
+        XCTAssertEqual(snapshot.taskId, fixture.task.id)
+        XCTAssertEqual(snapshot.executionId, execution.id)
+        XCTAssertEqual(snapshot.status, .running)
+        XCTAssertTrue(fixture.store.workerRunIsCancellable(execution))
+
+        fixture.store.showWorkerRunDetail(executionId: execution.id)
+        await fixture.store.cancelWorkerRun()
+        await task.value
+        await fixture.store.refreshActiveWorkerProcesses()
+
+        let cancelled = try XCTUnwrap(try fixture.repository.latestRunnerExecution(taskId: fixture.task.id))
+        XCTAssertEqual(cancelled.status, .cancelled)
+        XCTAssertFalse(fixture.store.workerRunIsCancellable(cancelled))
+    }
+
+    @MainActor
+    func testCompletedWorkerProcessUnregistersItself() async throws {
+        let registry = WorkerProcessRegistry()
+        let executor = MockWorkerCommandExecutor(
+            registry: registry,
+            output: """
+            session id: worker-session-123
+            WORKER REPORT
+            Status: needs_review
+            Summary: Done.
+            Files Changed:
+            - None
+            Tests Run:
+            - None
+            Risks:
+            - None
+            Blockers:
+            - None
+            Follow-up Tasks Proposed:
+            - None
+            Next Recommended Action: Review.
+            """,
+            waitsForCancellation: false
+        )
+        let fixture = try makeWorkerStoreFixture(
+            workerOutput: "",
+            registry: registry,
+            workerCommandExecutor: executor
+        )
+
+        await fixture.store.assignSelectedTaskToAIWorker()
+
+        let snapshots = await registry.snapshots()
+        let execution = try XCTUnwrap(try fixture.repository.latestRunnerExecution(taskId: fixture.task.id))
+        XCTAssertEqual(snapshots, [])
+        XCTAssertEqual(execution.status, .completed)
+    }
+
+    @MainActor
+    func testCancellingWorkerPreservesTaskAndWorktreeAndWritesTraceability() async throws {
+        let registry = WorkerProcessRegistry()
+        let executor = MockWorkerCommandExecutor(
+            registry: registry,
+            output: "session id: worker-session-123\npartial work before cancel",
+            waitsForCancellation: true
+        )
+        let fixture = try makeWorkerStoreFixture(
+            workerOutput: "",
+            registry: registry,
+            workerCommandExecutor: executor
+        )
+        let worktreePath = fixture.task.localWorktreePath ?? fixture.root.path
+
+        let task = Task { await fixture.store.assignSelectedTaskToAIWorker() }
+        _ = try await waitForWorkerProcess(registry: registry)
+        let execution = try XCTUnwrap(try fixture.repository.latestRunnerExecution(taskId: fixture.task.id))
+        fixture.store.showWorkerRunDetail(executionId: execution.id)
+
+        await fixture.store.cancelWorkerRun()
+        await task.value
+
+        let storedTask = try XCTUnwrap(try fixture.repository.tasks(projectId: fixture.project.id).first { $0.id == fixture.task.id })
+        let cancelled = try XCTUnwrap(try fixture.repository.latestRunnerExecution(taskId: fixture.task.id))
+        let notifications = try fixture.repository.runnerNotifications(taskId: fixture.task.id)
+        let events = try fixture.repository.taskEvents(taskId: fixture.task.id)
+        let snapshot = try XCTUnwrap(try fixture.repository.latestLifecycleSnapshot(taskId: fixture.task.id))
+        let report = try fixture.repository.latestWorkerReport(taskId: fixture.task.id)
+        let logPath = try XCTUnwrap(cancelled.logPath)
+        let log = try String(contentsOfFile: logPath, encoding: .utf8)
+
+        XCTAssertEqual(cancelled.status, .cancelled)
+        XCTAssertNil(report)
+        XCTAssertNotEqual(storedTask.status, .done)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktreePath))
+        XCTAssertTrue(log.contains("Cancellation requested by user"))
+        XCTAssertTrue(notifications.contains { $0.message.contains("cancelled by user") })
+        XCTAssertTrue(events.contains { $0.message.contains("AI Worker cancellation requested") })
+        XCTAssertEqual(snapshot.latestExecutionStatus, .cancelled)
+    }
+
+    @MainActor
+    func testRunningExecutionWithoutProcessHandleIsMarkedDetachedOnStartup() async throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Detached", status: .building)
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+        let workspace = RunnerWorkspace(projectId: project.id, taskId: task.id, branchName: "manual/task", worktreePath: fixture.root.path)
+        try fixture.repository.upsert(runnerWorkspace: workspace)
+        let session = RunnerSession(workspaceId: workspace.id, provider: .codex, mode: .coding)
+        try fixture.repository.upsert(runnerSession: session)
+        let execution = RunnerExecution(sessionId: session.id, runReason: "assign_to_ai_worker", status: .running)
+        try fixture.repository.upsert(runnerExecution: execution)
+
+        let store = AppStore(paths: fixture.paths)
+        store.selectedProjectID = project.id
+        store.selectedTaskID = task.id
+        try store.reloadWorkerState()
+
+        let detached = try XCTUnwrap(try fixture.repository.latestRunnerExecution(taskId: task.id))
+        XCTAssertEqual(detached.status, .detached)
+        XCTAssertEqual(store.workerProcessStatus(for: detached), .detached)
+        XCTAssertFalse(store.workerRunIsCancellable(detached))
+    }
+
+    @MainActor
     func testScopingWorkItemUpdatesSameFactoryTask() async throws {
         let fixture = try makeRepositoryFixture()
         let project = Project(id: "project", name: "Demo", type: .writingProject, path: fixture.root.path)
@@ -3106,6 +3245,8 @@ final class FactoryDesktopCoreTests: XCTestCase {
     @MainActor
     private func makeCodexStoreFixture(
         taskStatus: TaskStatus = .approved,
+        workerCommandExecutor: WorkerCommandExecuting? = nil,
+        workerProcessRegistry: WorkerProcessRegistry = WorkerProcessRegistry(),
         runCommand: @escaping (CommandRequest) async throws -> CommandResult
     ) throws -> CodexStoreFixture {
         let fixture = try makeRepositoryFixture()
@@ -3121,7 +3262,12 @@ final class FactoryDesktopCoreTests: XCTestCase {
         try fixture.repository.upsert(task: task)
 
         let service = CodexCLIService(runCommand: runCommand)
-        let store = AppStore(paths: fixture.paths, codexCLIService: service)
+        let store = AppStore(
+            paths: fixture.paths,
+            codexCLIService: service,
+            workerCommandExecutor: workerCommandExecutor,
+            workerProcessRegistry: workerProcessRegistry
+        )
         store.selectedProjectID = project.id
         store.selectedTaskID = task.id
         try store.reloadRunsAndArtifacts()
@@ -3137,7 +3283,20 @@ final class FactoryDesktopCoreTests: XCTestCase {
 
     @MainActor
     private func makeWorkerStoreFixture(workerOutput: String) throws -> CodexStoreFixture {
-        try makeCodexStoreFixture(taskStatus: .ready) { request in
+        try makeWorkerStoreFixture(workerOutput: workerOutput, registry: WorkerProcessRegistry(), workerCommandExecutor: nil)
+    }
+
+    @MainActor
+    private func makeWorkerStoreFixture(
+        workerOutput: String,
+        registry: WorkerProcessRegistry,
+        workerCommandExecutor: WorkerCommandExecuting?
+    ) throws -> CodexStoreFixture {
+        try makeCodexStoreFixture(
+            taskStatus: .ready,
+            workerCommandExecutor: workerCommandExecutor,
+            workerProcessRegistry: registry
+        ) { request in
             CommandResult(
                 command: request.displayString,
                 exitCode: 0,
@@ -3145,6 +3304,16 @@ final class FactoryDesktopCoreTests: XCTestCase {
                 standardError: ""
             )
         }
+    }
+
+    private func waitForWorkerProcess(registry: WorkerProcessRegistry) async throws -> WorkerProcessSnapshot {
+        for _ in 0..<200 {
+            if let snapshot = await registry.snapshots().first {
+                return snapshot
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        throw FactoryError.commandFailed("Timed out waiting for worker process registration.")
     }
 
     @MainActor
@@ -3435,6 +3604,84 @@ private struct LifecycleGitFixture {
     var codexBranch: String?
     var localWorktreePath: String?
     var codexWorktreePath: String?
+}
+
+private final class MockWorkerProcessHandle: WorkerProcessHandle, @unchecked Sendable {
+    private let lock = NSLock()
+    private var running = true
+    private var didRequestCancellation = false
+
+    var isRunning: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return running
+    }
+
+    var cancellationRequested: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didRequestCancellation
+    }
+
+    func terminate() {
+        lock.lock()
+        didRequestCancellation = true
+        running = false
+        lock.unlock()
+    }
+
+    func kill() {
+        terminate()
+    }
+
+    func complete() {
+        lock.lock()
+        running = false
+        lock.unlock()
+    }
+
+    func waitUntilExit() async {
+        while isRunning {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+}
+
+private final class MockWorkerCommandExecutor: WorkerCommandExecuting {
+    private let registry: WorkerProcessRegistry
+    private let output: String
+    private let waitsForCancellation: Bool
+
+    init(registry: WorkerProcessRegistry, output: String, waitsForCancellation: Bool) {
+        self.registry = registry
+        self.output = output
+        self.waitsForCancellation = waitsForCancellation
+    }
+
+    func execute(_ request: CommandRequest, registration: WorkerProcessRegistration?) async throws -> CommandResult {
+        let handle = MockWorkerProcessHandle()
+        if let registration {
+            await registry.register(registration, handle: handle)
+        }
+        if waitsForCancellation {
+            await handle.waitUntilExit()
+        } else {
+            handle.complete()
+        }
+        if let registration {
+            await registry.unregister(
+                executionId: registration.executionId,
+                finalStatus: handle.cancellationRequested ? .cancelled : .completed
+            )
+        }
+        return CommandResult(
+            command: request.displayString,
+            exitCode: handle.cancellationRequested ? 143 : 0,
+            standardOutput: output,
+            standardError: "",
+            wasCancelled: handle.cancellationRequested
+        )
+    }
 }
 
 private extension String {

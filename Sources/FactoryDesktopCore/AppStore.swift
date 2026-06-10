@@ -30,6 +30,7 @@ public final class AppStore: ObservableObject {
     @Published public private(set) var latestLifecycleSnapshot: LifecycleSnapshot?
     @Published public private(set) var workerRunDetail: WorkerRunDetail?
     @Published public var isWorkerRunDetailPresented = false
+    @Published public private(set) var activeWorkerProcesses: [WorkerProcessSnapshot] = []
     @Published public private(set) var selectedCodexProjectLink: CodexProjectLink?
     @Published public private(set) var selectedTaskCodexSessionLink: CodexSessionLink?
     @Published public private(set) var codexSessionLinks: [CodexSessionLink] = []
@@ -52,6 +53,8 @@ public final class AppStore: ObservableObject {
     private var repository: FactoryRepository?
     private var commandRunner: CommandRunner
     private var codexCLIService: CodexCLIService
+    public let workerProcessRegistry: WorkerProcessRegistry
+    private var workerCommandExecutor: WorkerCommandExecuting
     private var runnerAdapters: [RunnerProvider: RunnerProviderAdapter]
     private var lifecycleMonitorService: LifecycleMonitorService
     private var gitService: GitService?
@@ -285,6 +288,8 @@ public final class AppStore: ObservableObject {
     public init(
         paths: FactoryPaths = FactoryPaths(),
         codexCLIService: CodexCLIService? = nil,
+        workerCommandExecutor: WorkerCommandExecuting? = nil,
+        workerProcessRegistry: WorkerProcessRegistry = WorkerProcessRegistry(),
         currentBuildInfoProvider: @escaping () -> BuildInfo = { BuildInfoService.current(launchTimestamp: Date()) },
         appRelauncher: @escaping () throws -> Void = { try AppUpdateService.relaunchCurrentApplication() },
         appTerminator: @escaping () -> Void = {}
@@ -295,7 +300,12 @@ public final class AppStore: ObservableObject {
         self.appTerminator = appTerminator
         self.buildInfo = currentBuildInfoProvider()
         self.commandRunner = CommandRunner()
+        self.workerProcessRegistry = workerProcessRegistry
         self.codexCLIService = codexCLIService ?? CodexCLIService(commandRunner: commandRunner)
+        self.workerCommandExecutor = workerCommandExecutor
+            ?? (codexCLIService == nil
+                ? CancellableWorkerCommandExecutor(commandRunner: commandRunner, registry: workerProcessRegistry)
+                : CodexServiceWorkerCommandExecutor(service: self.codexCLIService))
         self.runnerAdapters = [:]
         self.lifecycleMonitorService = LifecycleMonitorService(commandRunner: commandRunner)
         self.ollamaClient = OllamaClient()
@@ -309,6 +319,7 @@ public final class AppStore: ObservableObject {
             self.database = database
             self.repository = FactoryRepository(database: database)
             self.gitService = GitService(commandRunner: commandRunner, paths: paths)
+            try repository?.markRunningRunnerExecutionsDetached()
             try reload()
             statusMessage = "Ready. SQLite: \(paths.database.path)"
         } catch {
@@ -505,6 +516,36 @@ public final class AppStore: ObservableObject {
             notifications: try repository.runnerNotifications(taskId: task.id),
             events: try repository.taskEvents(taskId: task.id)
         )
+    }
+
+    public func refreshActiveWorkerProcesses() async {
+        activeWorkerProcesses = await workerProcessRegistry.snapshots()
+    }
+
+    public func workerProcessSnapshot(executionId: String?) -> WorkerProcessSnapshot? {
+        guard let executionId else { return nil }
+        return activeWorkerProcesses.first { $0.executionId == executionId }
+    }
+
+    public func workerProcessStatus(for execution: RunnerExecution?) -> WorkerProcessStatus {
+        guard let execution else { return .unknown }
+        if let snapshot = workerProcessSnapshot(executionId: execution.id) {
+            return snapshot.status
+        }
+        switch execution.status {
+        case .queued: return .unknown
+        case .running: return .detached
+        case .completed: return .completed
+        case .failed: return .failed
+        case .cancelled: return .cancelled
+        case .detached: return .detached
+        case .unknown: return .unknown
+        }
+    }
+
+    public func workerRunIsCancellable(_ execution: RunnerExecution?) -> Bool {
+        guard let execution else { return false }
+        return workerProcessSnapshot(executionId: execution.id)?.status == .running
     }
 
     public func selectProject(_ projectID: String?) {
@@ -1923,6 +1964,75 @@ public final class AppStore: ObservableObject {
         await resumeWorker(taskID: detail.task.id, sessionID: detail.session?.id)
     }
 
+    public func cancelWorkerRun() async {
+        guard let repository,
+              let selectedTask = selectedTask ?? workerRunDetail?.task else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        let detail: WorkerRunDetail
+        do {
+            detail = try workerRunDetail ?? makeWorkerRunDetail(task: selectedTask, executionId: latestRunnerExecution?.id)
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+        guard var execution = detail.execution else {
+            errorMessage = FactoryError.missingSelection.localizedDescription
+            return
+        }
+        await refreshActiveWorkerProcesses()
+        guard workerRunIsCancellable(execution) else {
+            statusMessage = "Stop is unavailable for completed or detached runs."
+            return
+        }
+
+        activeWorkerProcesses = activeWorkerProcesses.map { snapshot in
+            guard snapshot.executionId == execution.id else { return snapshot }
+            var updated = snapshot
+            updated.status = .cancelling
+            return updated
+        }
+        appendWorkerLogLine("Cancellation requested by user.", path: execution.logPath)
+
+        let didCancel = await workerProcessRegistry.cancel(executionId: execution.id)
+        await refreshActiveWorkerProcesses()
+        guard didCancel else {
+            statusMessage = "Worker run is no longer attached to a live process."
+            return
+        }
+
+        do {
+            execution.status = .cancelled
+            execution.endedAt = execution.endedAt ?? Date()
+            try repository.upsert(runnerExecution: execution)
+            try repository.insert(runnerNotification: RunnerNotification(
+                taskId: detail.task.id,
+                sessionId: detail.session?.id,
+                executionId: execution.id,
+                level: .warning,
+                message: "Worker run was cancelled by user. Log and worktree were preserved."
+            ))
+            try repository.insert(taskEvent: TaskEvent(
+                taskId: detail.task.id,
+                kind: .statusChangedAutomatically,
+                source: .automatic,
+                message: "AI Worker cancellation requested. Previous task status: \(detail.task.status.displayName). New task status: \(detail.task.status.displayName). Reason: user stopped execution. Evidence: execution \(execution.id.shortID), log \(execution.logPath ?? "unavailable").",
+                previousStatus: detail.task.status,
+                newStatus: detail.task.status
+            ))
+            if let project = selectedProject {
+                try await refreshWorkerLifecycleSnapshot(project: project, task: detail.task, repository: repository)
+            }
+            try reload()
+            selectedTaskID = detail.task.id
+            workerRunDetail = try makeWorkerRunDetail(task: detail.task, executionId: execution.id)
+            statusMessage = "AI Worker cancelled. Log and worktree were preserved."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     public func markWorkerRunFailed() {
         perform {
             guard let repository = self.repository,
@@ -2760,6 +2870,20 @@ public final class AppStore: ObservableObject {
         }
     }
 
+    private func appendWorkerLogLine(_ message: String, path: String?) {
+        guard let path else { return }
+        let line = "\n[\(DateCoding.string(from: Date()))] \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if FileManager.default.fileExists(atPath: path),
+           let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: path)) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? line.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
+
     public func backupDatabaseNow() {
         perform {
             let timestamp = DateFormatter.backup.string(from: Date())
@@ -3004,7 +3128,34 @@ public final class AppStore: ObservableObject {
             linkedSessionID: linkedSessionID,
             sandboxMode: .workspaceWrite
         )
-        let result = try await adapter.execute(request)
+        let processRegistration = WorkerProcessRegistration(
+            executionId: execution.id,
+            sessionId: session.id,
+            taskId: task.id,
+            startedAt: startedAt,
+            command: commandRequest.displayString,
+            workingDirectory: commandRequest.workingDirectory?.path
+        )
+        let rawResult = try await workerCommandExecutor.execute(commandRequest, registration: processRegistration)
+        let result = RunnerResult(
+            provider: request.provider,
+            mode: request.mode,
+            command: RunnerCommand(
+                executable: commandRequest.executable,
+                arguments: commandRequest.arguments,
+                workingDirectory: commandRequest.workingDirectory?.path
+            ),
+            standardOutput: rawResult.standardOutput,
+            standardError: rawResult.standardError,
+            exitCode: rawResult.exitCode,
+            startedAt: startedAt,
+            endedAt: Date(),
+            summary: CodexSessionResultImporter.shortSummary(
+                from: rawResult,
+                fallback: rawResult.wasCancelled ? "AI Worker cancelled." : (rawResult.succeeded ? "AI Worker completed." : "AI Worker failed.")
+            ),
+            sessionMetadata: RunnerSessionMetadata(sessionID: CodexSessionResultImporter.detectSessionID(in: rawResult.output))
+        )
         let log = runnerLogText(
             provider: request.provider,
             mode: request.mode,
@@ -3014,18 +3165,18 @@ public final class AppStore: ObservableObject {
             exitCode: Int(result.exitCode),
             standardOutput: result.standardOutput,
             standardError: result.standardError
-        )
+        ) + (rawResult.wasCancelled ? "\n[\(DateCoding.string(from: Date()))] Cancellation requested by user.\n" : "")
         try log.write(to: logURL, atomically: true, encoding: .utf8)
         try repository.insert(agentTurn: AgentTurn(sessionId: session.id, role: "assistant", content: result.output))
 
         session.externalSessionId = result.sessionMetadata?.sessionID ?? session.externalSessionId
-        session.status = result.succeeded ? .completed : .failed
+        session.status = rawResult.wasCancelled ? .paused : (result.succeeded ? .completed : .failed)
         session.transcriptPath = logURL.path
         session.updatedAt = result.endedAt
         try repository.upsert(runnerSession: session)
 
         execution.command = result.command.displayString
-        execution.status = result.succeeded ? .completed : .failed
+        execution.status = rawResult.wasCancelled ? .cancelled : (result.succeeded ? .completed : .failed)
         execution.exitCode = Int(result.exitCode)
         execution.afterRepoState = await repoState(path: workspace.worktreePath)
         execution.endedAt = result.endedAt
@@ -3036,18 +3187,20 @@ public final class AppStore: ObservableObject {
         updatedWorkspace.updatedAt = Date()
         try repository.upsert(runnerWorkspace: updatedWorkspace)
 
-        try ingestWorkerReport(
-            result: result,
-            task: task,
-            session: session,
-            execution: execution,
-            repository: repository
-        )
+        if !rawResult.wasCancelled || result.output.range(of: "WORKER REPORT", options: [.caseInsensitive]) != nil {
+            try ingestWorkerReport(
+                result: result,
+                task: task,
+                session: session,
+                execution: execution,
+                repository: repository
+            )
+        }
         try await refreshWorkerLifecycleSnapshot(project: project, task: task, repository: repository)
         try reload()
         selectedTaskID = task.id
         selectedRunOutput = log
-        statusMessage = result.succeeded ? "AI Worker completed. Review the worker report." : "AI Worker failed. Review the worker log."
+        statusMessage = rawResult.wasCancelled ? "AI Worker cancelled. Log and worktree were preserved." : (result.succeeded ? "AI Worker completed. Review the worker report." : "AI Worker failed. Review the worker log.")
     }
 
     private func ingestWorkerReport(
