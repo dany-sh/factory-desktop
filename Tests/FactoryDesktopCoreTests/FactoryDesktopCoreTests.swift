@@ -124,6 +124,159 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(parsed.acceptanceText, "First item\nSecond item\nThird item")
     }
 
+    func testTaskDraftStorePreservesBriefAcrossRepeatedActivation() {
+        let task = makeDraftTask()
+        let store = TaskDraftStore()
+
+        let first = store.activate(task: task)
+        let second = store.activate(task: task)
+
+        XCTAssertEqual(first.draft.brief, second.draft.brief)
+        XCTAssertEqual(second.acceptanceText, "First check\nSecond check")
+        XCTAssertFalse(second.isDirty)
+    }
+
+    func testTaskDraftStorePreservesDirtyDraftAcrossViewSwitches() {
+        let task = makeDraftTask()
+        let store = TaskDraftStore()
+        _ = store.activate(task: task)
+
+        let edited = store.update(taskID: task.id) { state in
+            state.updateDocumentMarkdown("""
+            ## Goal
+            Keep my local rewrite.
+
+            ## Context
+            The user is actively editing.
+
+            ## Acceptance Criteria
+            - First check
+            - Second check
+            """)
+        }
+
+        let reactivated = store.activate(task: task)
+
+        XCTAssertEqual(edited?.draft.brief, reactivated.draft.brief)
+        XCTAssertTrue(reactivated.isDirty)
+    }
+
+    func testTaskDraftStoreKeepsBriefStableOnWorkerLifecycleRefresh() {
+        let task = makeDraftTask()
+        let refreshed = makeDraftTask(
+            id: task.id,
+            status: .building,
+            localBranch: "task/demo",
+            localWorktreePath: "/tmp/task-demo",
+            updatedAt: task.updatedAt.addingTimeInterval(60)
+        )
+        let store = TaskDraftStore()
+        _ = store.activate(task: task)
+
+        let state = store.activate(task: refreshed)
+
+        XCTAssertEqual(state.draft.brief, TaskDraft(task: task).brief)
+        XCTAssertFalse(state.isDirty)
+    }
+
+    func testTaskDraftStoreKeepsBriefStableWhenAssigningWorker() {
+        let task = makeDraftTask()
+        let assigned = makeDraftTask(
+            id: task.id,
+            status: .building,
+            codexBranch: "codex/task-demo",
+            codexWorktreePath: "/tmp/codex-task-demo",
+            updatedAt: task.updatedAt.addingTimeInterval(120)
+        )
+        let store = TaskDraftStore()
+        _ = store.activate(task: task)
+
+        let state = store.activate(task: assigned)
+
+        XCTAssertEqual(state.draft.brief, TaskDraft(task: task).brief)
+        XCTAssertFalse(state.isDirty)
+    }
+
+    func testTaskDraftStoreKeepsBriefStableWhenStoppingWorker() {
+        let running = makeDraftTask(status: .building)
+        let stopped = makeDraftTask(
+            id: running.id,
+            status: .needsFixes,
+            updatedAt: running.updatedAt.addingTimeInterval(180)
+        )
+        let store = TaskDraftStore()
+        _ = store.activate(task: running)
+
+        let state = store.activate(task: stopped)
+
+        XCTAssertEqual(state.draft.brief, TaskDraft(task: running).brief)
+        XCTAssertFalse(state.isDirty)
+    }
+
+    func testTaskDraftStoreDoesNotOverwriteFullBriefWithOlderPartialRefresh() {
+        let task = makeDraftTask()
+        let partial = makeDraftTask(
+            id: task.id,
+            goal: "",
+            context: "",
+            acceptanceCriteria: [],
+            updatedAt: task.updatedAt
+        )
+        let store = TaskDraftStore()
+        _ = store.activate(task: task)
+
+        let state = store.activate(task: partial)
+
+        XCTAssertEqual(state.draft.brief, TaskDraft(task: task).brief)
+        XCTAssertEqual(state.acceptanceText, "First check\nSecond check")
+        XCTAssertFalse(state.isDirty)
+    }
+
+    func testTaskDraftStoreDoesNotMarkUnsavedChangesForWorkerRefreshAlone() {
+        let task = makeDraftTask()
+        let refreshed = makeDraftTask(
+            id: task.id,
+            status: .testing,
+            localWorktreePath: "/tmp/task-demo",
+            updatedAt: task.updatedAt.addingTimeInterval(240)
+        )
+        let store = TaskDraftStore()
+        _ = store.activate(task: task)
+
+        let state = store.activate(task: refreshed)
+
+        XCTAssertFalse(state.isDirty)
+        XCTAssertNil(state.lastEditedAt)
+    }
+
+    func testTaskDraftStorePreservesDirtyDraftWhenPersistedContentChangesExternally() {
+        let task = makeDraftTask()
+        let store = TaskDraftStore()
+        _ = store.activate(task: task)
+        _ = store.update(taskID: task.id) { state in
+            state.updateDocumentMarkdown("""
+            ## Goal
+            Local draft stays in place.
+
+            ## Context
+            Preserve the in-progress rewrite.
+            """)
+        }
+
+        let externallyChanged = makeDraftTask(
+            id: task.id,
+            goal: "External change",
+            context: "Another process saved new persisted content.",
+            acceptanceCriteria: ["External check"],
+            updatedAt: task.updatedAt.addingTimeInterval(300)
+        )
+        let state = store.activate(task: externallyChanged)
+
+        XCTAssertTrue(state.isDirty)
+        XCTAssertTrue(state.hasExternalPersistedChange)
+        XCTAssertTrue(state.draft.brief.contains("Local draft stays in place."))
+    }
+
     func testEditorAssistSuggestionParsesFencedMarkdown() {
         let output = """
         Tightened the goal and removed ambiguity.
@@ -3756,6 +3909,41 @@ private final class MockWorkerCommandExecutor: WorkerCommandExecuting {
             wasCancelled: handle.cancellationRequested
         )
     }
+}
+
+private func makeDraftTask(
+    id: String = UUID().uuidString,
+    status: TaskStatus = .ready,
+    goal: String = "Keep the task brief visible while switching workspace views.",
+    context: String = "The editor should not flash empty content during refreshes or worker lifecycle updates.",
+    acceptanceCriteria: [String] = ["First check", "Second check"],
+    localBranch: String? = nil,
+    codexBranch: String? = nil,
+    localWorktreePath: String? = nil,
+    codexWorktreePath: String? = nil,
+    updatedAt: Date = Date(timeIntervalSince1970: 1_700_000_000)
+) -> FactoryTask {
+    FactoryTask(
+        id: id,
+        projectId: "project-1",
+        title: "Stabilize Task Brief Editor",
+        type: .coding,
+        status: status,
+        priority: .high,
+        kind: .task,
+        readiness: .executable,
+        priorityLabel: .high,
+        scopingNotes: "Do not recreate the editor for unrelated refreshes.",
+        goal: goal,
+        context: context,
+        acceptanceCriteria: acceptanceCriteria,
+        localBranch: localBranch,
+        codexBranch: codexBranch,
+        localWorktreePath: localWorktreePath,
+        codexWorktreePath: codexWorktreePath,
+        createdAt: updatedAt.addingTimeInterval(-60),
+        updatedAt: updatedAt
+    )
 }
 
 private extension String {

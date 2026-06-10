@@ -7,7 +7,6 @@ struct TaskDetailView: View {
     @EnvironmentObject private var workspaceState: TaskWorkspaceState
     @Environment(\.openWindow) private var openWindow
     @FocusState private var focusedField: TaskEditorField?
-    @StateObject private var editorBridge = RichTaskEditorBridge()
 
     var body: some View {
         Group {
@@ -37,7 +36,7 @@ struct TaskDetailView: View {
                         }
                         .keyboardShortcut("s", modifiers: [.command])
 
-                        if draft.hasChanges(comparedTo: task, acceptanceText: acceptanceText) {
+                        if workspaceState.isDirty {
                             Text("Unsaved changes")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.orange)
@@ -63,6 +62,10 @@ struct TaskDetailView: View {
                     editorBridge.runInlineAction = handleInlineAction
                     workspaceState.loadIfNeeded(task)
                 }
+                .onChange(of: task) { _, updatedTask in
+                    guard updatedTask.id == task.id else { return }
+                    workspaceState.loadIfNeeded(updatedTask)
+                }
                 .onChange(of: task.id) { _, _ in
                     workspaceState.loadIfNeeded(task)
                 }
@@ -86,6 +89,10 @@ struct TaskDetailView: View {
     private var draft: TaskDraft {
         get { workspaceState.draft }
         nonmutating set { workspaceState.draft = newValue }
+    }
+
+    private var editorBridge: RichTaskEditorBridge {
+        workspaceState.editorBridge
     }
 
     private var acceptanceText: String {
@@ -203,7 +210,7 @@ struct TaskDetailView: View {
                         ProgressView()
                             .controlSize(.small)
                     }
-                    editorStatusSummary(task: task)
+                    editorStatusSummary
                 }
             }
         }
@@ -424,14 +431,14 @@ struct TaskDetailView: View {
         }
     }
 
-    private func editorStatusSummary(task: FactoryTask) -> some View {
+    private var editorStatusSummary: some View {
         HStack(spacing: 6) {
             Text("Editor")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             Text("·")
                 .foregroundStyle(.tertiary)
-            if draft.hasChanges(comparedTo: task, acceptanceText: acceptanceText) {
+            if workspaceState.isDirty {
                 Label("Unsaved changes", systemImage: "pencil.and.outline")
                     .foregroundStyle(.orange)
             } else {
@@ -472,14 +479,34 @@ struct TaskDetailView: View {
                         .foregroundStyle(.green)
                 }
             }
-            RichTaskEditorView(markdown: editorDocumentBinding, selectionState: editorSelectionBinding, bridge: editorBridge)
-                .frame(minHeight: 520)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(.separator.opacity(0.55))
+            ZStack {
+                RichTaskEditorView(markdown: editorDocumentBinding, selectionState: editorSelectionBinding, bridge: editorBridge)
+                    .frame(minHeight: 520)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                if !editorBridge.isReady {
+                    taskBriefLoadingOverlay
                 }
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(.separator.opacity(0.55))
+            }
         }
+    }
+
+    private var taskBriefLoadingOverlay: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading task brief...")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .padding(1)
+        .allowsHitTesting(false)
     }
 
     private var editorDocumentMarkdown: String {
@@ -512,7 +539,7 @@ struct TaskDetailView: View {
     private func save(_ task: FactoryTask) {
         let updated = draft.task(updating: task, acceptanceText: acceptanceText)
         store.saveTask(updated)
-        workspaceState.load(updated)
+        workspaceState.markTaskPersisted(updated)
     }
 
     private func syncEditorStateIfNeeded(_ completion: @escaping () -> Void) {
@@ -1739,347 +1766,5 @@ private extension RunRecord {
 private extension String {
     var wordCount: Int {
         split { $0.isWhitespace || $0.isNewline }.count
-    }
-}
-
-struct TaskDraft {
-    var title = ""
-    var type: TaskType = .planning
-    var kind: FactoryTaskKind = .task
-    var readiness: FactoryTaskReadiness = .needsScoping
-    var priorityLabel: FactoryTaskPriorityLabel = .normal
-    var category = ""
-    var source = ""
-    var effort: FactoryTaskEffort = .unknown
-    var risk: FactoryTaskRisk = .unknown
-    var brief = ""
-    var dependencies = ""
-    var nonGoals = ""
-    var suggestedSplit = ""
-    var recommendedNextAction = ""
-
-    init() {}
-
-    init(task: FactoryTask) {
-        title = task.title
-        type = task.type
-        kind = task.kind
-        readiness = task.readiness
-        priorityLabel = task.priorityLabel
-        category = task.category
-        source = task.source
-        effort = task.effort
-        risk = task.risk
-        brief = Self.briefText(goal: task.goal, context: task.context, scopingNotes: task.scopingNotes)
-        dependencies = task.dependencies
-        nonGoals = task.nonGoals
-        suggestedSplit = task.suggestedSplit
-        recommendedNextAction = task.recommendedNextAction
-    }
-
-    func task(updating task: FactoryTask, acceptanceText: String) -> FactoryTask {
-        var updated = task
-        let sections = Self.parseBrief(brief)
-        updated.title = title
-        updated.type = type
-        updated.kind = kind
-        updated.readiness = readiness
-        updated.priorityLabel = priorityLabel
-        updated.priority = priorityLabel.taskPriority
-        updated.triageStatus = FactoryTaskTriageStatus.fromLegacyStatus(updated.status)
-        updated.category = category
-        updated.source = source
-        updated.effort = effort
-        updated.risk = risk
-        updated.goal = sections.goal
-        updated.context = sections.context
-        updated.scopingNotes = sections.scopingNotes
-        updated.dependencies = dependencies
-        updated.nonGoals = nonGoals
-        updated.suggestedSplit = suggestedSplit
-        updated.recommendedNextAction = recommendedNextAction
-        updated.acceptanceCriteria = Self.acceptanceCriteria(from: acceptanceText)
-        return updated
-    }
-
-    func hasChanges(comparedTo task: FactoryTask, acceptanceText: String) -> Bool {
-        title != task.title ||
-            type != task.type ||
-            kind != task.kind ||
-            readiness != task.readiness ||
-            priorityLabel != task.priorityLabel ||
-            category != task.category ||
-            source != task.source ||
-            effort != task.effort ||
-            risk != task.risk ||
-            brief != Self.briefText(goal: task.goal, context: task.context, scopingNotes: task.scopingNotes) ||
-            dependencies != task.dependencies ||
-            nonGoals != task.nonGoals ||
-            suggestedSplit != task.suggestedSplit ||
-            recommendedNextAction != task.recommendedNextAction ||
-            Self.acceptanceCriteria(from: acceptanceText) != task.acceptanceCriteria
-    }
-
-    private static func acceptanceCriteria(from acceptanceText: String) -> [String] {
-        acceptanceText
-            .split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-    }
-
-    private static func briefText(goal: String, context: String, scopingNotes: String) -> String {
-        [
-            briefSection(title: "Goal", body: goal),
-            briefSection(title: "Context", body: context),
-            briefSection(title: "Scoping", body: scopingNotes)
-        ]
-        .filter { !$0.isEmpty }
-        .joined(separator: "\n\n")
-    }
-
-    private static func briefSection(title: String, body: String) -> String {
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "" }
-        return "## \(title)\n\(trimmed)"
-    }
-
-    private static func parseBrief(_ brief: String) -> (goal: String, context: String, scopingNotes: String) {
-        var parsed = ParsedBrief()
-        var currentHeading: String?
-        var currentBody: [String] = []
-
-        func flush() {
-            guard let currentHeading else { return }
-            let body = currentBody
-                .joined(separator: "\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            switch currentHeading {
-            case "Goal":
-                parsed.goal = body
-            case "Context":
-                parsed.context = body
-            case "Scoping":
-                parsed.scopingNotes = body
-            default:
-                break
-            }
-        }
-
-        for rawLine in brief.components(separatedBy: .newlines) {
-            let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("## ") {
-                flush()
-                let heading = String(trimmed.dropFirst(3))
-                if heading == "Goal" || heading == "Context" || heading == "Scoping" {
-                    currentHeading = heading
-                    currentBody = []
-                    continue
-                }
-            }
-
-            if currentHeading == nil {
-                currentHeading = "Goal"
-            }
-            currentBody.append(rawLine)
-        }
-
-        flush()
-        return (parsed.goal, parsed.context, parsed.scopingNotes)
-    }
-}
-
-private struct ParsedBrief {
-    var goal = ""
-    var context = ""
-    var scopingNotes = ""
-}
-
-struct TaskEditorSelectionState: Equatable {
-    var selectedText = ""
-    var isFocused = false
-    var activeSection: EditorAssistSection?
-    var cursorAtInsertionPoint = false
-    var changeToken = 0
-
-    var hasSelection: Bool {
-        !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-}
-
-final class TaskWorkspaceState: ObservableObject {
-    @Published var draft = TaskDraft()
-    @Published var acceptanceText = ""
-    @Published var loadedTaskID: String?
-    @Published var selectedStage: TaskWorkspaceStage = .write
-    @Published var showAllArtifacts = false
-    @Published var selectionState = TaskEditorSelectionState()
-    @Published var inspectorPresented = true
-    @Published var customInlinePrompt = ""
-
-    var editorDocumentMarkdown: String {
-        TaskEditorDocument.markdown(brief: draft.brief, acceptanceText: acceptanceText)
-    }
-
-    var currentAssistTarget: EditorAssistTarget {
-        if selectionState.hasSelection {
-            return EditorAssistTarget(
-                kind: .selectedText,
-                selectedText: selectionState.selectedText,
-                activeSection: selectionState.activeSection
-            )
-        }
-
-        if let activeSection = selectionState.activeSection {
-            if selectionState.cursorAtInsertionPoint {
-                return EditorAssistTarget(kind: .cursorInsertionPoint, activeSection: activeSection)
-            }
-            return EditorAssistTarget(kind: .section(activeSection), activeSection: activeSection)
-        }
-
-        if selectionState.isFocused {
-            return EditorAssistTarget(kind: .cursorInsertionPoint)
-        }
-
-        return EditorAssistTarget(kind: .fullBrief)
-    }
-
-    func reset() {
-        draft = TaskDraft()
-        acceptanceText = ""
-        loadedTaskID = nil
-        selectedStage = .write
-        showAllArtifacts = false
-        selectionState = TaskEditorSelectionState()
-        customInlinePrompt = ""
-    }
-
-    func loadIfNeeded(_ task: FactoryTask) {
-        guard loadedTaskID != task.id else { return }
-        load(task)
-    }
-
-    func load(_ task: FactoryTask) {
-        draft = TaskDraft(task: task)
-        acceptanceText = task.acceptanceCriteria.joined(separator: "\n")
-        loadedTaskID = task.id
-        selectionState = TaskEditorSelectionState()
-        customInlinePrompt = ""
-    }
-
-    func updateEditorDocumentMarkdown(_ markdown: String) {
-        let document = TaskEditorDocument.parse(markdown)
-        draft.brief = document.brief
-        acceptanceText = document.acceptanceText
-    }
-
-    func updateSelectionState(_ next: TaskEditorSelectionState) {
-        let selectionChanged = next.selectedText != selectionState.selectedText
-            || next.activeSection != selectionState.activeSection
-            || next.isFocused != selectionState.isFocused
-            || next.cursorAtInsertionPoint != selectionState.cursorAtInsertionPoint
-        guard selectionChanged else { return }
-        selectionState = next
-    }
-
-    func applyProposal(_ proposal: AIAssistProposal, insertOnly: Bool) {
-        let current = editorDocumentMarkdown
-        let replacement = proposal.replacementMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !replacement.isEmpty else { return }
-
-        if insertOnly {
-            updateEditorDocumentMarkdown(insertMarkdown(replacement, into: current, target: proposal.target))
-            return
-        }
-
-        switch proposal.target.kind {
-        case .selectedText:
-            let selection = proposal.target.selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !selection.isEmpty, let range = current.range(of: selection) {
-                var updated = current
-                updated.replaceSubrange(range, with: replacement)
-                updateEditorDocumentMarkdown(updated)
-            } else {
-                updateEditorDocumentMarkdown(replacement)
-            }
-        case .section(let section):
-            updateEditorDocumentMarkdown(replaceSection(section, in: current, with: replacement))
-        case .cursorInsertionPoint:
-            if let section = proposal.target.activeSection {
-                updateEditorDocumentMarkdown(insertMarkdown(replacement, into: current, target: .init(kind: .section(section), activeSection: section)))
-            } else {
-                updateEditorDocumentMarkdown(insertMarkdown(replacement, into: current, target: proposal.target))
-            }
-        case .fullBrief:
-            updateEditorDocumentMarkdown(replacement)
-        }
-    }
-
-    private func insertMarkdown(_ replacement: String, into markdown: String, target: EditorAssistTarget) -> String {
-        switch target.kind {
-        case .section(let section):
-            let original = sectionBody(in: markdown, section: section) ?? ""
-            let combined = [original, replacement]
-                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                .joined(separator: original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n")
-            return replaceSection(section, in: markdown, with: combined)
-        case .cursorInsertionPoint, .fullBrief, .selectedText:
-            let separator = markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
-            return markdown + separator + replacement
-        }
-    }
-
-    private func replaceSection(_ section: EditorAssistSection, in markdown: String, with replacement: String) -> String {
-        let normalizedReplacement = stripMatchingHeading(from: replacement, section: section)
-        let heading = heading(for: section)
-        let lines = markdown.components(separatedBy: .newlines)
-        guard let headingIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(heading) == .orderedSame }) else {
-            let separator = markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n"
-            return markdown + separator + heading + "\n" + normalizedReplacement
-        }
-
-        var endIndex = lines.count
-        if let nextIndex = lines[(headingIndex + 1)...].firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("## ") }) {
-            endIndex = nextIndex
-        }
-
-        var updatedLines = Array(lines[..<headingIndex])
-        updatedLines.append(lines[headingIndex])
-        if !normalizedReplacement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            updatedLines.append(contentsOf: normalizedReplacement.components(separatedBy: .newlines))
-        }
-        if endIndex < lines.count {
-            updatedLines.append(contentsOf: lines[endIndex...])
-        }
-        return updatedLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func sectionBody(in markdown: String, section: EditorAssistSection) -> String? {
-        let lines = markdown.components(separatedBy: .newlines)
-        let heading = heading(for: section)
-        guard let headingIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(heading) == .orderedSame }) else {
-            return nil
-        }
-        let bodyStart = headingIndex + 1
-        let endIndex = lines[bodyStart...].firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("## ") }) ?? lines.count
-        return lines[bodyStart..<endIndex].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func stripMatchingHeading(from replacement: String, section: EditorAssistSection) -> String {
-        let heading = heading(for: section)
-        let lines = replacement.components(separatedBy: .newlines)
-        guard let first = lines.first,
-              first.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(heading) == .orderedSame else {
-            return replacement.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func heading(for section: EditorAssistSection) -> String {
-        switch section {
-        case .goal: "## Goal"
-        case .context: "## Context"
-        case .scoping: "## Scoping"
-        case .acceptanceCriteria: "## Acceptance Criteria"
-        }
     }
 }

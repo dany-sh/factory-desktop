@@ -34,7 +34,7 @@ struct RightToolsInspectorView: View {
         .task {
             await store.refreshActiveWorkerProcesses()
         }
-        .onChange(of: store.selectedTask?.id) { _, _ in
+        .onChange(of: store.selectedTask) { _, _ in
             syncWorkspaceState()
         }
     }

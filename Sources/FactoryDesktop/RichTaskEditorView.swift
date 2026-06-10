@@ -13,43 +13,56 @@ struct RichTaskEditorView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.userContentController.add(context.coordinator, name: "factoryEditor")
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.navigationDelegate = context.coordinator
-        webView.setValue(false, forKey: "drawsBackground")
-        context.coordinator.webView = webView
-
-        if let editorURL = Bundle.module.url(forResource: "task-editor", withExtension: "html", subdirectory: "Editor") {
-            webView.loadFileURL(editorURL, allowingReadAccessTo: editorURL.deletingLastPathComponent())
+        let webView: WKWebView
+        if let persistedWebView = bridge.webView {
+            webView = persistedWebView
         } else {
-            webView.loadHTMLString("<p>Factory editor resources are missing.</p>", baseURL: nil)
+            let configuration = WKWebViewConfiguration()
+            let createdWebView = WKWebView(frame: .zero, configuration: configuration)
+            createdWebView.setValue(false, forKey: "drawsBackground")
+            bridge.webView = createdWebView
+            bridge.isReady = false
+            context.coordinator.attach(to: createdWebView)
+            if let editorURL = Bundle.module.url(forResource: "task-editor", withExtension: "html", subdirectory: "Editor") {
+                createdWebView.loadFileURL(editorURL, allowingReadAccessTo: editorURL.deletingLastPathComponent())
+            } else {
+                createdWebView.loadHTMLString("<p>Factory editor resources are missing.</p>", baseURL: nil)
+            }
+            webView = createdWebView
         }
 
+        context.coordinator.attach(to: webView)
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.attach(to: webView)
         context.coordinator.registerBridge(bridge)
         context.coordinator.apply(markdown: markdown, to: webView)
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "factoryEditor")
+        webView.navigationDelegate = nil
         coordinator.unregisterBridge()
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var parent: RichTaskEditorView
         weak var webView: WKWebView?
-        private var isReady = false
         private var isApplyingWebChange = false
-        private var lastAppliedMarkdown: String?
         private var shouldSkipNextSwiftUpdate = false
 
         init(_ parent: RichTaskEditorView) {
             self.parent = parent
+        }
+
+        func attach(to webView: WKWebView) {
+            self.webView = webView
+            webView.navigationDelegate = self
+            webView.configuration.userContentController.removeScriptMessageHandler(forName: "factoryEditor")
+            webView.configuration.userContentController.add(self, name: "factoryEditor")
         }
 
         func registerBridge(_ bridge: RichTaskEditorBridge) {
@@ -66,7 +79,7 @@ struct RichTaskEditorView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            isReady = true
+            parent.bridge.isReady = true
             apply(markdown: parent.markdown, to: webView, force: true)
         }
 
@@ -107,14 +120,14 @@ struct RichTaskEditorView: NSViewRepresentable {
 
                 switch event {
                 case "ready":
-                    self.isReady = true
+                    self.parent.bridge.isReady = true
                     if let webView = self.webView {
                         self.apply(markdown: self.parent.markdown, to: webView, force: true)
                     }
                 case "change":
                     guard let markdown = body["markdown"] as? String else { return }
                     self.isApplyingWebChange = true
-                    self.lastAppliedMarkdown = markdown
+                    self.parent.bridge.lastAppliedMarkdown = markdown
                     self.shouldSkipNextSwiftUpdate = true
                     if self.parent.markdown != markdown {
                         self.parent.markdown = markdown
@@ -127,20 +140,20 @@ struct RichTaskEditorView: NSViewRepresentable {
         }
 
         func apply(markdown: String, to webView: WKWebView, force: Bool = false) {
-            guard isReady, !isApplyingWebChange else { return }
+            guard parent.bridge.isReady, !isApplyingWebChange else { return }
             if shouldSkipNextSwiftUpdate, !force {
                 shouldSkipNextSwiftUpdate = false
-                lastAppliedMarkdown = markdown
+                parent.bridge.lastAppliedMarkdown = markdown
                 return
             }
-            guard force || markdown != lastAppliedMarkdown else { return }
-            lastAppliedMarkdown = markdown
+            guard force || markdown != parent.bridge.lastAppliedMarkdown else { return }
+            parent.bridge.lastAppliedMarkdown = markdown
             let script = "window.FactoryEditor && window.FactoryEditor.setMarkdown(\(Self.javascriptLiteral(markdown)));"
             webView.evaluateJavaScript(script)
         }
 
         private func readMarkdown(completion: @escaping (String) -> Void) {
-            guard let webView, isReady else {
+            guard let webView, parent.bridge.isReady else {
                 completion(parent.markdown)
                 return
             }
@@ -148,7 +161,7 @@ struct RichTaskEditorView: NSViewRepresentable {
                 let markdown = (result as? String) ?? self.parent.markdown
                 DispatchQueue.main.async {
                     self.parent.markdown = markdown
-                    self.lastAppliedMarkdown = markdown
+                    self.parent.bridge.lastAppliedMarkdown = markdown
                     completion(markdown)
                 }
             }
@@ -165,8 +178,11 @@ struct RichTaskEditorView: NSViewRepresentable {
 }
 
 final class RichTaskEditorBridge: ObservableObject {
+    @Published var isReady = false
     var requestLatestMarkdown: (((@escaping (String) -> Void) -> Void))?
     var dismissInlineAI: (() -> Void)?
     var openInlineAI: (() -> Void)?
     var runInlineAction: ((EditorAssistAction) -> Void)?
+    fileprivate var webView: WKWebView?
+    fileprivate var lastAppliedMarkdown: String?
 }
