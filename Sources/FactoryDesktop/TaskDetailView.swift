@@ -162,20 +162,35 @@ struct TaskDetailView: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             HStack(spacing: 6) {
-                Text(store.selectedProject?.name ?? "Project")
+                Button {
+                    store.showProjectWorkspace()
+                } label: {
+                    Text(store.selectedProject?.name ?? "Project")
+                        .lineLimit(1)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.primary)
+                .help("Open project page")
                 Image(systemName: "chevron.right")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.tertiary)
-                Text("Task")
-                    .foregroundStyle(.secondary)
-                Image(systemName: "chevron.right")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                Text(task.title)
-                    .lineLimit(1)
+                HStack(spacing: 8) {
+                    Text(taskIdentityKey(for: task))
+                        .font(.caption.monospaced().weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color.secondary.opacity(0.12), in: Capsule())
+                    Text(task.title)
+                        .lineLimit(1)
+                }
             }
             .font(.title3.weight(.semibold))
         }
+    }
+
+    private func taskIdentityKey(for task: FactoryTask) -> String {
+        "TASK-\(task.id.shortID.uppercased())"
     }
 
     private func header(task: FactoryTask) -> some View {
@@ -380,12 +395,12 @@ struct TaskDetailView: View {
                 metadataMenu("Task type", selection: draftBinding(\.type), options: TaskType.allCases.sorted { $0.displayName < $1.displayName }, label: \.displayName)
                 metadataMenu("Priority", selection: draftBinding(\.priorityLabel), options: FactoryTaskPriorityLabel.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: \.displayName)
                 metadataMenu("Readiness", selection: draftBinding(\.readiness), options: FactoryTaskReadiness.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: \.displayName)
-                metadataMenu("Effort", selection: draftBinding(\.effort), options: FactoryTaskEffort.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: effortLabel(for:))
-                metadataMenu("Risk", selection: draftBinding(\.risk), options: FactoryTaskRisk.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: riskLabel(for:))
-                Text(task.id.shortID)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 2)
+                if draft.effort != .unknown {
+                    metadataMenu("Effort", selection: draftBinding(\.effort), options: FactoryTaskEffort.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: effortLabel(for:))
+                }
+                if draft.risk != .unknown {
+                    metadataMenu("Risk", selection: draftBinding(\.risk), options: FactoryTaskRisk.allCases.sorted { $0.sortOrder < $1.sortOrder }, label: riskLabel(for:))
+                }
             }
         }
     }
@@ -606,7 +621,7 @@ struct TaskDetailView: View {
         let displays = store.selectedTaskWorktreeDisplays
         let isCompletedTask = store.selectedTask?.status == .archived || store.selectedTask?.status == .done
         if displays.isEmpty {
-            Text("Task worktree: missing")
+            Text(store.selectedTaskCanUseWorktree ? "No worktree yet" : "Worktree optional")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else if displays.contains(where: { $0.state == .missingPath }) {
