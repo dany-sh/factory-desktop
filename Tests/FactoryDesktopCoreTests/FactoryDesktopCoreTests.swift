@@ -653,8 +653,11 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(AppStore.parsePlanReviewDecision(from: "Looks fine but no machine-readable decision."), .unknown)
     }
 
-    func testTaskStateRecommendsCreateWorktreeWhenCodingTaskHasNoWorktree() {
-        XCTAssertTaskStateRecommendation(.createWorktree, for: TaskStateRecommendationInput(taskType: .coding))
+    func testTaskStateRecommendsPlanningWhenCodingTaskHasNoWorktreeYet() {
+        let result = TaskStateRecommendationEvaluator.recommend(TaskStateRecommendationInput(taskType: .coding))
+
+        XCTAssertEqual(result.0, .planLocally)
+        XCTAssertEqual(result.1, "No plan exists yet.")
     }
 
     func testTaskStateRiskyPreflightOverridesPlanning() {
@@ -669,8 +672,8 @@ final class FactoryDesktopCoreTests: XCTestCase {
         ))
     }
 
-    func testTaskStateRecommendsPreflightWhenWorktreeExistsWithoutPreflight() {
-        XCTAssertTaskStateRecommendation(.runPreflight, for: TaskStateRecommendationInput(hasExistingWorktree: true))
+    func testTaskStateDoesNotRequirePreflightBeforeInitialPlanning() {
+        XCTAssertTaskStateRecommendation(.planLocally, for: TaskStateRecommendationInput(hasExistingWorktree: true))
     }
 
     func testTaskStateRecommendsLocalPlanningWhenNoPlanExistsAfterPreflight() {
@@ -730,6 +733,36 @@ final class FactoryDesktopCoreTests: XCTestCase {
             latestPlanDecision: .approve,
             hasApprovedPlan: true
         ))
+    }
+
+    func testTaskStateApprovedPlanWithoutWorktreeRequiresWorktreeJustInTime() {
+        let result = TaskStateRecommendationEvaluator.recommend(TaskStateRecommendationInput(
+            taskType: .coding,
+            hasPreflight: true,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .approve,
+            hasApprovedPlan: true
+        ))
+
+        XCTAssertEqual(result.0, .createWorktree)
+        XCTAssertEqual(
+            result.1,
+            "Implementation is ready, but the next step needs a branch/worktree because it will touch repository state."
+        )
+    }
+
+    func testTaskStateApprovedPlanWithoutWorktreeStillPrefersPreflightBeforeExecution() {
+        let result = TaskStateRecommendationEvaluator.recommend(TaskStateRecommendationInput(
+            taskType: .coding,
+            hasPlan: true,
+            hasPlanReview: true,
+            latestPlanDecision: .approve,
+            hasApprovedPlan: true
+        ))
+
+        XCTAssertEqual(result.0, .runPreflight)
+        XCTAssertEqual(result.1, "Run preflight before starting repo-scoped implementation work.")
     }
 
     func testTaskStateChangesWithoutTestsRecommendsRunTests() {
@@ -2770,6 +2803,47 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(storedTask.status, .approved)
         XCTAssertEqual(storedSession.codexSessionId, "session-123")
         XCTAssertEqual(storedSession.status, .active)
+    }
+
+    @MainActor
+    func testCodeRepoTaskWithoutWorktreeCanStillPlanAndShowsNoGenericWarning() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
+        let task = FactoryTask(id: "task", projectId: project.id, title: "Plan first")
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        let store = AppStore(paths: fixture.paths)
+        store.selectedProjectID = project.id
+        store.selectedTaskID = task.id
+
+        XCTAssertTrue(store.canPlanSelectedTaskLocally)
+        XCTAssertNil(store.selectedTaskWorktreeWarning)
+    }
+
+    @MainActor
+    func testMissingWorktreeReferenceStillShowsWarning() throws {
+        let fixture = try makeRepositoryFixture()
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
+        let missingPath = fixture.root.appendingPathComponent("missing-worktree", isDirectory: true).path
+        let task = FactoryTask(
+            id: "task",
+            projectId: project.id,
+            title: "Missing reference",
+            localBranch: "local/task",
+            localWorktreePath: missingPath
+        )
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        let store = AppStore(paths: fixture.paths)
+        store.selectedProjectID = project.id
+        store.selectedTaskID = task.id
+
+        XCTAssertEqual(
+            store.selectedTaskWorktreeWarning,
+            "Missing Worktree: This task references a worktree path that no longer exists. \(missingPath)"
+        )
     }
 
     @MainActor

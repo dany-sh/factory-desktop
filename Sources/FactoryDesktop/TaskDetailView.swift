@@ -1117,6 +1117,10 @@ struct TaskDetailView: View {
                 }
                 .disabled(store.isWorking || store.selectedTask == nil || selectedCodeWorktreeUnavailable)
             }
+
+            if selectedCodeWorktreeUnavailable {
+                worktreeRequirementNotice("Build, test, and implementation handoff actions need a branch/worktree because they touch repository state or depend on a checked-out repo.")
+            }
         }
     }
 
@@ -1187,6 +1191,10 @@ struct TaskDetailView: View {
                 Text("Commit and merge remain outside this workspace flow.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if selectedCodeWorktreeUnavailable {
+                worktreeRequirementNotice("Diff review becomes available after a task worktree is created for checked-out repository work.")
             }
         }
     }
@@ -1377,6 +1385,12 @@ struct TaskDetailView: View {
                 Task { await store.reviewTaskState() }
             }
         }
+    }
+
+    private func worktreeRequirementNotice(_ text: String) -> some View {
+        Label(text, systemImage: "point.3.connected.trianglepath.dotted")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 
     private func actionPanel<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {

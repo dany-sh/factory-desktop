@@ -247,14 +247,8 @@ public enum TaskStateRecommendationEvaluator {
         if input.status == .done || input.appearsMerged {
             return (.noActionRequired, "Task is complete. No action required.")
         }
-        if input.taskType == .coding && !input.hasExistingWorktree {
-            return (.createWorktree, "No task worktree exists yet.")
-        }
         if input.hasRiskyPreflight {
             return (.inspectPreflightFixGitState, "Canonical repo preflight or live status reported dirty or risky Git state.")
-        }
-        if input.hasExistingWorktree && !input.hasPreflight && !input.hasImplementationChanges {
-            return (.runPreflight, "Task worktree exists but no preflight report has been run yet.")
         }
         if !input.hasPlan {
             return (.planLocally, "No plan exists yet.")
@@ -274,6 +268,20 @@ public enum TaskStateRecommendationEvaluator {
         if !input.hasApprovedPlan, input.latestPlanDecision == .approve {
             return (.approvePlan, "Plan review approved the plan, but the plan has not been marked approved.")
         }
+        if !input.hasImplementationChanges && (!input.hasPreflight || input.hasStalePreflight) {
+            let reason = input.hasStalePreflight
+                ? "Preflight is stale relative to newer implementation or test state."
+                : (input.hasExistingWorktree
+                    ? "Task worktree exists but no preflight report has been run yet."
+                    : "Run preflight before starting repo-scoped implementation work.")
+            return (.runPreflight, reason)
+        }
+        if input.taskType == .coding && !input.hasExistingWorktree {
+            return (
+                .createWorktree,
+                "Implementation is ready, but the next step needs a branch/worktree because it will touch repository state."
+            )
+        }
         if input.hasImplementationChanges && !input.hasTestOutput {
             return (.runTests, "Implementation changes exist but tests have not been run.")
         }
@@ -285,9 +293,6 @@ public enum TaskStateRecommendationEvaluator {
         }
         if input.hasDiffReview && input.hasImplementationChanges {
             return (.investigate, "Diff review exists, but passing test output was not found.")
-        }
-        if input.hasExistingWorktree && (!input.hasPreflight || input.hasStalePreflight) {
-            return (.runPreflight, input.hasStalePreflight ? "Preflight is stale relative to newer implementation or test state." : "Task worktree exists but no preflight report has been run yet.")
         }
         if input.hasApprovedPlan && !input.hasImplementationChanges {
             return (.buildLocally, "Plan is approved and no implementation changes exist yet.")

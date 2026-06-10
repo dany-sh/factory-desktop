@@ -232,8 +232,7 @@ public final class AppStore: ObservableObject {
     }
 
     public var canPlanSelectedTaskLocally: Bool {
-        guard let project = selectedProject, let task = selectedTask else { return false }
-        return project.type != .codeRepo || hasExistingTaskWorktree(task)
+        selectedProject != nil && selectedTask != nil
     }
 
     public var selectedTaskWorktreeWarning: String? {
@@ -244,8 +243,8 @@ public final class AppStore: ObservableObject {
         if let missing = TaskWorktreeDisplayMapper.displays(for: task).first(where: { $0.state == .missingPath }) {
             return "Missing Worktree: This task references a worktree path that no longer exists. \(missing.path ?? "")"
         }
-        guard project.type == .codeRepo, !hasExistingTaskWorktree(task) else { return nil }
-        return "Create a task worktree before planning this code task."
+        guard project.type == .codeRepo else { return nil }
+        return nil
     }
 
     public var editorAssistProviderOptions: [EditorAssistProviderOption] {
@@ -867,7 +866,7 @@ public final class AppStore: ObservableObject {
             let report = await gitService.preflightReport(project: project, tasks: projectTasks)
             var markdown = report.markdown
             if project.type == .codeRepo && !hasExistingTaskWorktree(task) {
-                markdown += "\n## Selected Task Worktree\n\nNo task worktree exists for the selected coding task. Create a task worktree before planning or implementing this task.\n"
+                markdown += "\n## Selected Task Worktree\n\nNo task worktree exists yet. That is fine for shaping, planning, review, and clarification. Create a task worktree only before implementation or checked-out verification that depends on repository state.\n"
             }
             try markdown.write(to: url, atomically: true, encoding: .utf8)
             try repository.insert(artifact: Artifact(
@@ -891,11 +890,6 @@ public final class AppStore: ObservableObject {
             return
         }
         guard await ensureLifecycleGateAllowsStart(project: project, selectedTask: task) else { return }
-        guard project.type != .codeRepo || hasExistingTaskWorktree(task) else {
-            errorMessage = "Create a task worktree before planning this code task."
-            statusMessage = "Create Task Worktree is the next safe action for this code task."
-            return
-        }
         isWorking = true
         defer { isWorking = false }
 
@@ -1330,7 +1324,9 @@ public final class AppStore: ObservableObject {
             } else if let codex = selectedTask?.codexWorktreePath {
                 path = codex
             } else {
-                errorMessage = "Create a task worktree before opening a code project."
+                errorMessage = worktreeRequirementMessage(
+                    for: "opening an isolated implementation environment in VS Code"
+                )
                 return
             }
             guard GitService.pathIsExistingDirectory(path) else {
@@ -2276,7 +2272,7 @@ public final class AppStore: ObservableObject {
             return
         }
         if project.type == .codeRepo, !hasExistingTaskWorktree(task) {
-            statusMessage = "Missing Worktree: create, relink, or repair a task worktree before running \(kind.displayName)."
+            statusMessage = worktreeRequirementMessage(for: "running \(kind.displayName)")
             return
         }
 
@@ -2381,7 +2377,7 @@ public final class AppStore: ObservableObject {
             return
         }
         if project.type == .codeRepo, !hasExistingTaskWorktree(task) {
-            statusMessage = "Missing Worktree: create, relink, or repair a task worktree before reviewing a diff."
+            statusMessage = worktreeRequirementMessage(for: "reviewing a diff")
             return
         }
         isWorking = true
@@ -2516,7 +2512,7 @@ public final class AppStore: ObservableObject {
             return
         }
         guard let path = task.localWorktreePath ?? task.codexWorktreePath else {
-            errorMessage = "Create a task worktree before committing."
+            errorMessage = worktreeRequirementMessage(for: "committing changes")
             return
         }
         guard GitService.pathIsExistingDirectory(path) else {
@@ -4091,6 +4087,10 @@ public final class AppStore: ObservableObject {
             .contains { path in
                 Self.existingDirectory(path)
             }
+    }
+
+    private func worktreeRequirementMessage(for nextStep: String) -> String {
+        "This action needs a branch/worktree because it will touch repository state or depend on a specific checked-out repo. Create, relink, or repair a task worktree before \(nextStep)."
     }
 
     private static func existingDirectory(_ path: String) -> Bool {
