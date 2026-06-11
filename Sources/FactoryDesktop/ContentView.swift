@@ -81,7 +81,7 @@ struct ContentView: View {
             workspaceContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if taskWorkspaceState.inspectorPresented {
+            if taskWorkspaceState.inspectorPresented && taskWorkspaceState.selectedStage != .worker {
                 RightToolsInspectorView()
                     .environmentObject(taskWorkspaceState)
                     .frame(minWidth: 320, idealWidth: 420, maxWidth: 760, maxHeight: .infinity)

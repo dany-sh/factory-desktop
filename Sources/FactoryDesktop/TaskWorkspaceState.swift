@@ -4,7 +4,7 @@ import SwiftUI
 final class TaskWorkspaceState: ObservableObject {
     @Published private(set) var activeTaskID: String?
     @Published private(set) var activeDraftState: TaskDraftState?
-    @Published var selectedStage: TaskWorkspaceStage = .write
+    @Published var selectedStage: TaskWorkspaceStage = .brief
     @Published var showAllArtifacts = false
     @Published var selectionState = TaskEditorSelectionState()
     @Published var inspectorPresented = true
@@ -68,7 +68,7 @@ final class TaskWorkspaceState: ObservableObject {
     func reset() {
         activeTaskID = nil
         activeDraftState = nil
-        selectedStage = .write
+        selectedStage = .brief
         showAllArtifacts = false
         selectionState = TaskEditorSelectionState()
         customInlinePrompt = ""
@@ -101,7 +101,7 @@ final class TaskWorkspaceState: ObservableObject {
             completion?()
         }
 
-        guard selectedStage == .write,
+        guard selectedStage == .brief,
               let requestLatestMarkdown = editorBridge.requestLatestMarkdown else {
             applyStageChange()
             return

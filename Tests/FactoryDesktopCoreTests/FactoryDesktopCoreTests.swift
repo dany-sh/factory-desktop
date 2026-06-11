@@ -379,6 +379,32 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(TaskStatus.storedValue("running"), .building)
     }
 
+    func testTaskWorkspaceStagesMergeWritePlanAndDiffIntoBriefReviewModel() throws {
+        XCTAssertEqual(TaskWorkspaceStage.allCases.map(\.title), [
+            "Brief",
+            "Build & Test",
+            "Worker",
+            "Review",
+            "Artifacts"
+        ])
+        XCTAssertFalse(TaskWorkspaceStage.allCases.map(\.title).contains("Write"))
+        XCTAssertFalse(TaskWorkspaceStage.allCases.map(\.title).contains("Plan & Review"))
+        XCTAssertFalse(TaskWorkspaceStage.allCases.map(\.title).contains("Diff"))
+
+        XCTAssertEqual(TaskWorkspaceStage(rawValue: "write"), .brief)
+        XCTAssertEqual(TaskWorkspaceStage(rawValue: "plan_review"), .brief)
+        XCTAssertEqual(TaskWorkspaceStage(rawValue: "planReview"), .brief)
+        XCTAssertEqual(TaskWorkspaceStage(rawValue: "diff"), .review)
+
+        let decoder = JSONDecoder()
+        XCTAssertEqual(try decoder.decode(TaskWorkspaceStage.self, from: Data(#""write""#.utf8)), .brief)
+        XCTAssertEqual(try decoder.decode(TaskWorkspaceStage.self, from: Data(#""plan_review""#.utf8)), .brief)
+        XCTAssertEqual(try decoder.decode(TaskWorkspaceStage.self, from: Data(#""diff""#.utf8)), .review)
+
+        let encoded = try String(data: JSONEncoder().encode(TaskWorkspaceStage.brief), encoding: .utf8)
+        XCTAssertEqual(encoded, #""brief""#)
+    }
+
     func testTaskStatusIsKanbanReady() {
         XCTAssertEqual(TaskStatus.backlog.sortOrder, 0)
         XCTAssertLessThan(TaskStatus.ready.sortOrder, TaskStatus.testing.sortOrder)

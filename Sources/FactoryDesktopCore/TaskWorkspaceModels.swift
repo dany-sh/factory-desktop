@@ -1,5 +1,77 @@
 import Foundation
 
+public enum TaskWorkspaceStage: CaseIterable, Identifiable, Hashable, Codable {
+    case brief
+    case buildTest
+    case worker
+    case review
+    case artifacts
+
+    public static let allCases: [TaskWorkspaceStage] = [
+        .brief,
+        .buildTest,
+        .worker,
+        .review,
+        .artifacts
+    ]
+
+    public var id: String { rawValue }
+
+    public var rawValue: String {
+        switch self {
+        case .brief: "brief"
+        case .buildTest: "build_test"
+        case .worker: "worker"
+        case .review: "review"
+        case .artifacts: "artifacts"
+        }
+    }
+
+    public init?(rawValue: String) {
+        switch rawValue {
+        case "brief", "write", "plan_review", "planReview":
+            self = .brief
+        case "build_test", "buildTest":
+            self = .buildTest
+        case "worker":
+            self = .worker
+        case "review", "diff":
+            self = .review
+        case "artifacts":
+            self = .artifacts
+        default:
+            return nil
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+        guard let stage = TaskWorkspaceStage(rawValue: rawValue) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unknown task workspace stage: \(rawValue)"
+            )
+        }
+        self = stage
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    public var title: String {
+        switch self {
+        case .brief: "Brief"
+        case .buildTest: "Build & Test"
+        case .worker: "Worker"
+        case .review: "Review"
+        case .artifacts: "Artifacts"
+        }
+    }
+}
+
 public extension FactoryTask {
     mutating func markWorktreeReferenceCleaned(path removedPath: String) -> Bool {
         var changed = false

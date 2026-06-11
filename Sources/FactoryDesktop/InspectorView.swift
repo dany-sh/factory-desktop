@@ -17,13 +17,7 @@ struct RightToolsInspectorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if shouldShowTaskInspector {
-                    aiWorkerSection
-                    aiAssistSection
-                    briefQualitySection
-                    reviewSection
-                    terminalSection
-                    browserSection
-                    filesSection
+                    stageInspectorSections
                 } else {
                     projectPlaceholder
                 }
@@ -58,6 +52,28 @@ struct RightToolsInspectorView: View {
 
     private var selectedEditorAssistProviderIsAvailable: Bool {
         store.editorAssistProviderOptions.first { $0.provider == store.selectedEditorAssistProvider }?.isAvailable == true
+    }
+
+    @ViewBuilder
+    private var stageInspectorSections: some View {
+        switch workspaceState.selectedStage {
+        case .brief:
+            aiAssistSection
+            briefQualitySection
+        case .buildTest:
+            reviewSection
+            terminalSection
+            filesSection
+        case .worker:
+            EmptyView()
+        case .review:
+            reviewSection
+            aiWorkerSection
+            terminalSection
+        case .artifacts:
+            filesSection
+            reviewSection
+        }
     }
 
     private var aiWorkerSection: some View {
@@ -485,7 +501,7 @@ struct RightToolsInspectorView: View {
 
     private func reviewDiffFromInspector() {
         store.showTaskWorkspace()
-        workspaceState.selectStagePreservingDraft(.diff) {
+        workspaceState.selectStagePreservingDraft(.review) {
             Task { await store.refreshGitStatus() }
         }
     }

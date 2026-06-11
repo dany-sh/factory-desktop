@@ -14,7 +14,9 @@ struct TaskDetailView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     workspaceBreadcrumb(task: task)
                     header(task: task)
-                    taskCommandBar(task: task)
+                    if showsGlobalCommandBar {
+                        taskCommandBar(task: task)
+                    }
                     Picker("Stage", selection: stageSelection) {
                         ForEach(TaskWorkspaceStage.allCases) { stage in
                             Text(stage.title).tag(stage)
@@ -108,6 +110,15 @@ struct TaskDetailView: View {
     private var showAllArtifacts: Bool {
         get { workspaceState.showAllArtifacts }
         nonmutating set { workspaceState.showAllArtifacts = newValue }
+    }
+
+    private var showsGlobalCommandBar: Bool {
+        switch selectedStage {
+        case .brief, .worker, .review:
+            return false
+        case .buildTest, .artifacts:
+            return true
+        }
     }
 
     private var editorSelectionText: String {
@@ -321,11 +332,6 @@ struct TaskDetailView: View {
             .disabled(store.isWorking)
         } else if let review = store.latestTaskStateReview {
             primaryActionButton(review.recommendedAction)
-        } else if store.canPlanSelectedTaskLocally {
-            actionButton("Plan Locally", systemImage: "brain", prominent: true) {
-                Task { await store.planLocally() }
-            }
-            .disabled(store.isWorking)
         } else {
             actionButton("Create Task Worktree", systemImage: "point.3.connected.trianglepath.dotted", prominent: true) {
                 Task { await store.createWorktree(flavor: .local) }
@@ -555,7 +561,7 @@ struct TaskDetailView: View {
     }
 
     private func syncEditorStateIfNeeded(_ completion: @escaping () -> Void) {
-        guard selectedStage == .write else {
+        guard selectedStage == .brief else {
             completion()
             return
         }
@@ -572,7 +578,7 @@ struct TaskDetailView: View {
     @ViewBuilder
     private func taskWorkspaceLayout(task: FactoryTask) -> some View {
         Group {
-            if selectedStage == .write || selectedStage == .worker {
+            if selectedStage == .brief || selectedStage == .worker {
                 taskWorkspaceContent(task: task)
             } else {
                 ScrollView {
@@ -589,16 +595,14 @@ struct TaskDetailView: View {
     private func taskWorkspaceContent(task: FactoryTask) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             switch selectedStage {
-            case .write:
-                writeSection(task: task)
-            case .planReview:
-                planReviewSection
+            case .brief:
+                briefSection(task: task)
             case .buildTest:
                 buildTestSection
             case .worker:
                 workerSection(task: task)
-            case .diff:
-                diffSection
+            case .review:
+                reviewSection
             case .artifacts:
                 artifactsSection
             }
@@ -681,13 +685,19 @@ struct TaskDetailView: View {
         store.selectedProject?.type == .codeRepo && !store.selectedTaskCanUseWorktree
     }
 
-    private func writeSection(task: FactoryTask) -> some View {
+    private func briefSection(task: FactoryTask) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             if isTaskDraftReady(for: task) {
                 taskEditorCanvas
             } else {
                 loadingTaskEditorCanvas
             }
+
+            briefPlanningPanel
+            workflowHealthPanel
+            preflightPanel
+            taskStatePanel
+            taskWorktreePanel
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -804,59 +814,89 @@ struct TaskDetailView: View {
         )
     }
 
-    private var workflowBar: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Controlled Workflow")
-                .font(.headline)
-            HStack {
+    private var briefPlanningPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Brief Planning")
+                    .font(.headline)
                 Picker("Planner model", selection: $store.selectedModel) {
                     ForEach(ModelPolicy.recommendedModels) { model in
                         Text("\(model.id) · \(model.role)").tag(model.id)
                     }
                 }
-                .frame(maxWidth: 340)
+                .labelsHidden()
+                .frame(maxWidth: 320)
 
-                Button {
-                    Task { await store.runPreflightCheck() }
-                } label: {
-                    Label("Preflight Check", systemImage: "checklist.checked")
+                Text("Selected provider/model is used for local planning; brief writing actions live in the inspector.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let artifact = store.currentPlanArtifact {
+                HStack {
+                    Text(store.latestApprovedPlanArtifact == nil ? "Current Plan" : "Approved Plan")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    artifactPath(artifact)
                 }
-                .disabled(store.isWorking)
+                primaryMarkdownBox(store.currentPlanText, minHeight: 220)
+            } else {
+                Label("No saved plan yet.", systemImage: "doc.text")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
 
-                Button {
-                    Task { await store.reviewTaskState() }
-                } label: {
-                    Label("Review Task State", systemImage: "list.bullet.clipboard")
+            if !store.latestPlanReviewText.isEmpty {
+                Divider()
+                HStack {
+                    Text("Latest Plan Validation")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text(AppStore.parsePlanReviewDecision(from: store.latestPlanReviewText).rawValue)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(store.latestApprovedPlanArtifact == nil ? .secondary : .tertiary)
                 }
-                .disabled(store.isWorking)
+                if store.latestApprovedPlanArtifact != nil {
+                    Text("Approved plan is the current planning signal; older review decisions are history.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let artifact = store.latestPlanReviewArtifact {
+                    HStack {
+                        Text("Open the full validation in a separate markdown window.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        artifactPath(artifact)
+                    }
+                }
+            }
 
-                Button {
+            Text("Planning Actions")
+                .font(.subheadline.weight(.semibold))
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 10)], alignment: .leading, spacing: 10) {
+                actionButton("Plan with Selected Model", systemImage: "brain", prominent: store.latestTaskStateReview?.recommendedAction == .planLocally) {
                     Task { await store.planLocally() }
-                } label: {
-                    Label("Plan Locally", systemImage: "brain")
                 }
                 .disabled(store.isWorking || !store.canPlanSelectedTaskLocally)
-
-                Button {
+                actionButton("Validate Plan Locally", systemImage: "checklist", prominent: store.latestTaskStateReview?.recommendedAction == .reviewPlanLocally) {
+                    Task { await store.reviewPlanLocally() }
+                }
+                .disabled(store.isWorking || store.latestPlanArtifact == nil)
+                actionButton("Generate Codex Plan Validation", systemImage: "doc.text.magnifyingglass") {
                     store.generateCodexPlanReviewHandoff()
-                } label: {
-                    Label("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass")
+                }
+                .disabled(store.isWorking || store.latestPlanArtifact == nil)
+                actionButton("Approve Plan", systemImage: "hand.thumbsup", prominent: store.latestTaskStateReview?.recommendedAction == .approvePlan) {
+                    store.approvePlan()
                 }
                 .disabled(store.isWorking || store.latestPlanArtifact == nil)
             }
-            Text("Factory v0.1 plans and records. It does not autonomously edit files.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if let warning = store.selectedTaskWorktreeWarning {
-                Text(warning)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.orange)
-            }
         }
         .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 16))
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
         .overlay(
-            RoundedRectangle(cornerRadius: 16)
+            RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator.opacity(0.6))
         )
     }
@@ -898,7 +938,7 @@ struct TaskDetailView: View {
     private var taskStatePanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Task State Review")
+                Text("Brief Readiness")
                     .font(.headline)
                 Spacer()
                 Button {
@@ -929,7 +969,7 @@ struct TaskDetailView: View {
                 HStack(spacing: 16) {
                     InfoChip(label: "Next", value: review.recommendedAction.displayName)
                     InfoChip(label: "Plan", value: review.hasPlan ? "yes" : "no")
-                    InfoChip(label: "Review", value: review.hasPlanReview ? "yes" : "no")
+                    InfoChip(label: "Validation", value: review.hasPlanReview ? "yes" : "no")
                     InfoChip(label: "Preflight", value: review.hasPreflight ? (review.hasRiskyPreflight ? "risk" : "yes") : "no")
                     InfoChip(label: "Tests", value: review.hasTestOutput ? "yes" : "no")
                     InfoChip(label: "Diff", value: review.hasDiffReview ? "yes" : "no")
@@ -937,12 +977,12 @@ struct TaskDetailView: View {
                 Text(review.summary)
                     .foregroundStyle(.secondary)
                 if review.hasPlan && !review.hasPlanReview {
-                    Text("Plan exists but has not been reviewed.")
+                    Text("Plan exists but has not been validated.")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.orange)
                 }
             } else {
-                Text("Review Task State to summarize artifacts, worktrees, preflight, tests, diff review, and the next action.")
+                Text("Review task state to summarize the brief, plan, preflight, worktree readiness, and next action.")
                     .foregroundStyle(.secondary)
             }
 
@@ -957,138 +997,6 @@ struct TaskDetailView: View {
             RoundedRectangle(cornerRadius: 16)
                 .stroke(.separator.opacity(0.6))
         )
-    }
-
-    private var planPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Plan")
-                    .font(.headline)
-                Spacer()
-                if let artifact = store.latestPlanArtifact {
-                    Text(artifact.path)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-
-            if store.latestPlanText.isEmpty {
-                Text("No saved plan yet. Run Plan Locally to create plan.md.")
-                    .foregroundStyle(.secondary)
-            } else {
-                ScrollView {
-                    Text(store.latestPlanText)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding()
-                }
-                .frame(minHeight: 260)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-            }
-
-            if !store.latestPlanReviewText.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Latest Plan Review")
-                        .font(.subheadline.weight(.semibold))
-                    ScrollView {
-                        Text(store.latestPlanReviewText)
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding()
-                    }
-                    .frame(minHeight: 180)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-                }
-            }
-        }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(.separator.opacity(0.6))
-        )
-    }
-
-    private var planReviewSection: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text(store.latestApprovedPlanArtifact == nil ? "Current Plan" : "Approved Plan")
-                        .font(.headline)
-                    Spacer()
-                    if let artifact = store.currentPlanArtifact {
-                        artifactPath(artifact)
-                    }
-                }
-
-                if store.currentPlanText.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("No saved plan yet.")
-                            .foregroundStyle(.secondary)
-                        Text("Current Task Brief")
-                            .font(.subheadline.weight(.semibold))
-                        primaryMarkdownBox(editorDocumentMarkdown, minHeight: 220)
-                    }
-                } else {
-                    primaryMarkdownBox(store.currentPlanText, minHeight: 320)
-                }
-
-                if !store.latestPlanReviewText.isEmpty {
-                    Divider()
-                    HStack {
-                        Text("Latest Plan Review")
-                            .font(.subheadline.weight(.semibold))
-                        Spacer()
-                        Text(AppStore.parsePlanReviewDecision(from: store.latestPlanReviewText).rawValue)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(store.latestApprovedPlanArtifact == nil ? .secondary : .tertiary)
-                    }
-                    if store.latestApprovedPlanArtifact != nil {
-                        Text("Approved plan is the current planning signal; older review decisions are history.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let artifact = store.latestPlanReviewArtifact {
-                        HStack {
-                            Text("Open the full review in a separate markdown window.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            artifactPath(artifact)
-                        }
-                    }
-                }
-            }
-            .padding()
-            .background(.background, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(.separator.opacity(0.6))
-            )
-
-            actionPanel(title: "Plan Actions") {
-                actionButton("Plan Locally", systemImage: "brain", prominent: store.latestTaskStateReview?.recommendedAction == .planLocally) {
-                    Task { await store.planLocally() }
-                }
-                .disabled(store.isWorking || !store.canPlanSelectedTaskLocally)
-                actionButton("Review Plan Locally", systemImage: "checklist", prominent: store.latestTaskStateReview?.recommendedAction == .reviewPlanLocally) {
-                    Task { await store.reviewPlanLocally() }
-                }
-                .disabled(store.isWorking || store.latestPlanArtifact == nil)
-                actionButton("Generate Codex Plan Review Handoff", systemImage: "doc.text.magnifyingglass") {
-                    store.generateCodexPlanReviewHandoff()
-                }
-                .disabled(store.isWorking || store.latestPlanArtifact == nil)
-                actionButton("Approve Plan", systemImage: "hand.thumbsup", prominent: store.latestTaskStateReview?.recommendedAction == .approvePlan) {
-                    store.approvePlan()
-                }
-                .disabled(store.isWorking || store.latestPlanArtifact == nil)
-            }
-        }
     }
 
     private var buildTestSection: some View {
@@ -1173,10 +1081,10 @@ struct TaskDetailView: View {
         }
     }
 
-    private var diffSection: some View {
+    private var reviewSection: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Diff Summary")
+                Text("Review Summary")
                     .font(.headline)
                 HStack(spacing: 12) {
                     InfoChip(label: "Changed", value: "\(store.gitSnapshot.changedFiles.count)")
@@ -1224,7 +1132,76 @@ struct TaskDetailView: View {
                     .stroke(.separator.opacity(0.6))
             )
 
-            actionPanel(title: "Diff Actions") {
+            if let report = store.latestWorkerReport {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Worker Report")
+                            .font(.headline)
+                        Spacer()
+                        InfoChip(label: "Status", value: report.status.displayName)
+                    }
+                    Text(report.summary.isEmpty ? "No worker summary recorded." : report.summary)
+                        .foregroundStyle(report.summary.isEmpty ? .secondary : .primary)
+                    if !report.testsRun.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Checks")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            ForEach(report.testsRun, id: \.self) { test in
+                                Text(test)
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                    if !report.nextRecommendedAction.isEmpty {
+                        InfoChip(label: "Next", value: report.nextRecommendedAction)
+                    }
+                }
+                .padding()
+                .background(.background, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(.separator.opacity(0.6))
+                )
+            }
+
+            if !store.taskProposals.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Proposed Follow-up Tasks")
+                            .font(.headline)
+                        Spacer()
+                        Button {
+                            store.createAllProposedTasks()
+                        } label: {
+                            Label("Create All", systemImage: "plus.square.on.square")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(!store.taskProposals.contains { $0.status == .proposed } || store.isWorking)
+                    }
+                    ForEach(store.taskProposals.prefix(5)) { proposal in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(proposal.title)
+                                .font(.subheadline.weight(.semibold))
+                            Text(proposal.reasonDiscovered)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+                .padding()
+                .background(.background, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(.separator.opacity(0.6))
+                )
+            }
+
+            actionPanel(title: "Review Actions") {
                 actionButton("Review Diff Locally", systemImage: "doc.text.magnifyingglass", prominent: store.latestTaskStateReview?.recommendedAction == .reviewDiff) {
                     Task { await store.reviewDiffLocally() }
                 }
@@ -1243,7 +1220,7 @@ struct TaskDetailView: View {
             }
 
             if selectedCodeWorktreeUnavailable {
-                worktreeRequirementNotice("Diff review becomes available after a task worktree is created for checked-out repository work.")
+                worktreeRequirementNotice("Review becomes available after a task worktree is created for checked-out repository work.")
             }
         }
     }
@@ -1577,7 +1554,7 @@ struct TaskDetailView: View {
     }
 
     private func openWorkerDiff() {
-        workspaceState.selectStagePreservingDraft(.diff) {
+        workspaceState.selectStagePreservingDraft(.review) {
             Task { await store.refreshGitStatus() }
         }
     }
@@ -1600,28 +1577,6 @@ private enum TaskEditorField: Hashable {
     case title
     case brief
     case acceptanceCriteria
-}
-
-enum TaskWorkspaceStage: String, CaseIterable, Identifiable {
-    case write
-    case planReview
-    case buildTest
-    case worker
-    case diff
-    case artifacts
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .write: "Write"
-        case .planReview: "Plan & Review"
-        case .buildTest: "Build & Test"
-        case .worker: "Worker"
-        case .diff: "Diff"
-        case .artifacts: "Artifacts"
-        }
-    }
 }
 
 private struct LabeledTextEditor: View {
