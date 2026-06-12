@@ -330,9 +330,17 @@ private struct LifecycleItemRow: View {
             Text("Branch \(item.branch ?? "unknown") · HEAD \(item.head ?? "unknown") · clean \(item.isClean.map { $0 ? "yes" : "no" } ?? "unknown") · ahead/behind \(item.ahead.map(String.init) ?? "unknown")/\(item.behind.map(String.init) ?? "unknown")")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Text("Stage \(item.resolutionStage.displayName) · automation \(item.automationReadiness.displayName)")
+                .font(.caption)
+                .foregroundStyle(automationColor)
             Text(item.reason)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if !item.automationBlockers.isEmpty {
+                Text(item.automationBlockers.joined(separator: "  "))
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
             if !item.blockedActions.isEmpty {
                 Text(item.blockedActions.map { "\($0.action.displayName): \($0.reason)" }.joined(separator: "  "))
                     .font(.caption2)
@@ -381,6 +389,17 @@ private struct LifecycleItemRow: View {
         }
     }
 
+    private var automationColor: Color {
+        switch item.automationReadiness {
+        case .automaticSafe:
+            .green
+        case .confirmationRequired:
+            .orange
+        case .blocked, .manualOnly:
+            .red
+        }
+    }
+
     private func help(for action: LifecycleSafeAction) -> String {
         switch action {
         case .refreshScan:
@@ -395,6 +414,18 @@ private struct LifecycleItemRow: View {
             return "Stash tracked and untracked worktree changes before refreshing."
         case .createWIPBackupCommit:
             return "Create a WIP commit inside the task worktree so the branch can be updated safely."
+        case .fastForwardMergeToMain:
+            return "Fast-forward the default branch to this reviewed branch."
+        case .pushMain:
+            return "Push the default branch to origin after local checks are clean."
+        case .deleteMergedBranch:
+            return "Delete a local branch whose tip is already reachable from the default branch."
+        case .deleteDuplicateBranch:
+            return "Delete a local branch with no unique patch compared with the default branch."
+        case .removeCleanWorktree:
+            return "Remove a clean non-canonical worktree and clear matching Factory task metadata."
+        case .pruneWorktreeMetadata:
+            return "Run git worktree prune for stale Git metadata."
         default:
             return action.isFoundationOnly ? "Foundation-only action." : action.displayName
         }
@@ -408,6 +439,16 @@ private struct LifecycleItemRow: View {
             return "Factory will run git stash push -u only inside the selected task worktree."
         case .createWIPBackupCommit:
             return "Factory will run git add -A and git commit only inside the selected task worktree."
+        case .fastForwardMergeToMain:
+            return "Factory will fast-forward the canonical repo to \(item.branch ?? "the selected branch")."
+        case .pushMain:
+            return "Factory will push the default branch to origin from the canonical repo."
+        case .deleteMergedBranch, .deleteDuplicateBranch:
+            return "Factory will delete only the local branch \(item.branch ?? "unknown"). Checked-out branches and unmerged branches are blocked by Git and Factory guards."
+        case .removeCleanWorktree:
+            return "Factory will remove only the clean worktree at \(item.path ?? "unknown") and preserve branch history."
+        case .pruneWorktreeMetadata:
+            return "Factory will prune stale Git worktree metadata from the canonical repo."
         default:
             return item.reason
         }
@@ -421,6 +462,16 @@ private struct LifecycleItemRow: View {
             return "Stash"
         case .createWIPBackupCommit:
             return "Commit WIP"
+        case .fastForwardMergeToMain:
+            return "Merge"
+        case .pushMain:
+            return "Push"
+        case .deleteMergedBranch, .deleteDuplicateBranch:
+            return "Delete Branch"
+        case .removeCleanWorktree:
+            return "Remove Worktree"
+        case .pruneWorktreeMetadata:
+            return "Prune"
         default:
             return "Continue"
         }

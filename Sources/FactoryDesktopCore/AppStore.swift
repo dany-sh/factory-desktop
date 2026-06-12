@@ -2889,10 +2889,11 @@ public final class AppStore: ObservableObject {
     }
 
     public func performLifecycleAction(_ action: LifecycleSafeAction, item: LifecycleItem) async {
-        guard let project = selectedProject, var task = selectedTask, let repository, let gitService else {
+        guard let project = selectedProject, let repository, let gitService else {
             errorMessage = FactoryError.missingSelection.localizedDescription
             return
         }
+        var task = selectedTask
 
         isWorking = true
         defer { isWorking = false }
@@ -2912,50 +2913,129 @@ public final class AppStore: ObservableObject {
                 selectedRunOutput = result.output
                 completionStatusMessage = "Diff preview refreshed."
             case .createWIPBackupCommit:
-                guard let flavor = worktreeFlavor(for: task, item: item), let path = item.path else {
+                guard let selectedTask = task,
+                      let flavor = worktreeFlavor(for: selectedTask, item: item),
+                      let path = item.path else {
                     errorMessage = "This lifecycle item is not linked to the selected task worktree."
                     return
                 }
                 let result = try await gitService.commitAll(path: path, defaultBranch: project.defaultBranch, message: "WIP backup before refresh")
                 selectedRunOutput = result.output
-                task.setBaseBranchCommit(await gitService.defaultBranchHead(project: project), for: flavor)
-                try repository.upsert(task: task)
+                task = selectedTask
+                task?.setBaseBranchCommit(await gitService.defaultBranchHead(project: project), for: flavor)
+                if let task {
+                    try repository.upsert(task: task)
+                }
                 completionStatusMessage = "WIP commit created."
             case .stashWorktreeChanges:
-                guard let flavor = worktreeFlavor(for: task, item: item) else {
+                guard let selectedTask = task,
+                      let flavor = worktreeFlavor(for: selectedTask, item: item) else {
                     errorMessage = "This lifecycle item is not linked to the selected task worktree."
                     return
                 }
-                let result = try await gitService.stashTaskWorktreeChanges(project: project, task: task, flavor: flavor)
+                let result = try await gitService.stashTaskWorktreeChanges(project: project, task: selectedTask, flavor: flavor)
                 selectedRunOutput = result.output
                 completionStatusMessage = "Stashed local worktree changes."
             case .refreshFromMain:
-                guard let flavor = worktreeFlavor(for: task, item: item) else {
+                guard let selectedTask = task,
+                      let flavor = worktreeFlavor(for: selectedTask, item: item) else {
                     errorMessage = "This lifecycle item is not linked to the selected task worktree."
                     return
                 }
-                let assessment = try await gitService.refreshTaskWorktreeFromMain(project: project, task: task, flavor: flavor)
-                task.setBaseBranchCommit(assessment.defaultHead, for: flavor)
-                try repository.upsert(task: task)
+                let assessment = try await gitService.refreshTaskWorktreeFromMain(project: project, task: selectedTask, flavor: flavor)
+                task = selectedTask
+                task?.setBaseBranchCommit(assessment.defaultHead, for: flavor)
+                if let task {
+                    try repository.upsert(task: task)
+                }
                 completionStatusMessage = "Refreshed task worktree from \(project.defaultBranch)."
             case .rebaseOntoMain:
-                guard let flavor = worktreeFlavor(for: task, item: item) else {
+                guard let selectedTask = task,
+                      let flavor = worktreeFlavor(for: selectedTask, item: item) else {
                     errorMessage = "This lifecycle item is not linked to the selected task worktree."
                     return
                 }
-                let assessment = try await gitService.rebaseTaskWorktreeOntoDefault(project: project, task: task, flavor: flavor)
-                task.setBaseBranchCommit(assessment.defaultHead, for: flavor)
-                try repository.upsert(task: task)
+                let assessment = try await gitService.rebaseTaskWorktreeOntoDefault(project: project, task: selectedTask, flavor: flavor)
+                task = selectedTask
+                task?.setBaseBranchCommit(assessment.defaultHead, for: flavor)
+                if let task {
+                    try repository.upsert(task: task)
+                }
                 completionStatusMessage = "Rebased task worktree onto \(project.defaultBranch)."
-            case .fastForwardMergeToMain, .pushMain, .deleteMergedBranch, .deleteDuplicateBranch,
-                 .removeCleanWorktree, .pruneWorktreeMetadata, .archiveOldArtifacts,
-                 .deleteOldArtifacts, .keepProtectBackupBranch:
+            case .fastForwardMergeToMain:
+                guard let request = gitService.lifecycleActionCommand(action, project: project, item: item) else {
+                    errorMessage = "No merge command is available for this item."
+                    return
+                }
+                let result = try await commandRunner.run(request)
+                selectedRunOutput = result.output
+                completionStatusMessage = "Fast-forward merge completed."
+            case .pushMain:
+                let result = try await gitService.pushDefaultBranch(project: project)
+                selectedRunOutput = result.output
+                completionStatusMessage = "Pushed \(project.defaultBranch) to origin."
+            case .deleteMergedBranch, .deleteDuplicateBranch:
+                guard let branch = item.branch else {
+                    errorMessage = "No branch is linked to this lifecycle item."
+                    return
+                }
+                let result = try await gitService.deleteLocalBranch(project: project, branch: branch)
+                selectedRunOutput = result.output
+                completionStatusMessage = "Deleted local branch \(branch)."
+            case .removeCleanWorktree:
+                guard let path = item.path else {
+                    errorMessage = "No worktree path is linked to this lifecycle item."
+                    return
+                }
+                func pathVariants(_ value: String) -> Set<String> {
+                    let url = URL(fileURLWithPath: value)
+                    let standardized = url.standardizedFileURL.path
+                    let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
+                    var variants: Set<String> = [value, standardized, resolved]
+                    for variant in Array(variants) {
+                        if variant.hasPrefix("/private/var/") {
+                            variants.insert("/var/" + String(variant.dropFirst("/private/var/".count)))
+                        } else if variant.hasPrefix("/var/") {
+                            variants.insert("/private/var/" + String(variant.dropFirst("/var/".count)))
+                        }
+                    }
+                    return variants
+                }
+                let removedPathVariants = pathVariants(path)
+                let result = try await gitService.removeCleanWorktree(project: project, path: path)
+                selectedRunOutput = result.output
+                if var linkedTask = try repository.tasks(projectId: project.id).first(where: { task in
+                    task.localWorktreePath.map { !pathVariants($0).isDisjoint(with: removedPathVariants) } == true ||
+                        task.codexWorktreePath.map { !pathVariants($0).isDisjoint(with: removedPathVariants) } == true
+                }) {
+                    if linkedTask.localWorktreePath.map({ !pathVariants($0).isDisjoint(with: removedPathVariants) }) == true {
+                        linkedTask.localWorktreePath = nil
+                    }
+                    if linkedTask.codexWorktreePath.map({ !pathVariants($0).isDisjoint(with: removedPathVariants) }) == true {
+                        linkedTask.codexWorktreePath = nil
+                    }
+                    linkedTask.updatedAt = Date()
+                    try repository.upsert(task: linkedTask)
+                    if task?.id == linkedTask.id {
+                        task = linkedTask
+                    }
+                }
+                completionStatusMessage = "Removed clean worktree."
+            case .pruneWorktreeMetadata:
+                let result = try await gitService.pruneWorktreeMetadata(project: project)
+                selectedRunOutput = result.output
+                completionStatusMessage = "Pruned stale Git worktree metadata."
+            case .archiveOldArtifacts, .deleteOldArtifacts:
                 errorMessage = "\(action.displayName) is not wired yet."
                 return
+            case .keepProtectBackupBranch:
+                completionStatusMessage = "Backup branch kept. No changes made."
             }
 
             try reload()
-            selectedTaskID = task.id
+            if let task {
+                selectedTaskID = task.id
+            }
             await refreshGitStatus()
             await refreshLifecycleScan()
             if let completionStatusMessage {

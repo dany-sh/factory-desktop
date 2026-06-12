@@ -934,6 +934,67 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(item.behind, 4)
     }
 
+    func testLifecycleClassifierCombinesBranchAndDirtyCheckedOutWorktree() {
+        let branch = GitBranchRecord(
+            name: "local/task",
+            head: "abc1234",
+            aheadOfDefault: 0,
+            behindDefault: 7,
+            hasUniqueCommits: false,
+            isActiveFactoryBranch: true
+        )
+        let worktree = GitWorktreeRecord(
+            path: "/tmp/local-task",
+            head: "abc1234",
+            branch: "local/task",
+            isClean: false
+        )
+
+        let item = LifecycleClassifier.classifyBranch(
+            branch,
+            defaultBranch: "main",
+            checkedOutBranches: ["local/task"],
+            checkedOutWorktrees: ["local/task": worktree]
+        )
+
+        XCTAssertEqual(item.classification, LifecycleClassification.dirtyRisk)
+        XCTAssertEqual(item.resolutionStage, .protectChanges)
+        XCTAssertEqual(item.automationReadiness, .blocked)
+        XCTAssertEqual(item.allowedActions, [.inspectDiff, .stashWorktreeChanges, .createWIPBackupCommit])
+        XCTAssertTrue(item.blockedActions.contains { $0.action == .refreshFromMain })
+        XCTAssertEqual(item.path, "/tmp/local-task")
+    }
+
+    func testLifecycleClassifierRemovesCleanCheckoutBeforeDeletingMergedBranch() {
+        let branch = GitBranchRecord(
+            name: "local/task",
+            head: "abc1234",
+            isMergedToDefault: true,
+            hasUniqueCommits: false,
+            isActiveFactoryBranch: true
+        )
+        let worktree = GitWorktreeRecord(
+            path: "/tmp/local-task",
+            head: "abc1234",
+            branch: "local/task",
+            isClean: true
+        )
+
+        let item = LifecycleClassifier.classifyBranch(
+            branch,
+            defaultBranch: "main",
+            checkedOutBranches: ["local/task"],
+            checkedOutWorktrees: ["local/task": worktree]
+        )
+
+        XCTAssertEqual(item.classification, .alreadyMerged)
+        XCTAssertEqual(item.recommendation, .removeCleanWorktree)
+        XCTAssertEqual(item.resolutionStage, .removeWorktree)
+        XCTAssertEqual(item.automationReadiness, .confirmationRequired)
+        XCTAssertEqual(item.allowedActions, [.inspectDiff, .removeCleanWorktree])
+        XCTAssertTrue(item.blockedActions.contains { $0.action == .deleteMergedBranch })
+    }
+
     func testLifecycleGateSkipsTargetBranchBlockersForExistingTaskWorkspace() {
         let project = Project(id: "project", name: "Demo", type: .codeRepo, path: "/tmp/demo", defaultBranch: "main")
         let task = FactoryTask(
@@ -2185,6 +2246,43 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(storedTask.localBaseBranchCommit, mainHead)
         XCTAssertNil(fixture.store.errorMessage)
         XCTAssertTrue(fixture.store.statusMessage.contains("Refreshed task worktree"))
+    }
+
+    @MainActor
+    func testLifecycleActionsRemoveCleanWorktreeThenDeleteMergedBranch() async throws {
+        let fixture = try makeLifecycleSyncFixture(
+            projectType: .codeRepo,
+            taskStatus: .done,
+            gitScenario: .mergedCleanLocalBranch
+        )
+
+        fixture.store.selectProject(fixture.project.id)
+        fixture.store.selectTask(fixture.task.id)
+        await fixture.store.refreshLifecycleScan()
+
+        let removeItem = try XCTUnwrap(fixture.store.latestLifecycleReport?.lifecycleItems.first {
+            $0.kind == .branch && $0.branch == "local/task"
+        })
+        XCTAssertEqual(removeItem.recommendation, .removeCleanWorktree)
+
+        await fixture.store.performLifecycleAction(.removeCleanWorktree, item: removeItem)
+
+        XCTAssertNil(fixture.store.errorMessage)
+        let storedTask = try XCTUnwrap(fixture.repository.tasks(projectId: fixture.project.id).first { $0.id == fixture.task.id })
+        XCTAssertNil(storedTask.localWorktreePath)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("local-worktree").path))
+
+        let deleteItem = try XCTUnwrap(fixture.store.latestLifecycleReport?.lifecycleItems.first {
+            $0.kind == .branch && $0.branch == "local/task"
+        })
+        XCTAssertEqual(deleteItem.recommendation, .deleteMergedBranch)
+        XCTAssertTrue(deleteItem.allowedActions.contains(.deleteMergedBranch))
+
+        await fixture.store.performLifecycleAction(.deleteMergedBranch, item: deleteItem)
+
+        let repoURL = URL(fileURLWithPath: fixture.project.path)
+        XCTAssertThrowsError(try runGitOutput(["rev-parse", "--verify", "local/task"], in: repoURL))
+        XCTAssertNil(fixture.store.errorMessage)
     }
 
     @MainActor

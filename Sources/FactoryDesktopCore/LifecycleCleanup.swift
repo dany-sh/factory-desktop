@@ -105,6 +105,7 @@ public enum LifecycleRecommendedAction: String, CaseIterable, Codable, Identifia
     case rebaseOntoMain = "rebase_onto_main"
     case mergeFastForward = "merge_fast_forward"
     case pushMain = "push_main"
+    case deleteMergedBranch = "delete_merged_branch"
     case deleteDuplicateBranch = "delete_duplicate_branch"
     case removeCleanWorktree = "remove_clean_worktree"
     case archiveArtifacts = "archive_artifacts"
@@ -122,6 +123,7 @@ public enum LifecycleRecommendedAction: String, CaseIterable, Codable, Identifia
         case .rebaseOntoMain: "Rebase onto Main"
         case .mergeFastForward: "Merge Fast Forward"
         case .pushMain: "Push Main"
+        case .deleteMergedBranch: "Delete Merged Branch"
         case .deleteDuplicateBranch: "Delete Duplicate Branch"
         case .removeCleanWorktree: "Remove Clean Worktree"
         case .archiveArtifacts: "Archive Artifacts"
@@ -188,6 +190,54 @@ public enum LifecycleSafeAction: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+public enum LifecycleResolutionStage: String, CaseIterable, Codable, Identifiable {
+    case continueWork = "continue_work"
+    case protectChanges = "protect_changes"
+    case updateFromDefault = "update_from_default"
+    case reviewAndMerge = "review_and_merge"
+    case publishDefault = "publish_default"
+    case removeWorktree = "remove_worktree"
+    case deleteBranch = "delete_branch"
+    case repairMetadata = "repair_metadata"
+    case done
+    case manualReview = "manual_review"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .continueWork: "Continue Work"
+        case .protectChanges: "Protect Changes"
+        case .updateFromDefault: "Update From Default"
+        case .reviewAndMerge: "Review And Merge"
+        case .publishDefault: "Publish Default"
+        case .removeWorktree: "Remove Worktree"
+        case .deleteBranch: "Delete Branch"
+        case .repairMetadata: "Repair Metadata"
+        case .done: "Done"
+        case .manualReview: "Manual Review"
+        }
+    }
+}
+
+public enum LifecycleAutomationReadiness: String, CaseIterable, Codable, Identifiable {
+    case automaticSafe = "automatic_safe"
+    case confirmationRequired = "confirmation_required"
+    case blocked
+    case manualOnly = "manual_only"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .automaticSafe: "Automation Safe"
+        case .confirmationRequired: "Needs Confirmation"
+        case .blocked: "Blocked"
+        case .manualOnly: "Manual Only"
+        }
+    }
+}
+
 public struct LifecycleBlockedAction: Equatable, Codable, Identifiable {
     public var id: String { "\(action.rawValue)-\(reason)" }
     public var action: LifecycleSafeAction
@@ -223,6 +273,9 @@ public struct LifecycleItem: Equatable, Codable, Identifiable {
     public var recommendation: LifecycleRecommendedAction
     public var allowedActions: [LifecycleSafeAction]
     public var blockedActions: [LifecycleBlockedAction]
+    public var resolutionStage: LifecycleResolutionStage
+    public var automationReadiness: LifecycleAutomationReadiness
+    public var automationBlockers: [String]
 
     public init(
         id: String,
@@ -239,7 +292,10 @@ public struct LifecycleItem: Equatable, Codable, Identifiable {
         reason: String,
         recommendation: LifecycleRecommendedAction,
         allowedActions: [LifecycleSafeAction],
-        blockedActions: [LifecycleBlockedAction] = []
+        blockedActions: [LifecycleBlockedAction] = [],
+        resolutionStage: LifecycleResolutionStage? = nil,
+        automationReadiness: LifecycleAutomationReadiness? = nil,
+        automationBlockers: [String] = []
     ) {
         self.id = id
         self.kind = kind
@@ -256,6 +312,52 @@ public struct LifecycleItem: Equatable, Codable, Identifiable {
         self.recommendation = recommendation
         self.allowedActions = allowedActions
         self.blockedActions = blockedActions
+        self.resolutionStage = resolutionStage ?? Self.defaultResolutionStage(recommendation: recommendation)
+        self.automationReadiness = automationReadiness ?? Self.defaultAutomationReadiness(
+            allowedActions: allowedActions,
+            blockedActions: blockedActions
+        )
+        self.automationBlockers = automationBlockers
+    }
+
+    private static func defaultResolutionStage(recommendation: LifecycleRecommendedAction) -> LifecycleResolutionStage {
+        switch recommendation {
+        case .continueWork, .runTests:
+            return .continueWork
+        case .reviewDiff:
+            return .reviewAndMerge
+        case .createBackup:
+            return .protectChanges
+        case .refreshFromMain, .rebaseOntoMain:
+            return .updateFromDefault
+        case .mergeFastForward:
+            return .reviewAndMerge
+        case .pushMain:
+            return .publishDefault
+        case .deleteMergedBranch:
+            return .deleteBranch
+        case .deleteDuplicateBranch:
+            return .deleteBranch
+        case .removeCleanWorktree:
+            return .removeWorktree
+        case .archiveArtifacts:
+            return .done
+        case .manualReviewRequired:
+            return .manualReview
+        }
+    }
+
+    private static func defaultAutomationReadiness(
+        allowedActions: [LifecycleSafeAction],
+        blockedActions: [LifecycleBlockedAction]
+    ) -> LifecycleAutomationReadiness {
+        if !blockedActions.isEmpty {
+            return .blocked
+        }
+        if allowedActions.contains(where: \.requiresConfirmation) {
+            return .confirmationRequired
+        }
+        return .automaticSafe
     }
 }
 
@@ -626,7 +728,8 @@ public enum LifecycleClassifier {
     public static func classifyBranch(
         _ branch: GitBranchRecord,
         defaultBranch: String,
-        checkedOutBranches: Set<String>
+        checkedOutBranches: Set<String>,
+        checkedOutWorktrees: [String: GitWorktreeRecord] = [:]
     ) -> LifecycleItem {
         if branch.name == defaultBranch {
             if (branch.aheadOfOrigin ?? 0) > 0 {
@@ -680,6 +783,34 @@ public enum LifecycleClassifier {
             )
         }
 
+        if let dirtyCheckout = checkedOutWorktrees[branch.name], dirtyCheckout.isClean == false {
+            return LifecycleItem(
+                id: "branch-\(branch.name)",
+                kind: .branch,
+                label: branch.name,
+                path: dirtyCheckout.path,
+                branch: branch.name,
+                head: branch.head ?? dirtyCheckout.head,
+                isClean: false,
+                ahead: branch.aheadOfDefault ?? branch.aheadOfOrigin,
+                behind: branch.behindDefault ?? branch.behindOrigin,
+                classification: .dirtyRisk,
+                state: .dirtyRisk,
+                reason: "Branch is checked out in a dirty worktree. Review, stash, or create a WIP backup before refresh, deletion, or merge.",
+                recommendation: .reviewDiff,
+                allowedActions: [.inspectDiff, .stashWorktreeChanges, .createWIPBackupCommit],
+                blockedActions: [
+                    LifecycleBlockedAction(action: .refreshFromMain, reason: "Worktree has uncommitted changes."),
+                    LifecycleBlockedAction(action: .deleteMergedBranch, reason: "Branch is checked out in a dirty worktree."),
+                    LifecycleBlockedAction(action: .deleteDuplicateBranch, reason: "Branch is checked out in a dirty worktree."),
+                    LifecycleBlockedAction(action: .removeCleanWorktree, reason: "Factory never removes dirty worktrees.")
+                ],
+                resolutionStage: .protectChanges,
+                automationReadiness: .blocked,
+                automationBlockers: ["Dirty worktree at \(dirtyCheckout.path)"]
+            )
+        }
+
         if (branch.aheadOfOrigin ?? 0) > 0 {
             return LifecycleItem(
                 id: "branch-\(branch.name)",
@@ -698,7 +829,28 @@ public enum LifecycleClassifier {
             )
         }
 
-        if branch.isDuplicateEquivalent {
+        if branch.isDuplicateEquivalent && !branch.isMergedToDefault {
+            if let checkout = checkedOutWorktrees[branch.name] {
+                return LifecycleItem(
+                    id: "branch-\(branch.name)",
+                    kind: .branch,
+                    label: branch.name,
+                    path: checkout.path,
+                    branch: branch.name,
+                    head: branch.head ?? checkout.head,
+                    isClean: checkout.isClean,
+                    ahead: branch.aheadOfDefault ?? branch.aheadOfOrigin,
+                    behind: branch.behindDefault ?? branch.behindOrigin,
+                    classification: .duplicateEquivalent,
+                    state: .duplicateEquivalent,
+                    reason: "Branch has no unique patch compared with \(defaultBranch), but it is still checked out in a worktree. Remove the clean worktree before deleting the branch.",
+                    recommendation: .removeCleanWorktree,
+                    allowedActions: [.inspectDiff, .removeCleanWorktree],
+                    blockedActions: [LifecycleBlockedAction(action: .deleteDuplicateBranch, reason: "Git cannot delete a branch while it is checked out in a worktree.")],
+                    resolutionStage: .removeWorktree,
+                    automationReadiness: .confirmationRequired
+                )
+            }
             return LifecycleItem(
                 id: "branch-\(branch.name)",
                 kind: .branch,
@@ -717,6 +869,27 @@ public enum LifecycleClassifier {
         }
 
         if branch.isMergedToDefault {
+            if let checkout = checkedOutWorktrees[branch.name] {
+                return LifecycleItem(
+                    id: "branch-\(branch.name)",
+                    kind: .branch,
+                    label: branch.name,
+                    path: checkout.path,
+                    branch: branch.name,
+                    head: branch.head ?? checkout.head,
+                    isClean: checkout.isClean,
+                    ahead: branch.aheadOfDefault ?? branch.aheadOfOrigin,
+                    behind: branch.behindDefault ?? branch.behindOrigin,
+                    classification: .alreadyMerged,
+                    state: .merged,
+                    reason: "Branch tip is already reachable from \(defaultBranch), but the branch is still checked out in a worktree. Remove the clean worktree before deleting the branch.",
+                    recommendation: .removeCleanWorktree,
+                    allowedActions: [.inspectDiff, .removeCleanWorktree],
+                    blockedActions: [LifecycleBlockedAction(action: .deleteMergedBranch, reason: "Git cannot delete a branch while it is checked out in a worktree.")],
+                    resolutionStage: .removeWorktree,
+                    automationReadiness: .confirmationRequired
+                )
+            }
             return LifecycleItem(
                 id: "branch-\(branch.name)",
                 kind: .branch,
@@ -728,8 +901,10 @@ public enum LifecycleClassifier {
                 classification: .alreadyMerged,
                 state: .merged,
                 reason: "Branch tip is already reachable from \(defaultBranch).",
-                recommendation: .removeCleanWorktree,
-                allowedActions: [.inspectDiff, .deleteMergedBranch]
+                recommendation: .deleteMergedBranch,
+                allowedActions: [.inspectDiff, .deleteMergedBranch],
+                resolutionStage: .deleteBranch,
+                automationReadiness: .confirmationRequired
             )
         }
 
@@ -748,7 +923,9 @@ public enum LifecycleClassifier {
                     state: .outdated,
                     reason: "Branch is \(behindDefault) commit(s) behind \(defaultBranch) with no unique task commits. Refresh from Main is safe.",
                     recommendation: .refreshFromMain,
-                    allowedActions: [.inspectDiff, .refreshFromMain]
+                    allowedActions: [.inspectDiff, .refreshFromMain],
+                    resolutionStage: .updateFromDefault,
+                    automationReadiness: checkedOutWorktrees[branch.name] == nil ? .manualOnly : .confirmationRequired
                 )
             }
 

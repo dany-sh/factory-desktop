@@ -276,8 +276,19 @@ public final class GitService {
             branches.append(branch)
         }
 
+        let checkedOutWorktrees = Dictionary(
+            uniqueKeysWithValues: worktrees.compactMap { worktree -> (String, GitWorktreeRecord)? in
+                guard let branch = worktree.branch else { return nil }
+                return (branch, worktree)
+            }
+        )
         let branchItems = branches.map {
-            LifecycleClassifier.classifyBranch($0, defaultBranch: project.defaultBranch, checkedOutBranches: checkedOutBranches)
+            LifecycleClassifier.classifyBranch(
+                $0,
+                defaultBranch: project.defaultBranch,
+                checkedOutBranches: checkedOutBranches,
+                checkedOutWorktrees: checkedOutWorktrees
+            )
         }
         let worktreeItems = worktrees.map {
             LifecycleClassifier.classifyWorktree($0, defaultBranch: project.defaultBranch)
@@ -686,6 +697,94 @@ public final class GitService {
                 executable: "git",
                 arguments: ["stash", "push", "-u", "-m", "Factory stash before refresh"],
                 workingDirectory: URL(fileURLWithPath: path),
+                manuallyApproved: true
+            )
+        )
+        guard result.succeeded else {
+            throw FactoryError.commandFailed(result.output)
+        }
+        return result
+    }
+
+    public func pushDefaultBranch(project: Project) async throws -> CommandResult {
+        let directory = URL(fileURLWithPath: project.path)
+        let branch = await gitValue(["branch", "--show-current"], in: directory)
+        guard branch == project.defaultBranch else {
+            throw FactoryError.commandFailed("Canonical repo is on \(branch ?? "unknown"), expected \(project.defaultBranch).")
+        }
+        guard await worktreeCleanState(path: project.path) == true else {
+            throw FactoryError.commandFailed("Canonical repo has uncommitted changes. Push is blocked until the repo is clean.")
+        }
+        let result = try await commandRunner.run(
+            CommandRequest(
+                executable: "git",
+                arguments: ["push", "origin", project.defaultBranch],
+                workingDirectory: directory,
+                manuallyApproved: true
+            )
+        )
+        guard result.succeeded else {
+            throw FactoryError.commandFailed(result.output)
+        }
+        return result
+    }
+
+    public func deleteLocalBranch(project: Project, branch: String) async throws -> CommandResult {
+        guard branch != project.defaultBranch else {
+            throw FactoryError.unsafeMainBranch(branch)
+        }
+        let directory = URL(fileURLWithPath: project.path)
+        let worktreeOutput = await gitOutput(["worktree", "list", "--porcelain"], in: directory) ?? ""
+        let worktrees = LifecycleParser.parseWorktreePorcelain(worktreeOutput)
+        if let checkoutPath = worktrees.first(where: { $0.branch == branch })?.path {
+            throw FactoryError.commandFailed("Branch \(branch) is checked out at \(checkoutPath). Remove that clean worktree first.")
+        }
+        let result = try await commandRunner.run(
+            CommandRequest(
+                executable: "git",
+                arguments: ["branch", "-d", branch],
+                workingDirectory: directory,
+                manuallyApproved: true
+            )
+        )
+        guard result.succeeded else {
+            throw FactoryError.commandFailed(result.output)
+        }
+        return result
+    }
+
+    public func removeCleanWorktree(project: Project, path: String) async throws -> CommandResult {
+        let canonicalPath = URL(fileURLWithPath: project.path).resolvingSymlinksInPath().standardizedFileURL.path
+        let worktreePath = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+        guard worktreePath != canonicalPath else {
+            throw FactoryError.commandFailed("Factory never removes the canonical repo worktree.")
+        }
+        guard Self.pathIsExistingDirectory(worktreePath) else {
+            throw FactoryError.missingWorktreePath(worktreePath)
+        }
+        guard await worktreeCleanState(path: worktreePath) == true else {
+            throw FactoryError.commandFailed("Worktree has local changes. Review or back them up before removal.")
+        }
+        let result = try await commandRunner.run(
+            CommandRequest(
+                executable: "git",
+                arguments: ["worktree", "remove", worktreePath],
+                workingDirectory: URL(fileURLWithPath: project.path),
+                manuallyApproved: true
+            )
+        )
+        guard result.succeeded else {
+            throw FactoryError.commandFailed(result.output)
+        }
+        return result
+    }
+
+    public func pruneWorktreeMetadata(project: Project) async throws -> CommandResult {
+        let result = try await commandRunner.run(
+            CommandRequest(
+                executable: "git",
+                arguments: ["worktree", "prune"],
+                workingDirectory: URL(fileURLWithPath: project.path),
                 manuallyApproved: true
             )
         )
