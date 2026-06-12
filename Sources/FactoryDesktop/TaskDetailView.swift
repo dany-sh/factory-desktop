@@ -11,22 +11,25 @@ struct TaskDetailView: View {
     var body: some View {
         Group {
             if let task = store.selectedTask {
-                VStack(alignment: .leading, spacing: 18) {
-                    workspaceBreadcrumb(task: task)
-                    header(task: task)
-                    if showsGlobalCommandBar {
-                        taskCommandBar(task: task)
-                    }
-                    Picker("Stage", selection: stageSelection) {
-                        ForEach(TaskWorkspaceStage.allCases) { stage in
-                            Text(stage.title).tag(stage)
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        workspaceBreadcrumb(task: task)
+                        header(task: task)
+                        if showsGlobalCommandBar {
+                            taskCommandBar(task: task)
                         }
+                        Picker("Stage", selection: stageSelection) {
+                            ForEach(TaskWorkspaceStage.allCases) { stage in
+                                Text(stage.title).tag(stage)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        taskWorkspaceLayout(task: task)
                     }
-                    .pickerStyle(.segmented)
-                    taskWorkspaceLayout(task: task)
+                    .padding(24)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .scrollIndicators(.visible)
                 .safeAreaInset(edge: .bottom) {
                     HStack {
                         Button("Save Task") {
