@@ -11,25 +11,17 @@ struct TaskDetailView: View {
     var body: some View {
         Group {
             if let task = store.selectedTask {
-                ScrollView(.vertical, showsIndicators: true) {
-                    VStack(alignment: .leading, spacing: 18) {
-                        workspaceBreadcrumb(task: task)
-                        header(task: task)
-                        if showsGlobalCommandBar {
-                            taskCommandBar(task: task)
+                Group {
+                    if selectedStage == .worker {
+                        taskWorkspaceScaffold(task: task)
+                    } else {
+                        ScrollView(.vertical, showsIndicators: true) {
+                            taskWorkspaceScaffold(task: task)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
                         }
-                        Picker("Stage", selection: stageSelection) {
-                            ForEach(TaskWorkspaceStage.allCases) { stage in
-                                Text(stage.title).tag(stage)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        taskWorkspaceLayout(task: task)
+                        .scrollIndicators(.visible)
                     }
-                    .padding(24)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .scrollIndicators(.visible)
                 .safeAreaInset(edge: .bottom) {
                     HStack {
                         Button("Save Task") {
@@ -89,6 +81,24 @@ struct TaskDetailView: View {
                 }
             }
         }
+    }
+
+    private func taskWorkspaceScaffold(task: FactoryTask) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            workspaceBreadcrumb(task: task)
+            header(task: task)
+            if showsGlobalCommandBar {
+                taskCommandBar(task: task)
+            }
+            Picker("Stage", selection: stageSelection) {
+                ForEach(TaskWorkspaceStage.allCases) { stage in
+                    Text(stage.title).tag(stage)
+                }
+            }
+            .pickerStyle(.segmented)
+            taskWorkspaceLayout(task: task)
+        }
+        .padding(24)
     }
 
     private var draft: TaskDraft {
