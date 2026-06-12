@@ -1161,6 +1161,16 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(result.1, "Plan exists but has not been reviewed.")
     }
 
+    func testTaskStatePlanExistsWithoutReviewCanStayWorktreeOptional() {
+        let result = TaskStateRecommendationEvaluator.recommend(TaskStateRecommendationInput(
+            hasPreflight: true,
+            hasPlan: true
+        ))
+
+        XCTAssertEqual(result.0, .reviewPlanLocally)
+        XCTAssertEqual(result.1, "Plan exists but has not been reviewed.")
+    }
+
     func testTaskStateReviewReviseRecommendsRevisePlan() {
         XCTAssertTaskStateRecommendation(.revisePlan, for: TaskStateRecommendationInput(
             hasExistingWorktree: true,
@@ -1215,7 +1225,7 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(result.0, .createWorktree)
         XCTAssertEqual(
             result.1,
-            "Implementation is ready, but the next step needs a branch/worktree because it will touch repository state."
+            "Planning and review are complete. Create a task worktree now because the next intended step is checked-out repo work such as editing files, running isolated verification, or reviewing a checked-out diff."
         )
     }
 
@@ -1229,7 +1239,10 @@ final class FactoryDesktopCoreTests: XCTestCase {
         ))
 
         XCTAssertEqual(result.0, .runPreflight)
-        XCTAssertEqual(result.1, "Run preflight before starting repo-scoped implementation work.")
+        XCTAssertEqual(
+            result.1,
+            "Run preflight before the first concrete repo-scoped step. Planning, review, and clarification can stay worktree-optional."
+        )
     }
 
     func testTaskStateChangesWithoutTestsRecommendsRunTests() {
@@ -3984,6 +3997,55 @@ final class FactoryDesktopCoreTests: XCTestCase {
         XCTAssertEqual(store.errorMessage, "Scope this task until readiness is executable before dispatch.")
         XCTAssertEqual(try fixture.repository.tasks(projectId: project.id).count, 1)
         XCTAssertTrue(try fixture.repository.runs(taskId: task.id).isEmpty)
+    }
+
+    @MainActor
+    func testImplementationDispatchRequiresWorktreeForCodeTask() async throws {
+        let fixture = try makeRepositoryFixture()
+        try runGit(["init", "-b", "main"], in: fixture.root)
+        try runGit(["config", "user.email", "factory@example.test"], in: fixture.root)
+        try runGit(["config", "user.name", "Factory Test"], in: fixture.root)
+        try "base\n".write(to: fixture.root.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "README.md"], in: fixture.root)
+        try runGit(["commit", "-m", "Initial commit"], in: fixture.root)
+
+        let project = Project(id: "project", name: "Demo", type: .codeRepo, path: fixture.root.path)
+        let task = FactoryTask(
+            id: "task",
+            projectId: project.id,
+            title: "Repo review",
+            type: .coding,
+            status: .approved,
+            readiness: .executable
+        )
+        try fixture.repository.upsert(project: project)
+        try fixture.repository.upsert(task: task)
+
+        let service = CodexCLIService { request in
+            CommandResult(
+                command: request.displayString,
+                exitCode: 0,
+                standardOutput: "session id: session-123\nReviewed repo state.\n",
+                standardError: ""
+            )
+        }
+        let store = AppStore(paths: fixture.paths, codexCLIService: service)
+        store.selectedProjectID = project.id
+        store.selectTask(task.id)
+
+        await store.dispatchTask()
+
+        let storedTask = try XCTUnwrap(fixture.repository.tasks(projectId: project.id).first)
+        let runs = try fixture.repository.runs(taskId: task.id)
+
+        XCTAssertNil(storedTask.localWorktreePath)
+        XCTAssertNil(storedTask.codexWorktreePath)
+        XCTAssertTrue(runs.isEmpty)
+        XCTAssertEqual(
+            store.errorMessage,
+            "This task can stay worktree-optional for planning, review, and clarification, but dispatching implementation work is a concrete repo-scoped step. Create, relink, or repair a task worktree before continuing so the repo work happens in an isolated checkout."
+        )
+        XCTAssertEqual(store.statusMessage, "Create a task worktree before concrete repo-scoped work.")
     }
 
     @MainActor

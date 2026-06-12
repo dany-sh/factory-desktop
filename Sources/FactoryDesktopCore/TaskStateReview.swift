@@ -273,13 +273,13 @@ public enum TaskStateRecommendationEvaluator {
                 ? "Preflight is stale relative to newer implementation or test state."
                 : (input.hasExistingWorktree
                     ? "Task worktree exists but no preflight report has been run yet."
-                    : "Run preflight before starting repo-scoped implementation work.")
+                    : "Run preflight before the first concrete repo-scoped step. Planning, review, and clarification can stay worktree-optional.")
             return (.runPreflight, reason)
         }
         if input.taskType == .coding && !input.hasExistingWorktree {
             return (
                 .createWorktree,
-                "Implementation is ready, but the next step needs a branch/worktree because it will touch repository state."
+                "Planning and review are complete. Create a task worktree now because the next intended step is checked-out repo work such as editing files, running isolated verification, or reviewing a checked-out diff."
             )
         }
         if input.hasImplementationChanges && !input.hasTestOutput {

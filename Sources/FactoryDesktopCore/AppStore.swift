@@ -1158,7 +1158,7 @@ public final class AppStore: ObservableObject {
             let report = await gitService.preflightReport(project: project, tasks: projectTasks)
             var markdown = report.markdown
             if project.type == .codeRepo && !hasExistingTaskWorktree(task) {
-                markdown += "\n## Selected Task Worktree\n\nNo task worktree exists yet. That is fine for shaping, planning, review, and clarification. Create a task worktree only before implementation or checked-out verification that depends on repository state.\n"
+                markdown += "\n## Selected Task Worktree\n\nNo task worktree exists yet. That is fine for naming, describing, prioritizing, planning, review, and clarification. Create a task worktree only when the next intended step is concrete checked-out repo work such as editing files, running isolated build/test commands, or reviewing a checked-out diff.\n"
             }
             try markdown.write(to: url, atomically: true, encoding: .utf8)
             try repository.insert(artifact: Artifact(
@@ -2084,23 +2084,20 @@ public final class AppStore: ObservableObject {
             return
         }
         if project.type == .codeRepo {
-            guard await ensureLifecycleGateAllowsStart(project: project, selectedTask: task) else { return }
-            if !hasExistingTaskWorktree(task) {
-                selectedTaskID = task.id
-                await createWorktree(flavor: .local)
+            guard hasExistingTaskWorktree(task) else {
+                errorMessage = worktreeRequirementMessage(for: "dispatching implementation work")
+                statusMessage = "Create a task worktree before concrete repo-scoped work."
+                return
             }
+            guard await ensureLifecycleGateAllowsStart(project: project, selectedTask: task) else { return }
         }
-        guard let refreshedTask = tasks.first(where: { $0.id == task.id }) ?? selectedTask else {
-            errorMessage = "Task disappeared before dispatch."
-            return
-        }
-        let workspacePath = runnerWorkspacePath(project: project, task: refreshedTask)
+        let workspacePath = runnerWorkspacePath(project: project, task: task)
         let request = RunnerRequest(
             provider: provider,
             mode: .coding,
             workspacePath: workspacePath,
-            taskID: refreshedTask.id,
-            instruction: taskDispatchPrompt(project: project, task: refreshedTask),
+            taskID: task.id,
+            instruction: taskDispatchPrompt(project: project, task: task),
             modelProfile: selectedRunnerProjectLink?.preferredModelProfile,
             linkedSessionID: nil,
             sandboxMode: .readOnly
@@ -2108,7 +2105,7 @@ public final class AppStore: ObservableObject {
         await runRunnerRequest(
             request,
             project: project,
-            task: refreshedTask,
+            task: task,
             summary: "Dispatch task",
             transcriptPrefix: "runner-dispatch",
             sessionLink: nil,
@@ -4496,7 +4493,7 @@ public final class AppStore: ObservableObject {
     }
 
     private func worktreeRequirementMessage(for nextStep: String) -> String {
-        "This action needs a branch/worktree because it will touch repository state or depend on a specific checked-out repo. Create, relink, or repair a task worktree before \(nextStep)."
+        "This task can stay worktree-optional for planning, review, and clarification, but \(nextStep) is a concrete repo-scoped step. Create, relink, or repair a task worktree before continuing so the repo work happens in an isolated checkout."
     }
 
     private static func existingDirectory(_ path: String) -> Bool {

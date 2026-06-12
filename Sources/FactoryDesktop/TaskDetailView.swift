@@ -811,8 +811,13 @@ struct TaskDetailView: View {
             }
 
             if store.selectedTaskWorktreeDisplays.isEmpty {
-                Text("No task worktree exists yet.")
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("No task worktree exists yet.")
+                        .foregroundStyle(.secondary)
+                    Text("That is fine for naming, describing, prioritizing, planning, review, and clarification. Create a task worktree only when the next step is checked-out repo work such as editing files, running isolated build/test commands, or reviewing a checked-out diff.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             } else {
                 ForEach(store.selectedTaskWorktreeDisplays) { display in
                     TaskWorktreeReferenceView(display: display)
@@ -1089,7 +1094,7 @@ struct TaskDetailView: View {
             }
 
             if selectedCodeWorktreeUnavailable {
-                worktreeRequirementNotice("Build, test, and implementation handoff actions need a branch/worktree because they touch repository state or depend on a checked-out repo.")
+                worktreeRequirementNotice("Build, test, and implementation handoff actions are concrete repo-scoped steps. Planning, review, and clarification can stay worktree-optional until you need an isolated checkout.")
             }
         }
     }
@@ -1233,7 +1238,7 @@ struct TaskDetailView: View {
             }
 
             if selectedCodeWorktreeUnavailable {
-                worktreeRequirementNotice("Review becomes available after a task worktree is created for checked-out repository work.")
+                worktreeRequirementNotice("Diff review stays worktree-optional until there is checked-out repo work to inspect. Create a task worktree only when you need a real checked-out diff.")
             }
         }
     }
