@@ -227,7 +227,6 @@ struct ConveyorBoardView: View {
                         ProgressView().controlSize(.small).padding(16)
                     }
                 }
-                .accessibilityLabel("\(queue.projectID) Kanban board")
             } else if store.isLoading {
                 ProgressView("Loading Conveyor queue…")
             } else {
