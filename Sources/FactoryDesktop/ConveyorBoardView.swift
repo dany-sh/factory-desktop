@@ -92,14 +92,7 @@ struct ConveyorBoardView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .navigation) {
-            Button {
-                store.isSidebarVisible.toggle()
-            } label: {
-                Label("Toggle Sidebar", systemImage: "sidebar.leading")
-            }
-            .help("Show or hide the project sidebar")
-
+        ToolbarItem(placement: .navigation) {
             if !sidebarVisible {
                 Menu {
                     ForEach(store.projects) { project in
@@ -111,49 +104,52 @@ struct ConveyorBoardView: View {
             }
         }
 
-        ToolbarItemGroup(placement: .primaryAction) {
-            Picker("Scope", selection: scopeBinding) {
-                ForEach(ConveyorScope.allCases) { scope in
-                    Text(scope.title).tag(scope)
-                }
-            }
-            .pickerStyle(.menu)
-            .help("Choose which controller-owned feature scope to browse")
+        ToolbarItem(placement: .navigation) {
+            Menu {
+                Section("Browse") {
+                    Picker("Scope", selection: scopeBinding) {
+                        ForEach(ConveyorScope.allCases) { scope in
+                            Text(scope.title).tag(scope)
+                        }
+                    }
 
-            if store.scope != .active, let queue = store.queue {
-                Picker("Milestone", selection: milestoneBinding) {
-                    Text("All Milestones").tag(String?.none)
-                    ForEach(queue.milestones) { milestone in
-                        Text(milestone.active ? "\(milestone.milestoneID) (Active)" : milestone.milestoneID)
-                            .tag(String?.some(milestone.milestoneID))
+                    if store.scope != .active, let queue = store.queue {
+                        Picker("Milestone", selection: milestoneBinding) {
+                            Text("All Milestones").tag(String?.none)
+                            ForEach(queue.milestones) { milestone in
+                                Text(milestone.active ? "\(milestone.milestoneID) (Active)" : milestone.milestoneID)
+                                    .tag(String?.some(milestone.milestoneID))
+                            }
+                        }
                     }
                 }
-                .pickerStyle(.menu)
-                .help("Filter the read-only board by milestone")
-            }
 
-            Picker("Priority", selection: $store.priorityFilter) {
-                Text("All priorities").tag(ConveyorPriority?.none)
-                ForEach(ConveyorPriority.allCases) { priority in
-                    Text(priority.rawValue).tag(ConveyorPriority?.some(priority))
+                Section("Filter") {
+                    Picker("Priority", selection: $store.priorityFilter) {
+                        Text("All priorities").tag(ConveyorPriority?.none)
+                        ForEach(ConveyorPriority.allCases) { priority in
+                            Text(priority.rawValue).tag(ConveyorPriority?.some(priority))
+                        }
+                    }
+                    Picker("Status", selection: $store.statusFilter) {
+                        Text("All statuses").tag(ConveyorColumn?.none)
+                        ForEach(ConveyorColumn.allCases) { column in
+                            Text(column.rawValue).tag(ConveyorColumn?.some(column))
+                        }
+                    }
                 }
-            }
-            .pickerStyle(.menu)
-            .help("Filter features by priority")
 
-            Picker("Status", selection: $store.statusFilter) {
-                Text("All statuses").tag(ConveyorColumn?.none)
-                ForEach(ConveyorColumn.allCases) { column in
-                    Text(column.rawValue).tag(ConveyorColumn?.some(column))
+                if store.hasActiveFilters {
+                    Divider()
+                    Button("Reset Filters") { store.resetFilters() }
                 }
+            } label: {
+                Label("Filters", systemImage: "line.3.horizontal.decrease.circle")
             }
-            .pickerStyle(.menu)
-            .help("Filter features by Kanban column")
+            .help("Choose the board scope and filters")
+        }
 
-            if store.hasActiveFilters {
-                Button("Reset Filters") { store.resetFilters() }
-                    .help("Clear search, priority, status, and milestone filters")
-            }
+        ToolbarItemGroup(placement: .primaryAction) {
 
             Button {
                 pendingExecution = PendingExecution(kind: .next)
@@ -170,14 +166,19 @@ struct ConveyorBoardView: View {
             }
             .disabled(store.queue == nil || store.mutationInFlight)
             .keyboardShortcut("p", modifiers: [.command, .option])
+        }
 
+        ToolbarItem(placement: .navigation) {
             Button {
                 store.isInspectorVisible.toggle()
             } label: {
                 Label("Toggle Inspector", systemImage: "sidebar.trailing")
             }
             .keyboardShortcut("i", modifiers: [.command, .option])
+            .help("Show or hide the feature inspector")
+        }
 
+        ToolbarItem(placement: .secondaryAction) {
             Menu {
                 if let queue = store.queue, queue.terminalFeatureCount > 0 {
                     Toggle("Show Done", isOn: $showDone)
