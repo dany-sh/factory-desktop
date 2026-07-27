@@ -195,6 +195,7 @@ struct ConveyorBoardView: View {
             if let queue = store.queue {
                 VStack(alignment: .leading, spacing: 0) {
                     boardSummary(queue)
+                    ConveyorStatusStrip(store: store)
                     ConveyorPriorityDropStrip(store: store)
                     GeometryReader { geometry in
                         let columns = displayedColumns
@@ -276,6 +277,65 @@ struct ConveyorBoardView: View {
             return "No \(column.rawValue) features in \(queue.activeMilestone)"
         }
         return "No \(column.rawValue) features"
+    }
+}
+
+private struct ConveyorStatusStrip: View {
+    @ObservedObject var store: ConveyorBoardStore
+
+    var body: some View {
+        let status = store.conveyorStatusPresentation
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                execution(status)
+                Spacer(minLength: 8)
+                attention(status)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                execution(status)
+                attention(status)
+            }
+        }
+        .font(.caption)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 9)
+        .background(.bar)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(status.accessibilityLabel)
+        .accessibilityHint(status.accessibilityHelp ?? "")
+    }
+
+    private func execution(_ status: ConveyorStatusPresentation) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: status.systemImage)
+                .accessibilityHidden(true)
+            Text(status.label)
+                .fontWeight(.semibold)
+            Text("·")
+                .foregroundStyle(.tertiary)
+            Text(status.supportingText)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            if status.unavailable {
+                Button("Refresh") {
+                    Task { await store.refreshConveyorStatus() }
+                }
+                .buttonStyle(.link)
+                .disabled(store.isLoading || store.mutationInFlight)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func attention(_ status: ConveyorStatusPresentation) -> some View {
+        if let attention = status.attention {
+            Label(attention, systemImage: "exclamationmark.triangle.fill")
+                .fontWeight(.semibold)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.orange.opacity(0.15), in: Capsule())
+                .help(status.accessibilityHelp ?? attention)
+        }
     }
 }
 

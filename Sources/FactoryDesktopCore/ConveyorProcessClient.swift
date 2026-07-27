@@ -128,6 +128,10 @@ public final class ConveyorProcessClient: @unchecked Sendable {
         return try await decode(ConveyorQueue.self, arguments: arguments)
     }
 
+    public func status(projectID: String) async throws -> ConveyorStatusProjection {
+        try await decode(ConveyorStatusProjection.self, arguments: ["status", "--project", projectID])
+    }
+
     public func markReady(projectID: String, featureID: String) async throws -> ConveyorMutationResult {
         try await mutation(["ready", "--project", projectID, "--feature", featureID])
     }

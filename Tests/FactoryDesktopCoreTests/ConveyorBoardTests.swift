@@ -48,6 +48,95 @@ final class ConveyorBoardTests: XCTestCase {
         XCTAssertEqual(commands, [["queue", "--project", "interview-companion", "--scope", "all", "--milestone", "M1", "--json"]])
     }
 
+    func testProcessClientUsesOnlyReadOnlyStatusArguments() async throws {
+        let executor = FixtureConveyorExecutor()
+        let client = ConveyorProcessClient(executor: executor)
+
+        _ = try await client.status(projectID: "interview-companion")
+
+        let commands = await executor.recordedArguments()
+        XCTAssertEqual(commands, [["status", "--project", "interview-companion"]])
+    }
+
+    func testStatusPresentationMapsCurrentPausedReconciliationFixture() throws {
+        let status = try decodeStatus("""
+        {
+          "project_id":"interview-companion",
+          "operator_paused":true,
+          "next_action":"project_paused",
+          "current_state":"queue_reconciliation",
+          "unpaused_proposed_next_action":"queue_reconciliation",
+          "queue_status":{"ready_features":[],"configured_milestone":"M0","reconciliation_classification":"reconciled_no_ready_work"},
+          "current_repository_state":{"clean":false,"writer_lease":{"ambiguous":false,"exists":false,"owned_by_active_cycle":false}},
+          "future_controller_field":{"unknown":true}
+        }
+        """)
+
+        let presentation = ConveyorStatusPresenter.presentation(for: status)
+        XCTAssertEqual(presentation.label, "Paused")
+        XCTAssertEqual(presentation.supportingText, "No Ready work in M0")
+        XCTAssertEqual(presentation.attention, "Queue reconciliation required")
+        XCTAssertEqual(presentation.accessibilityHelp, "Repository has local changes")
+    }
+
+    func testRunningTakesPrecedenceOverPauseRequest() throws {
+        let status = try decodeStatus("""
+        {
+          "project_id":"case-manager",
+          "operator_paused":true,
+          "cycle_phase":"feature_execution",
+          "selected_feature":"P0-003",
+          "queue_status":{"ready_features":["P0-003"],"configured_milestone":"P0"}
+        }
+        """)
+
+        let presentation = ConveyorStatusPresenter.presentation(for: status)
+        XCTAssertEqual(presentation.label, "Running")
+        XCTAssertEqual(presentation.supportingText, "Pausing after current")
+    }
+
+    func testStatusPresentationCoversReadyIdleHumanGateLockAndUnknownValues() throws {
+        let ready = ConveyorStatusPresenter.presentation(for: try decodeStatus("""
+        {"project_id":"case-manager","operator_paused":false,"current_state":"future_ready_state","queue_status":{"ready_features":["P0-003"],"configured_milestone":"P0"}}
+        """))
+        XCTAssertEqual(ready.label, "Ready")
+        XCTAssertEqual(ready.supportingText, "Next eligible: P0-003")
+
+        let idle = ConveyorStatusPresenter.presentation(for: try decodeStatus("""
+        {"project_id":"case-manager","operator_paused":false,"derived_state":"future_idle_state","queue_status":{"ready_features":[],"configured_milestone":"P0"}}
+        """))
+        XCTAssertEqual(idle.label, "Idle")
+        XCTAssertEqual(idle.supportingText, "No Ready work in P0")
+
+        let attention = ConveyorStatusPresenter.presentation(for: try decodeStatus("""
+        {
+          "project_id":"case-manager",
+          "human_resolution_required":true,
+          "human_gate":{"kind":"future_gate"},
+          "queue_status":{},
+          "current_repository_state":{"clean":false},
+          "lock_status":{"repository_writer":{"ambiguous":true,"exists":true,"owned_by_active_cycle":false}}
+        }
+        """))
+        XCTAssertEqual(attention.attention, "Human decision required")
+        XCTAssertEqual(attention.accessibilityHelp, "Lock state requires attention. Repository has local changes")
+    }
+
+    func testStatusFailureKeepsQueueAndOffersUnavailablePresentationWithoutMutation() async {
+        let executor = FixtureConveyorExecutor(failStatus: true)
+        let store = ConveyorBoardStore(client: ConveyorProcessClient(executor: executor))
+
+        await store.refresh()
+
+        XCTAssertNotNil(store.queue)
+        XCTAssertEqual(store.conveyorStatusPresentation.label, "Unavailable")
+        let commands = await executor.recordedArguments()
+        XCTAssertEqual(commands.map(\.first), ["queue", "status"])
+        XCTAssertFalse(commands.contains {
+            ["pause", "unpause", "ready", "backlog", "prioritize", "run", "resume", "reconcile"].contains($0.first)
+        })
+    }
+
     func testReadinessPriorityAndDisabledReasonsMapToControllerActions() async {
         let executor = FixtureConveyorExecutor()
         let store = ConveyorBoardStore(client: ConveyorProcessClient(executor: executor))
@@ -158,13 +247,23 @@ final class ConveyorBoardTests: XCTestCase {
 private actor FixtureConveyorExecutor: ConveyorCommandExecuting {
     private(set) var arguments: [[String]] = []
     private let failPrioritize: Bool
+    private let failStatus: Bool
 
-    init(failPrioritize: Bool = false) { self.failPrioritize = failPrioritize }
+    init(failPrioritize: Bool = false, failStatus: Bool = false) {
+        self.failPrioritize = failPrioritize
+        self.failStatus = failStatus
+    }
 
     func execute(arguments: [String]) async throws -> ConveyorCommandResult {
         self.arguments.append(arguments)
         if failPrioritize && arguments.first == "prioritize" {
             return ConveyorCommandResult(exitCode: 1, standardOutput: "", standardError: "exact controller failure")
+        }
+        if arguments.first == "status" {
+            if failStatus {
+                return ConveyorCommandResult(exitCode: 1, standardOutput: "", standardError: "status unavailable")
+            }
+            return ConveyorCommandResult(exitCode: 0, standardOutput: fixtureStatus(project: arguments[2]), standardError: "")
         }
         if arguments.first == "queue" {
             let project = arguments[2]
@@ -180,6 +279,10 @@ private actor FixtureConveyorExecutor: ConveyorCommandExecuting {
     func recordedArguments() -> [[String]] { arguments }
 }
 
+private func decodeStatus(_ source: String) throws -> ConveyorStatusProjection {
+    try JSONDecoder().decode(ConveyorStatusProjection.self, from: Data(source.utf8))
+}
+
 private func fixtureFeature(id: String, column: ConveyorColumn) -> ConveyorFeature {
     let isReady = column == .ready
     return try! JSONDecoder().decode(ConveyorFeature.self, from: Data("""
@@ -192,5 +295,11 @@ private func fixtureQueue(project: String, scope: String = "active", milestone: 
     let featureMilestone = milestone ?? "M0"
     return """
     {"project_id":"\(project)","scope":"\(scope)","requested_milestone":\(milestone.map { "\"\($0)\"" } ?? "null"),"active_milestone":"M0","paused":false,"active_feature":null,"selected_feature":null,"next_ready_feature":null,"total_feature_count":2,"scoped_feature_count":1,"visible_nonterminal_count":1,"terminal_feature_count":1,"milestones":[{"milestone_id":"M0","title":"Current","total_count":1,"unfinished_count":1,"ready_count":0,"blocked_count":0,"completed_count":0,"active":true},{"milestone_id":"M1","title":"Future","total_count":1,"unfinished_count":0,"ready_count":0,"blocked_count":0,"completed_count":1,"active":false}],"features":[{"feature_id":"\(featureID)","title":"Build queue controls","milestone":"\(featureMilestone)","status":"proposed","description":"Controller backlog metadata","specification_path":"/tmp/F001.md","kanban_column":"Backlog","priority":"P2","queue_position":1,"dependencies":[],"dependencies_complete":true,"readiness":"not_ready","blocked_reason":null,"ready_transition_eligible":true,"ready_transition_reason":null,"active_milestone_member":\(featureMilestone == "M0"),"execution_eligible":false,"execution_ineligible_reason":"feature status is proposed; expected ready","execution_profile":{"profile":"bounded_precise","model":"gpt-5.6-terra","reasoning":"high","parent_sessions":1,"child_sessions":0},"execution_model":"gpt-5.6-terra","reasoning":"high","branch":null,"commit":null,"latest_terminal_result":null}]}
+    """
+}
+
+private func fixtureStatus(project: String) -> String {
+    """
+    {"project_id":"\(project)","operator_paused":false,"next_action":"feature_cycle","current_state":"feature_ready","derived_state":"feature_ready","cycle_phase":null,"cycle_stop_reason":null,"human_resolution_required":false,"human_gate":null,"queue_status":{"configured_milestone":"M0","ready_features":["F001"],"reconciliation_classification":"reconciled_ready_work","selected_feature":"F001"},"current_repository_state":{"clean":true,"writer_lease":{"ambiguous":false,"exists":false,"owned_by_active_cycle":false}},"lock_status":{"controller_launch":{"ambiguous":false,"exists":false,"owned_by_active_cycle":false},"repository_writer":{"ambiguous":false,"exists":false,"owned_by_active_cycle":false}},"selected_feature":"F001"}
     """
 }

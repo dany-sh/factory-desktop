@@ -126,6 +126,307 @@ public struct ConveyorQueue: Codable, Equatable, Sendable {
     }
 }
 
+public struct ConveyorStatusProjection: Decodable, Equatable, Sendable {
+    public let projectID: String
+    public let operatorPaused: Bool
+    public let nextAction: String?
+    public let unpausedProposedNextAction: String?
+    public let currentState: String?
+    public let derivedState: String?
+    public let cyclePhase: String?
+    public let cycleStopReason: String?
+    public let humanResolutionRequired: Bool
+    public let humanGate: JSONValue?
+    public let queueStatus: ConveyorStatusQueue
+    public let currentRepositoryState: ConveyorRepositoryStatus?
+    public let lockStatus: ConveyorLockStatus?
+    public let selectedFeature: String?
+
+    public init(
+        projectID: String,
+        operatorPaused: Bool = false,
+        nextAction: String? = nil,
+        unpausedProposedNextAction: String? = nil,
+        currentState: String? = nil,
+        derivedState: String? = nil,
+        cyclePhase: String? = nil,
+        cycleStopReason: String? = nil,
+        humanResolutionRequired: Bool = false,
+        humanGate: JSONValue? = nil,
+        queueStatus: ConveyorStatusQueue = ConveyorStatusQueue(),
+        currentRepositoryState: ConveyorRepositoryStatus? = nil,
+        lockStatus: ConveyorLockStatus? = nil,
+        selectedFeature: String? = nil
+    ) {
+        self.projectID = projectID
+        self.operatorPaused = operatorPaused
+        self.nextAction = nextAction
+        self.unpausedProposedNextAction = unpausedProposedNextAction
+        self.currentState = currentState
+        self.derivedState = derivedState
+        self.cyclePhase = cyclePhase
+        self.cycleStopReason = cycleStopReason
+        self.humanResolutionRequired = humanResolutionRequired
+        self.humanGate = humanGate
+        self.queueStatus = queueStatus
+        self.currentRepositoryState = currentRepositoryState
+        self.lockStatus = lockStatus
+        self.selectedFeature = selectedFeature
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case projectID = "project_id"
+        case operatorPaused = "operator_paused"
+        case nextAction = "next_action"
+        case unpausedProposedNextAction = "unpaused_proposed_next_action"
+        case currentState = "current_state"
+        case derivedState = "derived_state"
+        case cyclePhase = "cycle_phase"
+        case cycleStopReason = "cycle_stop_reason"
+        case humanResolutionRequired = "human_resolution_required"
+        case humanGate = "human_gate"
+        case queueStatus = "queue_status"
+        case currentRepositoryState = "current_repository_state"
+        case repositoryState = "repository_state"
+        case lockStatus = "lock_status"
+        case selectedFeature = "selected_feature"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        projectID = try container.decode(String.self, forKey: .projectID)
+        operatorPaused = try container.decodeIfPresent(Bool.self, forKey: .operatorPaused) ?? false
+        nextAction = try container.decodeIfPresent(String.self, forKey: .nextAction)
+        unpausedProposedNextAction = try container.decodeIfPresent(String.self, forKey: .unpausedProposedNextAction)
+        currentState = try container.decodeIfPresent(String.self, forKey: .currentState)
+        derivedState = try container.decodeIfPresent(String.self, forKey: .derivedState)
+        cyclePhase = try container.decodeIfPresent(String.self, forKey: .cyclePhase)
+        cycleStopReason = try container.decodeIfPresent(String.self, forKey: .cycleStopReason)
+        humanResolutionRequired = try container.decodeIfPresent(Bool.self, forKey: .humanResolutionRequired) ?? false
+        humanGate = try container.decodeIfPresent(JSONValue.self, forKey: .humanGate)
+        queueStatus = try container.decodeIfPresent(ConveyorStatusQueue.self, forKey: .queueStatus) ?? ConveyorStatusQueue()
+        currentRepositoryState = try container.decodeIfPresent(ConveyorRepositoryStatus.self, forKey: .currentRepositoryState)
+            ?? container.decodeIfPresent(ConveyorRepositoryStatus.self, forKey: .repositoryState)
+        lockStatus = try container.decodeIfPresent(ConveyorLockStatus.self, forKey: .lockStatus)
+        selectedFeature = try container.decodeIfPresent(String.self, forKey: .selectedFeature)
+    }
+}
+
+public struct ConveyorStatusQueue: Decodable, Equatable, Sendable {
+    public let configuredMilestone: String?
+    public let readyFeatures: [String]
+    public let reconciliationClassification: String?
+    public let selectedFeature: String?
+
+    public init(
+        configuredMilestone: String? = nil,
+        readyFeatures: [String] = [],
+        reconciliationClassification: String? = nil,
+        selectedFeature: String? = nil
+    ) {
+        self.configuredMilestone = configuredMilestone
+        self.readyFeatures = readyFeatures
+        self.reconciliationClassification = reconciliationClassification
+        self.selectedFeature = selectedFeature
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case configuredMilestone = "configured_milestone"
+        case readyFeatures = "ready_features"
+        case reconciliationClassification = "reconciliation_classification"
+        case selectedFeature = "selected_feature"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        configuredMilestone = try container.decodeIfPresent(String.self, forKey: .configuredMilestone)
+        readyFeatures = try container.decodeIfPresent([String].self, forKey: .readyFeatures) ?? []
+        reconciliationClassification = try container.decodeIfPresent(String.self, forKey: .reconciliationClassification)
+        selectedFeature = try container.decodeIfPresent(String.self, forKey: .selectedFeature)
+    }
+}
+
+public struct ConveyorRepositoryStatus: Decodable, Equatable, Sendable {
+    public let clean: Bool?
+    public let writerLease: ConveyorLockObservation?
+
+    public init(clean: Bool? = nil, writerLease: ConveyorLockObservation? = nil) {
+        self.clean = clean
+        self.writerLease = writerLease
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case clean
+        case writerLease = "writer_lease"
+    }
+}
+
+public struct ConveyorLockStatus: Decodable, Equatable, Sendable {
+    public let controllerLaunch: ConveyorLockObservation?
+    public let repositoryWriter: ConveyorLockObservation?
+
+    public init(
+        controllerLaunch: ConveyorLockObservation? = nil,
+        repositoryWriter: ConveyorLockObservation? = nil
+    ) {
+        self.controllerLaunch = controllerLaunch
+        self.repositoryWriter = repositoryWriter
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case controllerLaunch = "controller_launch"
+        case repositoryWriter = "repository_writer"
+    }
+}
+
+public struct ConveyorLockObservation: Decodable, Equatable, Sendable {
+    public let ambiguous: Bool
+    public let exists: Bool
+    public let ownedByActiveCycle: Bool
+
+    public init(ambiguous: Bool = false, exists: Bool = false, ownedByActiveCycle: Bool = false) {
+        self.ambiguous = ambiguous
+        self.exists = exists
+        self.ownedByActiveCycle = ownedByActiveCycle
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case ambiguous, exists
+        case ownedByActiveCycle = "owned_by_active_cycle"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ambiguous = try container.decodeIfPresent(Bool.self, forKey: .ambiguous) ?? false
+        exists = try container.decodeIfPresent(Bool.self, forKey: .exists) ?? false
+        ownedByActiveCycle = try container.decodeIfPresent(Bool.self, forKey: .ownedByActiveCycle) ?? false
+    }
+}
+
+public struct ConveyorStatusPresentation: Equatable, Sendable {
+    public let label: String
+    public let supportingText: String
+    public let systemImage: String
+    public let attention: String?
+    public let accessibilityHelp: String?
+    public let unavailable: Bool
+
+    public init(
+        label: String,
+        supportingText: String,
+        systemImage: String,
+        attention: String? = nil,
+        accessibilityHelp: String? = nil,
+        unavailable: Bool = false
+    ) {
+        self.label = label
+        self.supportingText = supportingText
+        self.systemImage = systemImage
+        self.attention = attention
+        self.accessibilityHelp = accessibilityHelp
+        self.unavailable = unavailable
+    }
+
+    public var accessibilityLabel: String {
+        [label, supportingText, attention].compactMap { $0 }.joined(separator: ". ")
+    }
+
+    public static func unavailable(_ reason: String) -> ConveyorStatusPresentation {
+        ConveyorStatusPresentation(
+            label: "Unavailable",
+            supportingText: reason,
+            systemImage: "exclamationmark.circle",
+            unavailable: true
+        )
+    }
+}
+
+public enum ConveyorStatusPresenter {
+    public static func presentation(for status: ConveyorStatusProjection) -> ConveyorStatusPresentation {
+        let isRunning = status.cyclePhase != nil || lockObservations(status).contains(where: \.ownedByActiveCycle)
+        let milestone = status.queueStatus.configuredMilestone ?? "current milestone"
+        let ready = status.queueStatus.readyFeatures
+        let feature = status.selectedFeature ?? status.queueStatus.selectedFeature ?? ready.first
+
+        let execution: (String, String, String)
+        if isRunning {
+            let support: String
+            if status.operatorPaused {
+                support = "Pausing after current"
+            } else if let feature, let phase = status.cyclePhase {
+                support = "\(feature) · \(humanized(phase))"
+            } else if let phase = status.cyclePhase {
+                support = humanized(phase)
+            } else if let feature {
+                support = "Active feature \(feature)"
+            } else {
+                support = "Active Conveyor transaction"
+            }
+            execution = ("Running", support, "play.circle.fill")
+        } else if status.operatorPaused {
+            let support: String
+            if ready.isEmpty {
+                support = "No Ready work in \(milestone)"
+            } else if let feature {
+                support = "Next eligible: \(feature)"
+            } else {
+                support = "Work will remain stopped until unpaused"
+            }
+            execution = ("Paused", support, "pause.circle.fill")
+        } else if let feature, !ready.isEmpty {
+            execution = ("Ready", "Next eligible: \(feature)", "checkmark.circle.fill")
+        } else {
+            execution = ("Idle", "No Ready work in \(milestone)", "circle")
+        }
+
+        let attentionItems = attentions(for: status)
+        return ConveyorStatusPresentation(
+            label: execution.0,
+            supportingText: execution.1,
+            systemImage: execution.2,
+            attention: attentionItems.first,
+            accessibilityHelp: attentionItems.dropFirst().isEmpty
+                ? nil
+                : attentionItems.dropFirst().joined(separator: ". ")
+        )
+    }
+
+    private static func attentions(for status: ConveyorStatusProjection) -> [String] {
+        var items: [String] = []
+        if status.humanResolutionRequired || status.humanGate != nil {
+            items.append("Human decision required")
+        }
+        if status.currentState == "queue_reconciliation"
+            || status.derivedState == "queue_reconciliation"
+            || status.nextAction == "queue_reconciliation"
+            || status.unpausedProposedNextAction == "queue_reconciliation" {
+            items.append("Queue reconciliation required")
+        }
+        let locks = lockObservations(status)
+        if locks.contains(where: \.ambiguous)
+            || locks.filter(\.exists).count > 1
+            || locks.contains(where: { $0.exists && !$0.ownedByActiveCycle }) {
+            items.append("Lock state requires attention")
+        }
+        if status.currentRepositoryState?.clean == false {
+            items.append("Repository has local changes")
+        }
+        return items
+    }
+
+    private static func lockObservations(_ status: ConveyorStatusProjection) -> [ConveyorLockObservation] {
+        [
+            status.currentRepositoryState?.writerLease,
+            status.lockStatus?.controllerLaunch,
+            status.lockStatus?.repositoryWriter
+        ].compactMap { $0 }
+    }
+
+    private static func humanized(_ value: String) -> String {
+        value.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+}
+
 public struct ConveyorFeature: Codable, Identifiable, Equatable, Sendable {
     public let featureID: String
     public let title: String

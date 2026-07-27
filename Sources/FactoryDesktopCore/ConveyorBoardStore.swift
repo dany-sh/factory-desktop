@@ -4,6 +4,8 @@ import Foundation
 @MainActor
 public final class ConveyorBoardStore: ObservableObject {
     @Published public private(set) var queues: [String: ConveyorQueue] = [:]
+    @Published public private(set) var conveyorStatuses: [String: ConveyorStatusProjection] = [:]
+    @Published public private(set) var statusErrors: [String: String] = [:]
     @Published public var selectedProjectID: String = ConveyorProject.registered[0].id
     @Published public var selectedFeatureID: String?
     @Published public var scope: ConveyorScope = .active
@@ -31,6 +33,18 @@ public final class ConveyorBoardStore: ObservableObject {
     }
 
     public var queue: ConveyorQueue? { queues[selectedProjectID] }
+
+    public var conveyorStatus: ConveyorStatusProjection? { conveyorStatuses[selectedProjectID] }
+
+    public var conveyorStatusPresentation: ConveyorStatusPresentation {
+        if let error = statusErrors[selectedProjectID] {
+            return .unavailable(error)
+        }
+        if let conveyorStatus {
+            return ConveyorStatusPresenter.presentation(for: conveyorStatus)
+        }
+        return .unavailable("Status has not loaded yet.")
+    }
 
     public var selectedFeature: ConveyorFeature? {
         queue?.features.first(where: { $0.id == selectedFeatureID })
@@ -72,13 +86,14 @@ public final class ConveyorBoardStore: ObservableObject {
     public func refresh() async {
         isLoading = true
         defer { isLoading = false }
+        let projectID = selectedProjectID
         do {
             let updated = try await client.queue(
-                projectID: selectedProjectID,
+                projectID: projectID,
                 scope: scope,
                 milestone: milestoneFilter
             )
-            queues[selectedProjectID] = updated
+            queues[projectID] = updated
             if let selectedFeatureID, !updated.features.contains(where: { $0.id == selectedFeatureID }) {
                 self.selectedFeatureID = nil
                 self.isInspectorVisible = false
@@ -87,6 +102,21 @@ public final class ConveyorBoardStore: ObservableObject {
             statusMessage = "Refreshed \(selectedProject.name)."
         } catch {
             errorMessage = error.localizedDescription
+        }
+        await refreshConveyorStatus(projectID: projectID)
+    }
+
+    public func refreshConveyorStatus() async {
+        await refreshConveyorStatus(projectID: selectedProjectID)
+    }
+
+    private func refreshConveyorStatus(projectID: String) async {
+        do {
+            let updated = try await client.status(projectID: projectID)
+            conveyorStatuses[projectID] = updated
+            statusErrors[projectID] = nil
+        } catch {
+            statusErrors[projectID] = error.localizedDescription
         }
     }
 
