@@ -85,6 +85,7 @@ struct SidebarView: View {
                 }
             }
             .listStyle(.sidebar)
+            .frame(minWidth: 0, maxWidth: .infinity)
 
             VStack(spacing: 8) {
                 if store.appUpdateStatus.isUpdateAvailable || store.appUpdateStatus.isApplying {
@@ -106,7 +107,11 @@ struct SidebarView: View {
                     Text(store.appUpdateStatus.message)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                        .help(store.appUpdateStatus.message)
                 }
 
                 Button {
@@ -124,7 +129,7 @@ struct SidebarView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal)
 
             if !store.statusMessage.isEmpty {
@@ -132,10 +137,14 @@ struct SidebarView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     .padding([.horizontal, .bottom])
+                    .help(store.statusMessage)
             }
         }
+        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var activeTasks: [FactoryTask] {
@@ -182,13 +191,17 @@ private struct SidebarRow: View {
                     Text(title)
                         .font(.body.weight(isSelected ? .semibold : .regular))
                         .lineLimit(1)
+                        .truncationMode(.tail)
                     Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .truncationMode(.tail)
                 }
-                Spacer()
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 0)
             }
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

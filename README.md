@@ -4,6 +4,10 @@ Factory Desktop is a local-first macOS SwiftUI app for managing projects, tasks,
 
 This v0.1 intentionally does **not** perform autonomous file editing. Factory owns state, run logs, handoffs, and safe command execution; humans approve implementation and commits.
 
+## Product direction documentation
+
+The current implementation remains the coding-orchestration application described below. The authoritative inventory, architecture baseline, and phased roadmap for the proposed native macOS legal case workspace are indexed in [`docs/README.md`](docs/README.md). Legal capabilities are proposals unless the feature inventory explicitly marks them implemented.
+
 ## v0.1 Features
 
 - Three-column SwiftUI desktop UI:

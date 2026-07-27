@@ -1322,7 +1322,7 @@ public final class AppStore: ObservableObject {
             try reload()
             selectedTaskID = task.id
             selectedRunOutput = review
-            statusMessage = "Wrote local plan review to \(url.path)."
+            statusMessage = "Wrote local plan review."
         } catch {
             errorMessage = error.localizedDescription
         }
