@@ -68,13 +68,41 @@ final class FactoryDesktopAppDelegate: NSObject, NSApplicationDelegate {
         Self.activate(window: NSApp.windows.first)
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        NSApp.windows.forEach(Self.fitWindowToCurrentDisplay)
+    }
+
+    func applicationDidChangeScreenParameters(_ notification: Notification) {
+        NSApp.windows.forEach(Self.fitWindowToCurrentDisplay)
+    }
+
     static func activate(window: NSWindow?) {
         becomeForegroundApplication()
         NSApp.activate(ignoringOtherApps: true)
 
         guard let window else { return }
+        fitWindowToCurrentDisplay(window)
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
+    }
+
+    private static func fitWindowToCurrentDisplay(_ window: NSWindow) {
+        guard let visibleFrame = (window.screen ?? NSScreen.main)?.visibleFrame else { return }
+
+        let currentFrame = window.frame
+        let fittedSize = NSSize(
+            width: min(currentFrame.width, visibleFrame.width),
+            height: min(currentFrame.height, visibleFrame.height)
+        )
+        let fittedOrigin = NSPoint(
+            x: min(max(currentFrame.minX, visibleFrame.minX), visibleFrame.maxX - fittedSize.width),
+            y: min(max(currentFrame.minY, visibleFrame.minY), visibleFrame.maxY - fittedSize.height)
+        )
+        let fittedFrame = NSRect(origin: fittedOrigin, size: fittedSize)
+
+        if fittedFrame != currentFrame {
+            window.setFrame(fittedFrame, display: true)
+        }
     }
 
     private static func becomeForegroundApplication() {

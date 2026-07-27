@@ -13,17 +13,17 @@ struct ConveyorBoardView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: sidebarVisibilityBinding) {
             ConveyorProjectSidebar(store: store)
-                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
+                .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 300)
         } detail: {
             board
-                .navigationSplitViewColumnWidth(min: 720, ideal: 980)
+                .navigationSplitViewColumnWidth(min: 420, ideal: 820)
         }
         .navigationTitle(store.selectedProject.name)
         .searchable(text: $store.searchText, prompt: "Search features")
         .toolbar { toolbar }
         .inspector(isPresented: inspectorBinding) {
             ConveyorFeatureInspector(store: store)
-                .inspectorColumnWidth(min: 300, ideal: 360, max: 520)
+                .inspectorColumnWidth(min: 260, ideal: 320, max: 420)
         }
         .task { await store.refresh() }
         .onAppear {
