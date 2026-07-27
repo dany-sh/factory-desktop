@@ -38,6 +38,16 @@ final class ConveyorBoardTests: XCTestCase {
         ])
     }
 
+    func testProcessClientIncludesReadOnlyScopeAndMilestone() async throws {
+        let executor = FixtureConveyorExecutor()
+        let client = ConveyorProcessClient(executor: executor)
+
+        _ = try await client.queue(projectID: "interview-companion", scope: .all, milestone: "M1")
+
+        let commands = await executor.recordedArguments()
+        XCTAssertEqual(commands, [["queue", "--project", "interview-companion", "--scope", "all", "--milestone", "M1", "--json"]])
+    }
+
     func testReadinessPriorityAndDisabledReasonsMapToControllerActions() async {
         let executor = FixtureConveyorExecutor()
         let store = ConveyorBoardStore(client: ConveyorProcessClient(executor: executor))
@@ -79,6 +89,38 @@ final class ConveyorBoardTests: XCTestCase {
         XCTAssertTrue(commands.contains(["pause", "--project", "case-manager"]))
         XCTAssertTrue(commands.contains(["unpause", "--project", "case-manager"]))
     }
+
+    func testScopeAndMilestoneChangesRefreshAndClearAFilteredSelection() async {
+        let executor = FixtureConveyorExecutor()
+        let store = ConveyorBoardStore(client: ConveyorProcessClient(executor: executor))
+        await store.refresh()
+        store.selectFeature("F001")
+
+        await store.setScope(.all)
+        XCTAssertEqual(store.queue?.scope, .all)
+        XCTAssertEqual(store.selectedFeatureID, "F001")
+
+        await store.setMilestoneFilter("M1")
+        XCTAssertNil(store.selectedFeatureID)
+        let commands = await executor.recordedArguments()
+        XCTAssertTrue(commands.contains(["queue", "--project", "interview-companion", "--scope", "all", "--milestone", "M1", "--json"]))
+    }
+
+    func testLocalFiltersAndFutureMilestoneActionsDoNotMutate() async throws {
+        let executor = FixtureConveyorExecutor()
+        let store = ConveyorBoardStore(client: ConveyorProcessClient(executor: executor))
+        await store.refresh()
+        store.searchText = "does-not-match"
+        XCTAssertTrue(store.visibleFeatures.isEmpty)
+        XCTAssertTrue(store.hasActiveFilters)
+
+        let future = try JSONDecoder().decode(ConveyorFeature.self, from: Data("""
+        {"feature_id":"F200","title":"Future","milestone":"M1","status":"ready","description":"","specification_path":null,"kanban_column":"Ready","priority":"P1","queue_position":2,"dependencies":[],"dependencies_complete":true,"readiness":"ready","blocked_reason":null,"ready_transition_eligible":false,"ready_transition_reason":"Feature is in milestone M1; execution is restricted to active milestone M0.","active_milestone_member":false,"execution_eligible":false,"execution_ineligible_reason":"Feature is in milestone M1; execution is restricted to active milestone M0.","execution_profile":{"profile":"bounded_precise","model":"gpt-5.6-terra","reasoning":"high","parent_sessions":1,"child_sessions":0},"execution_model":"gpt-5.6-terra","reasoning":"high","branch":null,"commit":null,"latest_terminal_result":null}
+        """.utf8))
+        XCTAssertEqual(store.actionReason(.runThis, for: future), "Feature is in milestone M1; execution is restricted to active milestone M0.")
+        let commands = await executor.recordedArguments()
+        XCTAssertTrue(commands.filter { $0.first == "run" || $0.first == "resume" }.isEmpty)
+    }
 }
 
 private actor FixtureConveyorExecutor: ConveyorCommandExecuting {
@@ -94,7 +136,9 @@ private actor FixtureConveyorExecutor: ConveyorCommandExecuting {
         }
         if arguments.first == "queue" {
             let project = arguments[2]
-            return ConveyorCommandResult(exitCode: 0, standardOutput: fixtureQueue(project: project), standardError: "")
+            let scope = arguments[4]
+            let milestone = arguments.lastIndex(of: "--milestone").map { arguments[$0 + 1] }
+            return ConveyorCommandResult(exitCode: 0, standardOutput: fixtureQueue(project: project, scope: scope, milestone: milestone), standardError: "")
         }
         return ConveyorCommandResult(exitCode: 0, standardOutput: """
         {"classification":"ok","feature_id":"F001","changed_paths":["docs/FEATURE_QUEUE.yaml"],"model_sessions_launched":0,"child_sessions_launched":0}
@@ -106,12 +150,14 @@ private actor FixtureConveyorExecutor: ConveyorCommandExecuting {
 
 private func fixtureFeature(id: String, column: ConveyorColumn) -> ConveyorFeature {
     try! JSONDecoder().decode(ConveyorFeature.self, from: Data("""
-    {"feature_id":"\(id)","title":"Fixture \(id)","status":"proposed","description":"","specification_path":null,"kanban_column":"\(column.rawValue)","priority":"P2","queue_position":2,"dependencies":[],"dependencies_complete":true,"readiness":"not_ready","blocked_reason":null,"ready_transition_eligible":true,"ready_transition_reason":null,"execution_profile":{"profile":"bounded_precise","model":"gpt-5.6-terra","reasoning":"high","parent_sessions":1,"child_sessions":0},"execution_model":"gpt-5.6-terra","reasoning":"high","branch":null,"commit":null,"latest_terminal_result":null}
+    {"feature_id":"\(id)","title":"Fixture \(id)","milestone":"M0","status":"proposed","description":"","specification_path":null,"kanban_column":"\(column.rawValue)","priority":"P2","queue_position":2,"dependencies":[],"dependencies_complete":true,"readiness":"not_ready","blocked_reason":null,"ready_transition_eligible":true,"ready_transition_reason":null,"active_milestone_member":true,"execution_eligible":false,"execution_ineligible_reason":"feature status is proposed; expected ready","execution_profile":{"profile":"bounded_precise","model":"gpt-5.6-terra","reasoning":"high","parent_sessions":1,"child_sessions":0},"execution_model":"gpt-5.6-terra","reasoning":"high","branch":null,"commit":null,"latest_terminal_result":null}
     """.utf8))
 }
 
-private func fixtureQueue(project: String) -> String {
-    """
-    {"project_id":"\(project)","active_milestone":"M1","paused":false,"active_feature":null,"selected_feature":null,"next_ready_feature":null,"features":[{"feature_id":"F001","title":"Build queue controls","status":"proposed","description":"Controller backlog metadata","specification_path":"/tmp/F001.md","kanban_column":"Backlog","priority":"P2","queue_position":1,"dependencies":[],"dependencies_complete":true,"readiness":"not_ready","blocked_reason":null,"ready_transition_eligible":true,"ready_transition_reason":null,"execution_profile":{"profile":"bounded_precise","model":"gpt-5.6-terra","reasoning":"high","parent_sessions":1,"child_sessions":0},"execution_model":"gpt-5.6-terra","reasoning":"high","branch":null,"commit":null,"latest_terminal_result":null}]}
+private func fixtureQueue(project: String, scope: String = "active", milestone: String? = nil) -> String {
+    let featureID = milestone == "M1" ? "F002" : "F001"
+    let featureMilestone = milestone ?? "M0"
+    return """
+    {"project_id":"\(project)","scope":"\(scope)","requested_milestone":\(milestone.map { "\"\($0)\"" } ?? "null"),"active_milestone":"M0","paused":false,"active_feature":null,"selected_feature":null,"next_ready_feature":null,"total_feature_count":2,"scoped_feature_count":1,"visible_nonterminal_count":1,"terminal_feature_count":1,"milestones":[{"milestone_id":"M0","title":"Current","total_count":1,"unfinished_count":1,"ready_count":0,"blocked_count":0,"completed_count":0,"active":true},{"milestone_id":"M1","title":"Future","total_count":1,"unfinished_count":0,"ready_count":0,"blocked_count":0,"completed_count":1,"active":false}],"features":[{"feature_id":"\(featureID)","title":"Build queue controls","milestone":"\(featureMilestone)","status":"proposed","description":"Controller backlog metadata","specification_path":"/tmp/F001.md","kanban_column":"Backlog","priority":"P2","queue_position":1,"dependencies":[],"dependencies_complete":true,"readiness":"not_ready","blocked_reason":null,"ready_transition_eligible":true,"ready_transition_reason":null,"active_milestone_member":\(featureMilestone == "M0"),"execution_eligible":false,"execution_ineligible_reason":"feature status is proposed; expected ready","execution_profile":{"profile":"bounded_precise","model":"gpt-5.6-terra","reasoning":"high","parent_sessions":1,"child_sessions":0},"execution_model":"gpt-5.6-terra","reasoning":"high","branch":null,"commit":null,"latest_terminal_result":null}]}
     """
 }

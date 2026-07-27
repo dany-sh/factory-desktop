@@ -18,6 +18,46 @@ public enum ConveyorPriority: String, CaseIterable, Codable, Identifiable, Senda
     public var id: String { rawValue }
 }
 
+public enum ConveyorScope: String, CaseIterable, Codable, Identifiable, Sendable {
+    case active
+    case unfinished
+    case all
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .active: "Current Milestone"
+        case .unfinished: "All Unfinished"
+        case .all: "All Features"
+        }
+    }
+}
+
+public struct ConveyorMilestone: Codable, Equatable, Identifiable, Sendable {
+    public let milestoneID: String
+    public let title: String?
+    public let totalCount: Int
+    public let unfinishedCount: Int
+    public let readyCount: Int
+    public let blockedCount: Int
+    public let completedCount: Int
+    public let active: Bool
+
+    public var id: String { milestoneID }
+
+    enum CodingKeys: String, CodingKey {
+        case milestoneID = "milestone_id"
+        case title
+        case totalCount = "total_count"
+        case unfinishedCount = "unfinished_count"
+        case readyCount = "ready_count"
+        case blockedCount = "blocked_count"
+        case completedCount = "completed_count"
+        case active
+    }
+}
+
 public struct ConveyorProject: Identifiable, Equatable, Sendable {
     public let id: String
     public let name: String
@@ -35,26 +75,61 @@ public struct ConveyorProject: Identifiable, Equatable, Sendable {
 
 public struct ConveyorQueue: Codable, Equatable, Sendable {
     public let projectID: String
+    public let scope: ConveyorScope
+    public let requestedMilestone: String?
     public let activeMilestone: String
     public let paused: Bool
     public let activeFeature: String?
     public let selectedFeature: String?
     public let nextReadyFeature: String?
     public let features: [ConveyorFeature]
+    public let totalFeatureCount: Int
+    public let scopedFeatureCount: Int
+    public let visibleNonterminalCount: Int
+    public let terminalFeatureCount: Int
+    public let milestones: [ConveyorMilestone]
 
     enum CodingKeys: String, CodingKey {
         case projectID = "project_id"
+        case scope
+        case requestedMilestone = "requested_milestone"
         case activeMilestone = "active_milestone"
         case paused, features
         case activeFeature = "active_feature"
         case selectedFeature = "selected_feature"
         case nextReadyFeature = "next_ready_feature"
+        case totalFeatureCount = "total_feature_count"
+        case scopedFeatureCount = "scoped_feature_count"
+        case visibleNonterminalCount = "visible_nonterminal_count"
+        case terminalFeatureCount = "terminal_feature_count"
+        case milestones
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        projectID = try container.decode(String.self, forKey: .projectID)
+        scope = try container.decodeIfPresent(ConveyorScope.self, forKey: .scope) ?? .active
+        requestedMilestone = try container.decodeIfPresent(String.self, forKey: .requestedMilestone)
+        activeMilestone = try container.decode(String.self, forKey: .activeMilestone)
+        paused = try container.decode(Bool.self, forKey: .paused)
+        activeFeature = try container.decodeIfPresent(String.self, forKey: .activeFeature)
+        selectedFeature = try container.decodeIfPresent(String.self, forKey: .selectedFeature)
+        nextReadyFeature = try container.decodeIfPresent(String.self, forKey: .nextReadyFeature)
+        features = try container.decode([ConveyorFeature].self, forKey: .features)
+        totalFeatureCount = try container.decodeIfPresent(Int.self, forKey: .totalFeatureCount) ?? features.count
+        scopedFeatureCount = try container.decodeIfPresent(Int.self, forKey: .scopedFeatureCount) ?? features.count
+        visibleNonterminalCount = try container.decodeIfPresent(Int.self, forKey: .visibleNonterminalCount)
+            ?? features.filter { $0.kanbanColumn != .done }.count
+        terminalFeatureCount = try container.decodeIfPresent(Int.self, forKey: .terminalFeatureCount)
+            ?? features.filter { $0.kanbanColumn == .done }.count
+        milestones = try container.decodeIfPresent([ConveyorMilestone].self, forKey: .milestones) ?? []
     }
 }
 
 public struct ConveyorFeature: Codable, Identifiable, Equatable, Sendable {
     public let featureID: String
     public let title: String
+    public let milestone: String
     public let status: String
     public let description: String
     public let specificationPath: String?
@@ -73,12 +148,15 @@ public struct ConveyorFeature: Codable, Identifiable, Equatable, Sendable {
     public let branch: String?
     public let commit: String?
     public let latestTerminalResult: JSONValue?
+    public let activeMilestoneMember: Bool
+    public let executionEligible: Bool
+    public let executionIneligibleReason: String?
 
     public var id: String { featureID }
 
     enum CodingKeys: String, CodingKey {
         case featureID = "feature_id"
-        case title, status, description, priority, dependencies, readiness, branch, commit
+        case title, milestone, status, description, priority, dependencies, readiness, branch, commit
         case specificationPath = "specification_path"
         case kanbanColumn = "kanban_column"
         case queuePosition = "queue_position"
@@ -90,6 +168,37 @@ public struct ConveyorFeature: Codable, Identifiable, Equatable, Sendable {
         case executionModel = "execution_model"
         case reasoning = "reasoning"
         case latestTerminalResult = "latest_terminal_result"
+        case activeMilestoneMember = "active_milestone_member"
+        case executionEligible = "execution_eligible"
+        case executionIneligibleReason = "execution_ineligible_reason"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        featureID = try container.decode(String.self, forKey: .featureID)
+        title = try container.decode(String.self, forKey: .title)
+        milestone = try container.decodeIfPresent(String.self, forKey: .milestone) ?? ""
+        status = try container.decode(String.self, forKey: .status)
+        description = try container.decodeIfPresent(String.self, forKey: .description) ?? ""
+        specificationPath = try container.decodeIfPresent(String.self, forKey: .specificationPath)
+        kanbanColumn = try container.decode(ConveyorColumn.self, forKey: .kanbanColumn)
+        priority = try container.decode(ConveyorPriority.self, forKey: .priority)
+        queuePosition = try container.decode(Int.self, forKey: .queuePosition)
+        dependencies = try container.decodeIfPresent([String].self, forKey: .dependencies) ?? []
+        dependenciesComplete = try container.decodeIfPresent(Bool.self, forKey: .dependenciesComplete) ?? false
+        readiness = try container.decodeIfPresent(String.self, forKey: .readiness) ?? "not_ready"
+        blockedReason = try container.decodeIfPresent(String.self, forKey: .blockedReason)
+        readyTransitionEligible = try container.decodeIfPresent(Bool.self, forKey: .readyTransitionEligible) ?? false
+        readyTransitionReason = try container.decodeIfPresent(String.self, forKey: .readyTransitionReason)
+        executionProfile = try container.decode(ConveyorExecutionProfile.self, forKey: .executionProfile)
+        executionModel = try container.decodeIfPresent(String.self, forKey: .executionModel)
+        reasoning = try container.decodeIfPresent(String.self, forKey: .reasoning)
+        branch = try container.decodeIfPresent(String.self, forKey: .branch)
+        commit = try container.decodeIfPresent(String.self, forKey: .commit)
+        latestTerminalResult = try container.decodeIfPresent(JSONValue.self, forKey: .latestTerminalResult)
+        activeMilestoneMember = try container.decodeIfPresent(Bool.self, forKey: .activeMilestoneMember) ?? true
+        executionEligible = (try container.decodeIfPresent(Bool.self, forKey: .executionEligible)) ?? (kanbanColumn == .ready)
+        executionIneligibleReason = try container.decodeIfPresent(String.self, forKey: .executionIneligibleReason)
     }
 }
 

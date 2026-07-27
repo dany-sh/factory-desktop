@@ -117,8 +117,15 @@ public final class ConveyorProcessClient: @unchecked Sendable {
         self.serializer = serializer
     }
 
-    public func queue(projectID: String) async throws -> ConveyorQueue {
-        try await decode(ConveyorQueue.self, arguments: ["queue", "--project", projectID, "--json"])
+    public func queue(
+        projectID: String,
+        scope: ConveyorScope = .active,
+        milestone: String? = nil
+    ) async throws -> ConveyorQueue {
+        var arguments = ["queue", "--project", projectID, "--scope", scope.rawValue]
+        if let milestone { arguments += ["--milestone", milestone] }
+        arguments.append("--json")
+        return try await decode(ConveyorQueue.self, arguments: arguments)
     }
 
     public func markReady(projectID: String, featureID: String) async throws -> ConveyorMutationResult {

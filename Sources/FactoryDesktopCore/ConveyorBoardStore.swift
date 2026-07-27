@@ -6,8 +6,12 @@ public final class ConveyorBoardStore: ObservableObject {
     @Published public private(set) var queues: [String: ConveyorQueue] = [:]
     @Published public var selectedProjectID: String = ConveyorProject.registered[0].id
     @Published public var selectedFeatureID: String?
+    @Published public var scope: ConveyorScope = .active
+    @Published public var milestoneFilter: String?
     @Published public var searchText = ""
     @Published public var priorityFilter: ConveyorPriority?
+    @Published public var statusFilter: ConveyorColumn?
+    @Published public var isSidebarVisible = true
     @Published public var isInspectorVisible = true
     @Published public var isLoading = false
     @Published public var mutationInFlight = false
@@ -38,6 +42,7 @@ public final class ConveyorBoardStore: ObservableObject {
             .filter { $0.kanbanColumn == column }
             .filter { feature in
                 (priorityFilter == nil || feature.priority == priorityFilter)
+                    && (statusFilter == nil || feature.kanbanColumn == statusFilter)
                     && (searchText.isEmpty || feature.featureID.localizedCaseInsensitiveContains(searchText)
                         || feature.title.localizedCaseInsensitiveContains(searchText))
             }
@@ -48,11 +53,31 @@ public final class ConveyorBoardStore: ObservableObject {
             }
     }
 
+    public var visibleFeatures: [ConveyorFeature] {
+        ConveyorColumn.allCases.flatMap { features(in: $0) }
+    }
+
+    public var hasActiveFilters: Bool {
+        !searchText.isEmpty || priorityFilter != nil || statusFilter != nil || milestoneFilter != nil
+    }
+
+    public func resetFilters() {
+        searchText = ""
+        priorityFilter = nil
+        statusFilter = nil
+        milestoneFilter = nil
+        Task { await refresh() }
+    }
+
     public func refresh() async {
         isLoading = true
         defer { isLoading = false }
         do {
-            let updated = try await client.queue(projectID: selectedProjectID)
+            let updated = try await client.queue(
+                projectID: selectedProjectID,
+                scope: scope,
+                milestone: milestoneFilter
+            )
             queues[selectedProjectID] = updated
             if let selectedFeatureID, !updated.features.contains(where: { $0.id == selectedFeatureID }) {
                 self.selectedFeatureID = nil
@@ -70,13 +95,34 @@ public final class ConveyorBoardStore: ObservableObject {
         await refresh()
     }
 
+    public func setScope(_ newScope: ConveyorScope) async {
+        guard scope != newScope else { return }
+        scope = newScope
+        if newScope == .active { milestoneFilter = nil }
+        await refresh()
+    }
+
+    public func setMilestoneFilter(_ milestone: String?) async {
+        guard milestoneFilter != milestone else { return }
+        milestoneFilter = milestone
+        await refresh()
+    }
+
     public func selectFeature(_ featureID: String) {
         selectedFeatureID = featureID
+    }
+
+    public func inspect(_ featureID: String) {
+        selectedFeatureID = featureID
+        isInspectorVisible = true
     }
 
     public func actionReason(_ action: ConveyorBoardAction, for feature: ConveyorFeature?) -> String? {
         guard let queue else { return "Refresh the project first." }
         guard let feature else { return "Select a feature first." }
+        guard feature.activeMilestoneMember else {
+            return feature.executionIneligibleReason ?? "Execution is restricted to the active milestone."
+        }
         switch action {
         case .markReady:
             if queue.activeFeature != nil { return "A Conveyor transaction is active." }
@@ -85,7 +131,7 @@ public final class ConveyorBoardStore: ObservableObject {
             if queue.activeFeature != nil { return "A Conveyor transaction is active." }
             return feature.status == "ready" ? nil : "Only Ready features can return to Backlog."
         case .runThis:
-            return feature.kanbanColumn == .ready ? nil : "Only an eligible Ready feature can be run."
+            return feature.executionEligible ? nil : (feature.executionIneligibleReason ?? "Only an eligible Ready feature can be run.")
         case .setPriority, .reorder:
             if queue.activeFeature != nil { return "A Conveyor transaction is active." }
             return feature.kanbanColumn == .backlog || feature.kanbanColumn == .ready
@@ -120,7 +166,7 @@ public final class ConveyorBoardStore: ObservableObject {
             return
         }
         guard let target, target.id != feature.id else { return }
-        guard target.kanbanColumn == column else { return }
+        guard target.kanbanColumn == column, target.milestone == feature.milestone else { return }
         await mutate("Reordered \(feature.featureID).") {
             try await self.client.reorder(projectID: self.selectedProjectID, featureID: feature.featureID, beforeFeatureID: target.featureID)
         }

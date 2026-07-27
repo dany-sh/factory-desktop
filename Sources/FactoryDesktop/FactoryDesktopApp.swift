@@ -46,6 +46,15 @@ struct FactoryDesktopApp: App {
                 }
                 .keyboardShortcut("r", modifiers: .command)
             }
+            CommandGroup(after: .toolbar) {
+                Button("Toggle Sidebar") {
+                    conveyorStore.isSidebarVisible.toggle()
+                }
+                Button("Toggle Inspector") {
+                    conveyorStore.isInspectorVisible.toggle()
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+            }
         }
     }
 }

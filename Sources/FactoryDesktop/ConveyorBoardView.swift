@@ -5,25 +5,35 @@ import UniformTypeIdentifiers
 
 struct ConveyorBoardView: View {
     @ObservedObject var store: ConveyorBoardStore
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var pendingExecution: PendingExecution?
-    @State private var showDone = false
+    @SceneStorage("conveyor.board.sidebar-visible") private var sidebarVisible = true
+    @SceneStorage("conveyor.board.inspector-visible") private var inspectorVisible = true
+    @SceneStorage("conveyor.board.show-done") private var showDone = false
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
+        NavigationSplitView(columnVisibility: sidebarVisibilityBinding) {
             ConveyorProjectSidebar(store: store)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
-        } content: {
+        } detail: {
             board
                 .navigationSplitViewColumnWidth(min: 720, ideal: 980)
-        } detail: {
-            ConveyorFeatureInspector(store: store)
-                .navigationSplitViewColumnWidth(min: 300, ideal: 360, max: 520)
         }
         .navigationTitle(store.selectedProject.name)
         .searchable(text: $store.searchText, prompt: "Search features")
         .toolbar { toolbar }
+        .inspector(isPresented: inspectorBinding) {
+            ConveyorFeatureInspector(store: store)
+                .inspectorColumnWidth(min: 300, ideal: 360, max: 520)
+        }
         .task { await store.refresh() }
+        .onAppear {
+            store.isSidebarVisible = sidebarVisible
+            store.isInspectorVisible = inspectorVisible
+        }
+        .onChange(of: sidebarVisible) { _, visible in store.isSidebarVisible = visible }
+        .onChange(of: inspectorVisible) { _, visible in store.isInspectorVisible = visible }
+        .onChange(of: store.isSidebarVisible) { _, visible in sidebarVisible = visible }
+        .onChange(of: store.isInspectorVisible) { _, visible in inspectorVisible = visible }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await store.refresh() }
         }
@@ -52,8 +62,76 @@ struct ConveyorBoardView: View {
         }
     }
 
+    private var sidebarVisibilityBinding: Binding<NavigationSplitViewVisibility> {
+        Binding(
+            get: { sidebarVisible ? .all : .detailOnly },
+            set: { sidebarVisible = $0 != .detailOnly }
+        )
+    }
+
+    private var inspectorBinding: Binding<Bool> {
+        Binding(
+            get: { inspectorVisible },
+            set: { inspectorVisible = $0 }
+        )
+    }
+
+    private var scopeBinding: Binding<ConveyorScope> {
+        Binding(
+            get: { store.scope },
+            set: { scope in Task { await store.setScope(scope) } }
+        )
+    }
+
+    private var milestoneBinding: Binding<String?> {
+        Binding(
+            get: { store.milestoneFilter },
+            set: { milestone in Task { await store.setMilestoneFilter(milestone) } }
+        )
+    }
+
+    @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .navigation) {
+            Button {
+                store.isSidebarVisible.toggle()
+            } label: {
+                Label("Toggle Sidebar", systemImage: "sidebar.leading")
+            }
+            .help("Show or hide the project sidebar")
+
+            if !sidebarVisible {
+                Menu {
+                    ForEach(store.projects) { project in
+                        Button(project.name) { Task { await store.selectProject(project.id) } }
+                    }
+                } label: {
+                    Label(store.selectedProject.name, systemImage: "folder")
+                }
+            }
+        }
+
         ToolbarItemGroup(placement: .primaryAction) {
+            Picker("Scope", selection: scopeBinding) {
+                ForEach(ConveyorScope.allCases) { scope in
+                    Text(scope.title).tag(scope)
+                }
+            }
+            .pickerStyle(.menu)
+            .help("Choose which controller-owned feature scope to browse")
+
+            if store.scope != .active, let queue = store.queue {
+                Picker("Milestone", selection: milestoneBinding) {
+                    Text("All Milestones").tag(String?.none)
+                    ForEach(queue.milestones) { milestone in
+                        Text(milestone.active ? "\(milestone.milestoneID) (Active)" : milestone.milestoneID)
+                            .tag(String?.some(milestone.milestoneID))
+                    }
+                }
+                .pickerStyle(.menu)
+                .help("Filter the read-only board by milestone")
+            }
+
             Picker("Priority", selection: $store.priorityFilter) {
                 Text("All priorities").tag(ConveyorPriority?.none)
                 ForEach(ConveyorPriority.allCases) { priority in
@@ -62,6 +140,20 @@ struct ConveyorBoardView: View {
             }
             .pickerStyle(.menu)
             .help("Filter features by priority")
+
+            Picker("Status", selection: $store.statusFilter) {
+                Text("All statuses").tag(ConveyorColumn?.none)
+                ForEach(ConveyorColumn.allCases) { column in
+                    Text(column.rawValue).tag(ConveyorColumn?.some(column))
+                }
+            }
+            .pickerStyle(.menu)
+            .help("Filter features by Kanban column")
+
+            if store.hasActiveFilters {
+                Button("Reset Filters") { store.resetFilters() }
+                    .help("Clear search, priority, status, and milestone filters")
+            }
 
             Button {
                 pendingExecution = PendingExecution(kind: .next)
@@ -80,20 +172,20 @@ struct ConveyorBoardView: View {
             .keyboardShortcut("p", modifiers: [.command, .option])
 
             Button {
-                Task { await store.refresh() }
+                store.isInspectorVisible.toggle()
             } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
+                Label("Toggle Inspector", systemImage: "sidebar.trailing")
             }
-            .disabled(store.isLoading || store.mutationInFlight)
-            .keyboardShortcut("r", modifiers: .command)
+            .keyboardShortcut("i", modifiers: [.command, .option])
 
             Menu {
-                Toggle("Show Done", isOn: $showDone)
-                Divider()
-                Button("Toggle Inspector") {
-                    columnVisibility = columnVisibility == .all ? .doubleColumn : .all
+                if let queue = store.queue, queue.terminalFeatureCount > 0 {
+                    Toggle("Show Done", isOn: $showDone)
                 }
-                    .keyboardShortcut("i", modifiers: [.command, .option])
+                Divider()
+                Button("Refresh") { Task { await store.refresh() } }
+                    .disabled(store.isLoading || store.mutationInFlight)
+                    .keyboardShortcut("r", modifiers: .command)
             } label: {
                 Label("More", systemImage: "ellipsis.circle")
             }
@@ -104,17 +196,18 @@ struct ConveyorBoardView: View {
         Group {
             if let queue = store.queue {
                 VStack(alignment: .leading, spacing: 0) {
+                    boardSummary(queue)
                     ConveyorPriorityDropStrip(store: store)
                     ScrollView(.horizontal) {
                         HStack(alignment: .top, spacing: 14) {
-                            ForEach(ConveyorColumn.allCases) { column in
-                                if column != .done || showDone {
-                                    ConveyorKanbanColumn(
-                                        column: column,
-                                        features: store.features(in: column),
-                                        store: store
-                                    )
-                                }
+                            ForEach(displayedColumns) { column in
+                                ConveyorKanbanColumn(
+                                    column: column,
+                                    features: store.features(in: column),
+                                    emptyMessage: emptyMessage(for: column, queue: queue),
+                                    showsMilestone: store.scope != .active,
+                                    store: store
+                                )
                             }
                         }
                         .padding(18)
@@ -135,6 +228,46 @@ struct ConveyorBoardView: View {
                     description: Text("Refresh to load the controller’s read-only queue projection."))
             }
         }
+    }
+
+    private var displayedColumns: [ConveyorColumn] {
+        ConveyorColumn.allCases.filter { column in
+            guard column == .done else { return true }
+            return showDone && store.features(in: .done).isEmpty == false
+        }
+    }
+
+    private func boardSummary(_ queue: ConveyorQueue) -> some View {
+        let hiddenDoneCount = store.features(in: .done).count
+        let displayedFeatureCount = displayedColumns.flatMap { store.features(in: $0) }.count
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text("\(displayedFeatureCount) shown of \(queue.features.count) features")
+                    .font(.headline)
+                if hiddenDoneCount > 0, !showDone {
+                    Button("\(hiddenDoneCount) completed hidden") { showDone = true }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+                Spacer()
+            }
+            Text("Current milestone: \(queue.activeMilestone)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+    }
+
+    private func emptyMessage(for column: ConveyorColumn, queue: ConveyorQueue) -> String {
+        if store.hasActiveFilters { return "No features match the current filters." }
+        if queue.scope == .unfinished, queue.visibleNonterminalCount == 0 {
+            return "No unfinished features exist across known milestones."
+        }
+        if queue.scope == .active {
+            return "No \(column.rawValue) features in \(queue.activeMilestone)"
+        }
+        return "No \(column.rawValue) features"
     }
 }
 
@@ -216,6 +349,8 @@ private struct ConveyorProjectSidebar: View {
 private struct ConveyorKanbanColumn: View {
     let column: ConveyorColumn
     let features: [ConveyorFeature]
+    let emptyMessage: String
+    let showsMilestone: Bool
     @ObservedObject var store: ConveyorBoardStore
 
     var body: some View {
@@ -229,15 +364,19 @@ private struct ConveyorKanbanColumn: View {
                 ScrollView {
                     LazyVStack(spacing: 8) {
                         if features.isEmpty {
-                            Text(column == .backlog || column == .ready ? "Drop to reorder" : "No features")
+                            Text(emptyMessage)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, minHeight: 74)
                         }
                         ForEach(features) { feature in
-                            ConveyorFeatureCard(feature: feature, selected: store.selectedFeatureID == feature.id) {
-                                store.selectFeature(feature.id)
-                            }
+                            ConveyorFeatureCard(
+                                feature: feature,
+                                selected: store.selectedFeatureID == feature.id,
+                                showsMilestone: showsMilestone,
+                                select: { store.selectFeature(feature.id) },
+                                inspect: { store.inspect(feature.id) }
+                            )
                             .onDrop(of: [UTType.text], delegate: ConveyorDropDelegate(
                                 target: feature,
                                 column: column,
@@ -248,7 +387,7 @@ private struct ConveyorKanbanColumn: View {
                 }
             }
         }
-        .frame(width: 246, height: 620, alignment: .top)
+        .frame(minWidth: 220, idealWidth: 252, maxWidth: 300, minHeight: 500, idealHeight: 620, maxHeight: .infinity, alignment: .top)
         .padding(12)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(column.rawValue) column")
@@ -274,7 +413,9 @@ private struct ConveyorAdaptiveSurface<Content: View>: View {
 private struct ConveyorFeatureCard: View {
     let feature: ConveyorFeature
     let selected: Bool
+    let showsMilestone: Bool
     let select: () -> Void
+    let inspect: () -> Void
 
     var body: some View {
         Button(action: select) {
@@ -288,6 +429,10 @@ private struct ConveyorFeatureCard: View {
                         .background(priorityColor.opacity(0.16), in: Capsule())
                 }
                 Text(feature.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                if showsMilestone {
+                    Text("\(feature.milestone) · \(feature.priority.rawValue) · \(feature.kanbanColumn.rawValue)")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
                 Text(feature.blockedReason ?? feature.status.replacingOccurrences(of: "_", with: " "))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 if let model = feature.executionModel, let reasoning = feature.reasoning {
@@ -303,7 +448,7 @@ private struct ConveyorFeatureCard: View {
         .buttonStyle(.plain)
         .onDrag { NSItemProvider(object: feature.featureID as NSString) }
         .contextMenu {
-            Button("Open Inspector") { select() }
+            Button("Open Inspector") { inspect() }
         }
     }
 
