@@ -6,16 +6,14 @@ import SwiftUI
 @main
 struct FactoryDesktopApp: App {
     @NSApplicationDelegateAdaptor(FactoryDesktopAppDelegate.self) private var appDelegate
+    @StateObject private var conveyorStore = ConveyorBoardStore()
     @StateObject private var store = AppStore(appTerminator: {
         NSApp.terminate(nil)
     })
-    @StateObject private var router = AppRouter()
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environmentObject(store)
-                .environmentObject(router)
+            ConveyorBoardView(store: conveyorStore)
                 .background(WindowAccessor { window in
                     FactoryDesktopAppDelegate.activate(window: window)
                 })
@@ -42,47 +40,11 @@ struct FactoryDesktopApp: App {
         .defaultSize(width: 940, height: 760)
         .windowResizability(.contentMinSize)
         .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("New Task") {
-                    Task { await store.createTask() }
-                }
-                .keyboardShortcut("n", modifiers: [.command])
-                .disabled(store.selectedProject == nil)
-
-                Divider()
-
-                Button("Register Project...") {
-                    router.showRegisterProject()
-                }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
-
-                Button("Register This App") {
-                    store.registerSelfProject()
-                }
-                .keyboardShortcut("n", modifiers: [.command, .option])
-            }
-
-            CommandGroup(replacing: .appSettings) {
-                Button("Settings") {
-                    router.openSettings(.general)
-                }
-                .keyboardShortcut(",", modifiers: [.command])
-            }
-
             CommandGroup(after: .newItem) {
-                Button("Refresh Git Status") {
-                    Task { await store.refreshGitStatus() }
+                Button("Refresh Conveyor") {
+                    Task { await conveyorStore.refresh() }
                 }
-                .keyboardShortcut("r", modifiers: [.command, .shift])
-
-                Button("Check App Updates") {
-                    Task { await store.refreshAppUpdateStatus() }
-                }
-
-                Button("Update Factory Desktop") {
-                    Task { await store.applyAppUpdate() }
-                }
-                .disabled(!store.appUpdateStatus.isUpdateAvailable || store.appUpdateStatus.isApplying)
+                .keyboardShortcut("r", modifiers: .command)
             }
         }
     }
