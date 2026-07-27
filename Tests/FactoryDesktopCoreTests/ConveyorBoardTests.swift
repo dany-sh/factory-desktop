@@ -131,8 +131,8 @@ final class ConveyorBoardTests: XCTestCase {
         store.toggleInspector()
         XCTAssertFalse(store.isInspectorVisible)
 
-        store.selectFeature("F001")
-        store.toggleInspector()
+        store.inspect("F001")
+        XCTAssertEqual(store.selectedFeatureID, "F001")
         XCTAssertTrue(store.isInspectorVisible)
         store.toggleInspector()
         XCTAssertFalse(store.isInspectorVisible)

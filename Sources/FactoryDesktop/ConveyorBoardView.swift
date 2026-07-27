@@ -464,6 +464,8 @@ private struct ConveyorFeatureCard: View {
         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .onDrag { ConveyorFeatureDrag.provider(for: feature.featureID) }
         .simultaneousGesture(TapGesture().onEnded(select))
+        .simultaneousGesture(TapGesture(count: 2).onEnded(inspect))
+        .accessibilityHint("Double-click to open the feature inspector")
         .contextMenu {
             Button("Open Inspector") { inspect() }
         }
