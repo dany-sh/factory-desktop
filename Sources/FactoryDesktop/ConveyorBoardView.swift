@@ -200,19 +200,29 @@ struct ConveyorBoardView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     boardSummary(queue)
                     ConveyorPriorityDropStrip(store: store)
-                    ScrollView(.horizontal) {
-                        HStack(alignment: .top, spacing: 14) {
-                            ForEach(displayedColumns) { column in
-                                ConveyorKanbanColumn(
-                                    column: column,
-                                    features: store.features(in: column),
-                                    emptyMessage: emptyMessage(for: column, queue: queue),
-                                    showsMilestone: store.scope != .active,
-                                    store: store
-                                )
+                    GeometryReader { geometry in
+                        let columns = displayedColumns
+                        let columnSpacing: CGFloat = 14
+                        let horizontalInsets: CGFloat = 36
+                        let columnOuterPadding: CGFloat = 16
+                        let availableWidth = geometry.size.width - horizontalInsets - columnSpacing * CGFloat(max(columns.count - 1, 0))
+                        let columnWidth = max(180, availableWidth / CGFloat(max(columns.count, 1)) - columnOuterPadding)
+
+                        ScrollView(.horizontal) {
+                            HStack(alignment: .top, spacing: columnSpacing) {
+                                ForEach(columns) { column in
+                                    ConveyorKanbanColumn(
+                                        column: column,
+                                        features: store.features(in: column),
+                                        emptyMessage: emptyMessage(for: column, queue: queue),
+                                        showsMilestone: store.scope != .active,
+                                        width: columnWidth,
+                                        store: store
+                                    )
+                                }
                             }
+                            .padding(18)
                         }
-                        .padding(18)
                     }
                 }
                 .overlay(alignment: .topTrailing) {
@@ -353,6 +363,7 @@ private struct ConveyorKanbanColumn: View {
     let features: [ConveyorFeature]
     let emptyMessage: String
     let showsMilestone: Bool
+    let width: CGFloat
     @ObservedObject var store: ConveyorBoardStore
 
     var body: some View {
@@ -389,7 +400,8 @@ private struct ConveyorKanbanColumn: View {
                 }
             }
         }
-        .frame(minWidth: 196, idealWidth: 220, maxWidth: 280, minHeight: 500, idealHeight: 620, maxHeight: .infinity, alignment: .top)
+        .frame(width: width, alignment: .top)
+        .frame(minHeight: 500, idealHeight: 620, maxHeight: .infinity, alignment: .top)
         .padding(8)
         .onDrop(of: [ConveyorFeatureDrag.contentType], delegate: ConveyorColumnDropDelegate(column: column, store: store))
         .accessibilityElement(children: .contain)
@@ -449,7 +461,9 @@ private struct ConveyorFeatureCard: View {
             .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(selected ? Color.accentColor.opacity(0.65) : Color.secondary.opacity(0.2)))
         }
         .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .onDrag { ConveyorFeatureDrag.provider(for: feature.featureID) }
+        .simultaneousGesture(TapGesture().onEnded(select))
         .contextMenu {
             Button("Open Inspector") { inspect() }
         }
