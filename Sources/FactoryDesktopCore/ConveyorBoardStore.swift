@@ -119,6 +119,14 @@ public final class ConveyorBoardStore: ObservableObject {
         isInspectorVisible = true
     }
 
+    public func toggleInspector() {
+        guard selectedFeature != nil else {
+            isInspectorVisible = false
+            return
+        }
+        isInspectorVisible.toggle()
+    }
+
     public func actionReason(_ action: ConveyorBoardAction, for feature: ConveyorFeature?) -> String? {
         guard let queue else { return "Refresh the project first." }
         guard let feature else { return "Select a feature first." }
@@ -162,15 +170,39 @@ public final class ConveyorBoardStore: ObservableObject {
 
     /// Dragging changes queue metadata only. It never invokes a run command.
     public func drop(_ feature: ConveyorFeature, onto target: ConveyorFeature?, column: ConveyorColumn) async {
-        guard actionReason(.reorder, for: feature) == nil else { return }
         guard column == .backlog || column == .ready else {
             errorMessage = "Running, Blocked, and Done do not accept drops."
             return
         }
-        guard let target, target.id != feature.id else { return }
-        guard target.kanbanColumn == column, target.milestone == feature.milestone else { return }
-        await mutate("Reordered \(feature.featureID).") {
-            try await self.client.reorder(projectID: self.selectedProjectID, featureID: feature.featureID, beforeFeatureID: target.featureID)
+
+        switch (feature.kanbanColumn, column) {
+        case (.backlog, .ready):
+            guard let reason = actionReason(.markReady, for: feature) else {
+                await markReady(feature)
+                return
+            }
+            errorMessage = reason
+        case (.ready, .backlog):
+            guard let reason = actionReason(.moveToBacklog, for: feature) else {
+                await moveToBacklog(feature)
+                return
+            }
+            errorMessage = reason
+        case (.backlog, .backlog), (.ready, .ready):
+            guard actionReason(.reorder, for: feature) == nil else { return }
+            guard let target, target.id != feature.id else {
+                errorMessage = "Drop onto another card to reorder within \(column.rawValue)."
+                return
+            }
+            guard target.kanbanColumn == column, target.milestone == feature.milestone else {
+                errorMessage = "Cards can only be reordered within their own milestone."
+                return
+            }
+            await mutate("Reordered \(feature.featureID).") {
+                try await self.client.reorder(projectID: self.selectedProjectID, featureID: feature.featureID, beforeFeatureID: target.featureID)
+            }
+        default:
+            errorMessage = "Only Backlog and Ready cards can be moved between those columns."
         }
     }
 

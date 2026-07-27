@@ -51,7 +51,7 @@ struct FactoryDesktopApp: App {
                     conveyorStore.isSidebarVisible.toggle()
                 }
                 Button("Toggle Inspector") {
-                    conveyorStore.isInspectorVisible.toggle()
+                    conveyorStore.toggleInspector()
                 }
                 .keyboardShortcut("i", modifiers: [.command, .option])
             }

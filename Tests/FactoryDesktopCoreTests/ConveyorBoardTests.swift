@@ -78,6 +78,21 @@ final class ConveyorBoardTests: XCTestCase {
         XCTAssertFalse(commands.contains { $0.first == "run" || $0.first == "resume" })
     }
 
+    func testCardDragTransitionsUseControllerReadyAndBacklogActionsWithoutRunning() async {
+        let executor = FixtureConveyorExecutor()
+        let store = ConveyorBoardStore(client: ConveyorProcessClient(executor: executor))
+        await store.refresh()
+        let backlogFeature = try! XCTUnwrap(store.queue?.features.first)
+
+        await store.drop(backlogFeature, onto: nil, column: .ready)
+        await store.drop(fixtureFeature(id: "F010", column: .ready), onto: nil, column: .backlog)
+
+        let commands = await executor.recordedArguments()
+        XCTAssertTrue(commands.contains(["ready", "--project", "interview-companion", "--feature", "F001"]))
+        XCTAssertTrue(commands.contains(["backlog", "--project", "interview-companion", "--feature", "F010"]))
+        XCTAssertFalse(commands.contains { $0.first == "run" || $0.first == "resume" })
+    }
+
     func testProjectSwitchAndPauseStateRefresh() async {
         let executor = FixtureConveyorExecutor()
         let store = ConveyorBoardStore(client: ConveyorProcessClient(executor: executor))
@@ -107,6 +122,20 @@ final class ConveyorBoardTests: XCTestCase {
         XCTAssertFalse(store.isInspectorVisible)
         let commands = await executor.recordedArguments()
         XCTAssertTrue(commands.contains(["queue", "--project", "interview-companion", "--scope", "all", "--milestone", "M1", "--json"]))
+    }
+
+    func testInspectorToggleRequiresSelectionAndRestoresTheSelectedFeatureInspector() async {
+        let store = ConveyorBoardStore(client: ConveyorProcessClient(executor: FixtureConveyorExecutor()))
+        await store.refresh()
+
+        store.toggleInspector()
+        XCTAssertFalse(store.isInspectorVisible)
+
+        store.selectFeature("F001")
+        store.toggleInspector()
+        XCTAssertTrue(store.isInspectorVisible)
+        store.toggleInspector()
+        XCTAssertFalse(store.isInspectorVisible)
     }
 
     func testLocalFiltersAndFutureMilestoneActionsDoNotMutate() async throws {
@@ -152,8 +181,9 @@ private actor FixtureConveyorExecutor: ConveyorCommandExecuting {
 }
 
 private func fixtureFeature(id: String, column: ConveyorColumn) -> ConveyorFeature {
-    try! JSONDecoder().decode(ConveyorFeature.self, from: Data("""
-    {"feature_id":"\(id)","title":"Fixture \(id)","milestone":"M0","status":"proposed","description":"","specification_path":null,"kanban_column":"\(column.rawValue)","priority":"P2","queue_position":2,"dependencies":[],"dependencies_complete":true,"readiness":"not_ready","blocked_reason":null,"ready_transition_eligible":true,"ready_transition_reason":null,"active_milestone_member":true,"execution_eligible":false,"execution_ineligible_reason":"feature status is proposed; expected ready","execution_profile":{"profile":"bounded_precise","model":"gpt-5.6-terra","reasoning":"high","parent_sessions":1,"child_sessions":0},"execution_model":"gpt-5.6-terra","reasoning":"high","branch":null,"commit":null,"latest_terminal_result":null}
+    let isReady = column == .ready
+    return try! JSONDecoder().decode(ConveyorFeature.self, from: Data("""
+    {"feature_id":"\(id)","title":"Fixture \(id)","milestone":"M0","status":"\(isReady ? "ready" : "proposed")","description":"","specification_path":null,"kanban_column":"\(column.rawValue)","priority":"P2","queue_position":2,"dependencies":[],"dependencies_complete":true,"readiness":"\(isReady ? "ready" : "not_ready")","blocked_reason":null,"ready_transition_eligible":\(!isReady),"ready_transition_reason":null,"active_milestone_member":true,"execution_eligible":false,"execution_ineligible_reason":"feature status is \(isReady ? "ready; expected execution eligibility" : "proposed; expected ready")","execution_profile":{"profile":"bounded_precise","model":"gpt-5.6-terra","reasoning":"high","parent_sessions":1,"child_sessions":0},"execution_model":"gpt-5.6-terra","reasoning":"high","branch":null,"commit":null,"latest_terminal_result":null}
     """.utf8))
 }
 

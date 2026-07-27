@@ -72,8 +72,8 @@ struct ConveyorBoardView: View {
 
     private var inspectorBinding: Binding<Bool> {
         Binding(
-            get: { inspectorVisible && store.selectedFeature != nil },
-            set: { inspectorVisible = $0 }
+            get: { store.isInspectorVisible && store.selectedFeature != nil },
+            set: { store.isInspectorVisible = $0 }
         )
     }
 
@@ -171,11 +171,10 @@ struct ConveyorBoardView: View {
 
         ToolbarItem(placement: .navigation) {
             Button {
-                store.isInspectorVisible.toggle()
+                store.toggleInspector()
             } label: {
                 Label("Toggle Inspector", systemImage: "sidebar.trailing")
             }
-            .keyboardShortcut("i", modifiers: [.command, .option])
             .help("Show or hide the feature inspector")
             .disabled(store.selectedFeature == nil)
         }
@@ -392,6 +391,7 @@ private struct ConveyorKanbanColumn: View {
         }
         .frame(minWidth: 196, idealWidth: 220, maxWidth: 280, minHeight: 500, idealHeight: 620, maxHeight: .infinity, alignment: .top)
         .padding(8)
+        .onDrop(of: [ConveyorFeatureDrag.contentType], delegate: ConveyorColumnDropDelegate(column: column, store: store))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(column.rawValue) column")
     }
@@ -449,7 +449,7 @@ private struct ConveyorFeatureCard: View {
             .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(selected ? Color.accentColor.opacity(0.65) : Color.secondary.opacity(0.2)))
         }
         .buttonStyle(.plain)
-        .onDrag { NSItemProvider(object: feature.featureID as NSString) }
+        .onDrag { ConveyorFeatureDrag.provider(for: feature.featureID) }
         .contextMenu {
             Button("Open Inspector") { inspect() }
         }
@@ -474,24 +474,34 @@ private struct ConveyorDropDelegate: DropDelegate {
     @ObservedObject var store: ConveyorBoardStore
 
     func validateDrop(info: DropInfo) -> Bool {
-        (column == .backlog || column == .ready) && info.hasItemsConforming(to: [UTType.text])
+        (column == .backlog || column == .ready) && info.hasItemsConforming(to: [ConveyorFeatureDrag.contentType])
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        guard let provider = info.itemProviders(for: [UTType.text]).first else { return false }
-        provider.loadItem(forTypeIdentifier: UTType.text.identifier, options: nil) { item, _ in
-            let featureID: String?
-            if let data = item as? Data { featureID = String(data: data, encoding: .utf8) }
-            else if let text = item as? String { featureID = text }
-            else if let text = item as? NSString { featureID = text as String }
-            else { featureID = nil }
-            guard let featureID else { return }
+        ConveyorFeatureDrag.loadFeatureID(from: info) { featureID in
             Task { @MainActor in
                 guard let feature = store.queue?.features.first(where: { $0.featureID == featureID }) else { return }
                 await store.drop(feature, onto: target, column: column)
             }
         }
-        return true
+    }
+}
+
+private struct ConveyorColumnDropDelegate: DropDelegate {
+    let column: ConveyorColumn
+    @ObservedObject var store: ConveyorBoardStore
+
+    func validateDrop(info: DropInfo) -> Bool {
+        (column == .backlog || column == .ready) && info.hasItemsConforming(to: [ConveyorFeatureDrag.contentType])
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        ConveyorFeatureDrag.loadFeatureID(from: info) { featureID in
+            Task { @MainActor in
+                guard let feature = store.queue?.features.first(where: { $0.featureID == featureID }) else { return }
+                await store.drop(feature, onto: nil, column: column)
+            }
+        }
     }
 }
 
@@ -500,21 +510,39 @@ private struct ConveyorPriorityDropDelegate: DropDelegate {
     @ObservedObject var store: ConveyorBoardStore
 
     func validateDrop(info: DropInfo) -> Bool {
-        info.hasItemsConforming(to: [UTType.text])
+        info.hasItemsConforming(to: [ConveyorFeatureDrag.contentType])
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        guard let provider = info.itemProviders(for: [UTType.text]).first else { return false }
-        provider.loadItem(forTypeIdentifier: UTType.text.identifier, options: nil) { item, _ in
-            let featureID = (item as? Data).flatMap { String(data: $0, encoding: .utf8) }
-                ?? (item as? String)
-                ?? (item as? NSString).map(String.init)
-            guard let featureID else { return }
+        ConveyorFeatureDrag.loadFeatureID(from: info) { featureID in
             Task { @MainActor in
                 guard let feature = store.queue?.features.first(where: { $0.featureID == featureID }),
                       store.actionReason(.setPriority, for: feature) == nil else { return }
                 await store.setPriority(feature, priority: priority)
             }
+        }
+    }
+}
+
+private enum ConveyorFeatureDrag {
+    static let contentType = UTType.utf8PlainText
+
+    static func provider(for featureID: String) -> NSItemProvider {
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: contentType.identifier, visibility: .all) { completion in
+            completion(Data(featureID.utf8), nil)
+            return nil
+        }
+        return provider
+    }
+
+    static func loadFeatureID(from info: DropInfo, receive: @escaping (String) -> Void) -> Bool {
+        guard let provider = info.itemProviders(for: [contentType]).first else { return false }
+        provider.loadDataRepresentation(forTypeIdentifier: contentType.identifier) { data, _ in
+            guard let data,
+                  let featureID = String(data: data, encoding: .utf8),
+                  !featureID.isEmpty else { return }
+            receive(featureID)
         }
         return true
     }
