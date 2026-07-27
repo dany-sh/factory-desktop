@@ -20,7 +20,7 @@ struct FactoryDesktopApp: App {
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 1200, height: 800)
-        .windowResizability(.contentMinSize)
+        .windowResizability(.automatic)
 
         WindowGroup("Markdown", id: "markdown-document", for: String.self) { documentPathBinding in
             if let documentPath = documentPathBinding.wrappedValue {

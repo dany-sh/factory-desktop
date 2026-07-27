@@ -11,20 +11,23 @@ struct ConveyorBoardView: View {
     @SceneStorage("conveyor.board.show-done") private var showDone = false
 
     var body: some View {
-        NavigationSplitView(columnVisibility: sidebarVisibilityBinding) {
-            ConveyorProjectSidebar(store: store)
-                .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 300)
-        } detail: {
-            board
-                .navigationSplitViewColumnWidth(min: 420, ideal: 820)
+        HSplitView {
+            NavigationSplitView(columnVisibility: sidebarVisibilityBinding) {
+                ConveyorProjectSidebar(store: store)
+                    .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 300)
+            } detail: {
+                board
+                    .navigationSplitViewColumnWidth(min: 420, ideal: 820)
+            }
+
+            if store.isInspectorVisible, store.selectedFeature != nil {
+                ConveyorFeatureInspector(store: store)
+                    .frame(minWidth: 260, idealWidth: 320, maxWidth: 420, maxHeight: .infinity)
+            }
         }
         .navigationTitle(store.selectedProject.name)
         .searchable(text: $store.searchText, prompt: "Search features")
         .toolbar { toolbar }
-        .inspector(isPresented: inspectorBinding) {
-            ConveyorFeatureInspector(store: store)
-                .inspectorColumnWidth(min: 260, ideal: 320, max: 420)
-        }
         .task { await store.refresh() }
         .onAppear {
             if store.selectedFeatureID == nil { inspectorVisible = false }
@@ -67,13 +70,6 @@ struct ConveyorBoardView: View {
         Binding(
             get: { sidebarVisible ? .all : .detailOnly },
             set: { sidebarVisible = $0 != .detailOnly }
-        )
-    }
-
-    private var inspectorBinding: Binding<Bool> {
-        Binding(
-            get: { store.isInspectorVisible && store.selectedFeature != nil },
-            set: { store.isInspectorVisible = $0 }
         )
     }
 
