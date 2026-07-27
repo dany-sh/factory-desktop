@@ -12,7 +12,7 @@ public final class ConveyorBoardStore: ObservableObject {
     @Published public var priorityFilter: ConveyorPriority?
     @Published public var statusFilter: ConveyorColumn?
     @Published public var isSidebarVisible = true
-    @Published public var isInspectorVisible = true
+    @Published public var isInspectorVisible = false
     @Published public var isLoading = false
     @Published public var mutationInFlight = false
     @Published public var errorMessage: String?
@@ -81,6 +81,7 @@ public final class ConveyorBoardStore: ObservableObject {
             queues[selectedProjectID] = updated
             if let selectedFeatureID, !updated.features.contains(where: { $0.id == selectedFeatureID }) {
                 self.selectedFeatureID = nil
+                self.isInspectorVisible = false
             }
             errorMessage = nil
             statusMessage = "Refreshed \(selectedProject.name)."
@@ -92,6 +93,7 @@ public final class ConveyorBoardStore: ObservableObject {
     public func selectProject(_ projectID: String) async {
         selectedProjectID = projectID
         selectedFeatureID = nil
+        isInspectorVisible = false
         await refresh()
     }
 

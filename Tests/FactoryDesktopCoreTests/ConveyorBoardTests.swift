@@ -93,6 +93,7 @@ final class ConveyorBoardTests: XCTestCase {
     func testScopeAndMilestoneChangesRefreshAndClearAFilteredSelection() async {
         let executor = FixtureConveyorExecutor()
         let store = ConveyorBoardStore(client: ConveyorProcessClient(executor: executor))
+        XCTAssertFalse(store.isInspectorVisible)
         await store.refresh()
         store.selectFeature("F001")
 
@@ -100,8 +101,10 @@ final class ConveyorBoardTests: XCTestCase {
         XCTAssertEqual(store.queue?.scope, .all)
         XCTAssertEqual(store.selectedFeatureID, "F001")
 
+        store.isInspectorVisible = true
         await store.setMilestoneFilter("M1")
         XCTAssertNil(store.selectedFeatureID)
+        XCTAssertFalse(store.isInspectorVisible)
         let commands = await executor.recordedArguments()
         XCTAssertTrue(commands.contains(["queue", "--project", "interview-companion", "--scope", "all", "--milestone", "M1", "--json"]))
     }

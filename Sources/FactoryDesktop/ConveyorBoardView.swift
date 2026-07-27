@@ -7,7 +7,7 @@ struct ConveyorBoardView: View {
     @ObservedObject var store: ConveyorBoardStore
     @State private var pendingExecution: PendingExecution?
     @SceneStorage("conveyor.board.sidebar-visible") private var sidebarVisible = true
-    @SceneStorage("conveyor.board.inspector-visible") private var inspectorVisible = true
+    @SceneStorage("conveyor.board.inspector-visible") private var inspectorVisible = false
     @SceneStorage("conveyor.board.show-done") private var showDone = false
 
     var body: some View {
@@ -27,6 +27,7 @@ struct ConveyorBoardView: View {
         }
         .task { await store.refresh() }
         .onAppear {
+            if store.selectedFeatureID == nil { inspectorVisible = false }
             store.isSidebarVisible = sidebarVisible
             store.isInspectorVisible = inspectorVisible
         }
@@ -71,7 +72,7 @@ struct ConveyorBoardView: View {
 
     private var inspectorBinding: Binding<Bool> {
         Binding(
-            get: { inspectorVisible },
+            get: { inspectorVisible && store.selectedFeature != nil },
             set: { inspectorVisible = $0 }
         )
     }
@@ -176,6 +177,7 @@ struct ConveyorBoardView: View {
             }
             .keyboardShortcut("i", modifiers: [.command, .option])
             .help("Show or hide the feature inspector")
+            .disabled(store.selectedFeature == nil)
         }
 
         ToolbarItem(placement: .secondaryAction) {
@@ -388,8 +390,8 @@ private struct ConveyorKanbanColumn: View {
                 }
             }
         }
-        .frame(minWidth: 220, idealWidth: 252, maxWidth: 300, minHeight: 500, idealHeight: 620, maxHeight: .infinity, alignment: .top)
-        .padding(12)
+        .frame(minWidth: 196, idealWidth: 220, maxWidth: 280, minHeight: 500, idealHeight: 620, maxHeight: .infinity, alignment: .top)
+        .padding(8)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(column.rawValue) column")
     }
