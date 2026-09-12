@@ -2,11 +2,22 @@
 
 Factory Desktop is a local-first macOS SwiftUI app for managing projects, tasks, worktrees, local Ollama planning runs, Codex handoffs, and review logs across local repositories.
 
+> **Showcase status:** This project was parked on September 12, 2026. It is preserved as a read-only portfolio artifact and is not under active development or offered as a supported production tool. See [`docs/SHOWCASE_STATUS.md`](docs/SHOWCASE_STATUS.md).
+
 This v0.1 intentionally does **not** perform autonomous file editing. Factory owns state, run logs, handoffs, and safe command execution; humans approve implementation and commits.
 
-## Product direction documentation
+## Showcase highlights
 
-The current implementation remains the coding-orchestration application described below. The authoritative inventory, architecture baseline, and phased roadmap for the proposed native macOS legal case workspace are indexed in [`docs/README.md`](docs/README.md). Legal capabilities are proposals unless the feature inventory explicitly marks them implemented.
+- Native macOS interface built with SwiftUI and Swift Package Manager
+- Local-first SQLite persistence with automatic migrations and snapshots
+- Explicit review gates around planning, implementation, commits, and cleanup
+- Git branch and worktree lifecycle inspection with fail-closed cleanup decisions
+- Runner-neutral task, session, execution, evidence, and notification models
+- 196 passing tests in the final archived checkout
+
+## Historical product direction documentation
+
+The final implementation remains the coding-orchestration application described below. A later, unimplemented product exploration for a native macOS legal case workspace is indexed in [`docs/README.md`](docs/README.md). Legal capabilities are proposals unless the feature inventory explicitly marks them implemented; the roadmap is retained as design-process evidence, not as an active commitment.
 
 ## v0.1 Features
 
@@ -53,7 +64,7 @@ This repo is intended to publish to:
 https://github.com/dany-sh/factory-desktop.git
 ```
 
-## First Self-Use Flow
+## Historical Self-Use Flow
 
 1. Launch Factory Desktop.
 2. Click **Register This App**.
